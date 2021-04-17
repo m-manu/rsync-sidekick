@@ -14,7 +14,7 @@ const (
 	thresholdFileSize = 8 * bytesutil.KIBI
 )
 
-// GetDigest generates a entity.FileDigest of the file provided. The digest is generated in an extemely faster manner
+// GetDigest generates entity.FileDigest of the file provided in an extremely fast manner
 // without compromising the quality of uniqueness
 func GetDigest(path string) (entity.FileDigest, error) {
 	info, statErr := os.Lstat(path)

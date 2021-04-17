@@ -5,18 +5,62 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/m-manu/rsync-sidekick.svg)](https://pkg.go.dev/github.com/m-manu/rsync-sidekick)
 [![License](https://img.shields.io/badge/License-Apache%202-blue.svg)](./LICENSE.txt)
 
+## Introduction
+
 `rsync` is a fantastic tool. Yet, by itself, it's a pain to use for repeated backing up of media files (videos, music,
 photos, etc.) _that are reorganized frequently_.
 
-`rsync-sidekick` is a simple tool that is designed to be run **before** `rsync` is run. This propagates following
+`rsync-sidekick` is a light-weight tool that is designed to run **before** `rsync` is run. This propagates following
 changes from _source directory_ to _destination directory_ (or any combination of below):
 
-1. Changes to file modified timestamp
-2. Rename of a file
+1. Change in file modification timestamp
+2. Rename of file/directory
 3. Moving a file from one directory to another
 
-Using `rsync-sidekick` before `rsrync` makes the backup process significantly faster than using only `rsync` (sometimes
-even 100x faster if the only changes at source directory are above 3)
+Note that, this tool
+
+* does *not* do any actual file transfer
+* does *not* delete anything
+
+## How to install?
+
+1. Install Go **1.16**
+    * On Ubuntu: `snap install go`
+    * On Mac: `brew install go`
+    * For anything else: [Go downloads page](https://golang.org/dl/)
+2. Run command:
+   ```bash
+   go get github.com/m-manu/rsync-sidekick
+   ```
+
+## How to use?
+
+### Step 1
+
+Run this tool:
+
+```bash
+rsync-sidekick /Users/manu/Photos/ /Volumes/Portable/Photos/
+```
+
+Use `rsync-sidekick -help` to see additional command line options.
+
+### Step 2
+
+Run `rsync` as you would do normally:
+
+```bash
+rsync -av /Users/manu/Photos/ /Volumes/Portable/Photos/ 
+```
+
+## FAQs
+
+### Why was this tool created?
 
 `rsync` options such as `--detect-renamed`, `--detect-renamed-lax`, `--detect-moved` and `--fuzzy` don't work reliably
-and sometimes are dangerous! `rsync-sidekick` is reliable alternative to all these options and much more. 
+and sometimes are dangerous! `rsync-sidekick` is reliable alternative to all these options and much more.
+
+### How will I benefit from using this tool?
+
+Using `rsync-sidekick` before `rsrync` makes your backup process significantly faster than using only `rsync` (sometimes
+even 100x faster if the only changes at _source directory_ are the 3 types mentioned earlier in this article)
