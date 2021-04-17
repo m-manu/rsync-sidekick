@@ -2,6 +2,8 @@ package bytesutil
 
 import "fmt"
 
+// Constants for byte sizes in decimal and binary formats
+// See: https://en.m.wikipedia.org/wiki/Byte#Multiple-byte_units
 const (
 	KILO int64 = 1000        // 1000 power 1 (10 power 3)
 	KIBI int64 = 1024        // 1024 power 1 (2 power 10)
@@ -17,6 +19,7 @@ const (
 	EXBI       = PEBI * KIBI // 1024 power 6 (2 power 60)
 )
 
+// BinaryFormat formats a byte size to a human readable string in binary format
 func BinaryFormat(size int64) string {
 	if size < 0 {
 		return ""
@@ -37,6 +40,7 @@ func BinaryFormat(size int64) string {
 	}
 }
 
+// DecimalFormat formats a byte size to a human readable string in decimal format
 func DecimalFormat(size int64) string {
 	if size < 0 {
 		return ""

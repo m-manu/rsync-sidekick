@@ -2,6 +2,7 @@ package entity
 
 import "fmt"
 
+// FileExtAndSize is a struct of file extension and file size
 type FileExtAndSize struct {
 	FileExtension string
 	FileSize      int64

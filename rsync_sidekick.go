@@ -54,7 +54,7 @@ func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destina
 		destinationDirPath, destinationFiles, candidatesAtDestination)
 	end = time.Now()
 	if syncErr != nil {
-		return fmt.Errorf("error while computing sync actions: %+v\n", syncErr)
+		return fmt.Errorf("error while computing sync actions: %+v", syncErr)
 	}
 	fmte.Printf("Completed in %.1fs\n", end.Sub(start).Seconds())
 	if len(actions) == 0 {

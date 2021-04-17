@@ -11,6 +11,8 @@ import (
 
 const numFilesGuess = 10_000
 
+// FindFilesFromDirectories finds all regular files in a given directory
+// (Very similar to `find` command on unix-like operating systems)
 func FindFilesFromDirectories(dirPath string, excludedFiles map[string]struct{}) (
 	files map[string]entity.FileMeta,
 	totalSizeOfFiles int64,
@@ -24,9 +26,8 @@ func FindFilesFromDirectories(dirPath string, excludedFiles map[string]struct{})
 		if _, exists := excludedFiles[d.Name()]; exists {
 			if d.IsDir() {
 				return filepath.SkipDir
-			} else {
-				return nil
 			}
+			return nil
 		}
 		if strings.HasPrefix(d.Name(), "._") {
 			return nil

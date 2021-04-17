@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// FileMeta is a combination of file size and its modification timestamp
 type FileMeta struct {
 	Size              int64
 	ModifiedTimestamp int64

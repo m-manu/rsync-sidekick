@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 )
 
+// PropagateTimestampAction is a SyncAction for propagating 'file modification timestamp' from one file to another
 type PropagateTimestampAction struct {
 	SourceBaseDirPath           string
 	DestinationBaseDirPath      string
@@ -21,10 +22,12 @@ func (a PropagateTimestampAction) destinationPath() string {
 	return filepath.Join(a.DestinationBaseDirPath, a.DestinationFileRelativePath)
 }
 
+// UnixCommand for propagating 'file modification timestamp'
 func (a PropagateTimestampAction) UnixCommand() string {
 	return fmt.Sprintf(`touch -r "%s" "%s"`, escape(a.sourcePath()), escape(a.destinationPath()))
 }
 
+// Perform the 'file modification timestamp' propagation action
 func (a PropagateTimestampAction) Perform() error {
 	fileInfo, err := os.Lstat(a.sourcePath())
 	if err != nil {
@@ -34,6 +37,7 @@ func (a PropagateTimestampAction) Perform() error {
 	return os.Chtimes(a.destinationPath(), modTime, modTime)
 }
 
+// Uniqueness generate unique string for 'file modification timestamp' propagation action
 func (a PropagateTimestampAction) Uniqueness() string {
 	return "touch\u0001" + a.DestinationFileRelativePath
 }

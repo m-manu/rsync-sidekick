@@ -48,6 +48,8 @@ func buildIndex(baseDirPath string, filesToScan []string) (
 	return filesToDigests, digestsToFiles, nil
 }
 
+// ComputeSyncActions identifies the diff between source and destination directories that
+// do not require actual file transfer. This is the core function of this tool.
 func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.FileMeta, orphansAtSource []string,
 	destinationDirPath string, destinationFiles map[string]entity.FileMeta, candidatesAtDestination []string,
 ) ([]action.SyncAction, int64, error) {

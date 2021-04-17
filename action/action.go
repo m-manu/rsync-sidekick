@@ -2,6 +2,7 @@ package action
 
 import "strings"
 
+// SyncAction is implemented by any action that propagates action at source to action at destination
 type SyncAction interface {
 	// sourcePath is path at source
 	sourcePath() string

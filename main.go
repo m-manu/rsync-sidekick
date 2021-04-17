@@ -12,6 +12,7 @@ import (
 	"strings"
 )
 
+// Constants indicating return codes of this tool, when run from command line
 const (
 	ExitCodeMissingArguments = 1
 	ExitCodeSourceDirError

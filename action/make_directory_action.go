@@ -5,6 +5,7 @@ import (
 	"os"
 )
 
+// MakeDirectoryAction is a SyncAction for creating a directory
 type MakeDirectoryAction struct {
 	AbsoluteDirPath string
 }
@@ -17,14 +18,17 @@ func (a MakeDirectoryAction) destinationPath() string {
 	return a.AbsoluteDirPath
 }
 
+// UnixCommand for creating a directory
 func (a MakeDirectoryAction) UnixCommand() string {
 	return fmt.Sprintf(`mkdir -p -v "%s"`, escape(a.destinationPath()))
 }
 
+// Perform the 'create directory' action
 func (a MakeDirectoryAction) Perform() error {
 	return os.MkdirAll(a.destinationPath(), os.ModeDir|os.ModePerm)
 }
 
+// Uniqueness generates unique string for directory creation
 func (a MakeDirectoryAction) Uniqueness() string {
 	return "Mkdir\u0001" + a.AbsoluteDirPath
 }
