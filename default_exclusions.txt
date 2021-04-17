@@ -1,0 +1,12 @@
+$RECYCLE.BIN
+desktop.ini
+Thumbs.db
+.picasaoriginals
+.picasa.ini
+.Trashes
+.TemporaryItems
+.Spotlight-V100
+.DS_Store
+.fseventsd
+_PAlbTN
+System Volume Information

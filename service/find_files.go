@@ -1,0 +1,53 @@
+package service
+
+import (
+	"fmt"
+	"github.com/m-manu/rsync-sidekick/entity"
+	"github.com/m-manu/rsync-sidekick/fmte"
+	"io/fs"
+	"path/filepath"
+	"strings"
+)
+
+const numFilesGuess = 10_000
+
+func FindFilesFromDirectories(dirPath string, excludedFiles map[string]struct{}) (
+	files map[string]entity.FileMeta,
+	totalSizeOfFiles int64,
+	findFilesErr error,
+) {
+	allFiles := make(map[string]entity.FileMeta, numFilesGuess)
+	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			fmte.PrintfErr("skipping \"%s\": %+v\n", path, err)
+		}
+		if _, exists := excludedFiles[d.Name()]; exists {
+			if d.IsDir() {
+				return filepath.SkipDir
+			} else {
+				return nil
+			}
+		}
+		if strings.HasPrefix(d.Name(), "._") {
+			return nil
+		}
+		if d.Type().IsRegular() {
+			info, infoErr := d.Info()
+			if infoErr != nil {
+				fmte.PrintfErr("couldn't get metadata of \"%s\": %+v\n", path, infoErr)
+				return nil
+			}
+			relativePath := strings.Replace(path, dirPath, "", 1)
+			allFiles[relativePath] = entity.FileMeta{
+				Size:              info.Size(),
+				ModifiedTimestamp: info.ModTime().Unix(),
+			}
+			totalSizeOfFiles += info.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		return map[string]entity.FileMeta{}, 0, fmt.Errorf("couldn't scan directory %s: %v", dirPath, err)
+	}
+	return allFiles, totalSizeOfFiles, nil
+}
