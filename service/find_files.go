@@ -23,12 +23,14 @@ func FindFilesFromDirectories(dirPath string, excludedFiles map[string]struct{})
 		if err != nil {
 			fmte.PrintfErr("skipping \"%s\": %+v\n", path, err)
 		}
+		// If the file/directory is in excluded files list, ignore it
 		if _, exists := excludedFiles[d.Name()]; exists {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
+		// Ignore dot files (Mac)
 		if strings.HasPrefix(d.Name(), "._") {
 			return nil
 		}

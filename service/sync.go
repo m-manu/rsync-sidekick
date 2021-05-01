@@ -7,10 +7,14 @@ import (
 	"github.com/m-manu/rsync-sidekick/filesutil"
 	"github.com/m-manu/rsync-sidekick/fmte"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 )
 
 const (
 	indexBuildErrorCountTolerance = 20
+	parallelismForSource          = 6
+	parallelismForDestination     = 6
 )
 
 // FindOrphans finds files at source that do not have corresponding files at destination.
@@ -26,13 +30,12 @@ func FindOrphans(sourceFiles, destinationFiles map[string]entity.FileMeta) []str
 	return orphansAtSource
 }
 
-func buildIndex(baseDirPath string, filesToScan []string) (
-	map[string]entity.FileDigest, map[entity.FileDigest][]string, error,
-) {
-	filesToDigests := make(map[string]entity.FileDigest, len(filesToScan))
-	digestsToFiles := make(map[entity.FileDigest][]string, len(filesToScan))
+func buildIndex(baseDirPath string, filesToScan []string, counter *int32,
+	filesToDigests *entity.StringFileDigestMap, digestsToFiles *entity.FileDigestStringMultiMap,
+) error {
 	errCount := 0
 	for _, relativePath := range filesToScan {
+		atomic.AddInt32(counter, 1)
 		path := filepath.Join(baseDirPath, relativePath)
 		digest, err := GetDigest(path)
 		if err != nil {
@@ -40,40 +43,74 @@ func buildIndex(baseDirPath string, filesToScan []string) (
 			fmte.PrintfErr("couldn't index file \"%s\" (skipping): %+v\n", path, err)
 		}
 		if errCount > indexBuildErrorCountTolerance {
-			return nil, nil, fmt.Errorf("too many errors while building index")
+			return fmt.Errorf("too many errors while building index")
 		}
-		filesToDigests[relativePath] = digest
-		digestsToFiles[digest] = append(digestsToFiles[digest], relativePath)
+		filesToDigests.Set(relativePath, digest)
+		digestsToFiles.Set(digest, relativePath)
 	}
-	return filesToDigests, digestsToFiles, nil
+	return nil
 }
 
 // ComputeSyncActions identifies the diff between source and destination directories that
 // do not require actual file transfer. This is the core function of this tool.
 func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.FileMeta, orphansAtSource []string,
 	destinationDirPath string, destinationFiles map[string]entity.FileMeta, candidatesAtDestination []string,
-) ([]action.SyncAction, int64, error) {
-	var savings int64
-	orphanFilesToDigests, orphanDigestsToFiles, sourceIndexErr := buildIndex(sourceDirPath, orphansAtSource)
-	if sourceIndexErr != nil {
-		return nil, 0, fmt.Errorf("error while building index on source directory: %v", sourceIndexErr)
+	sourceCounter *int32, destinationCounter *int32,
+) (actions []action.SyncAction, savings int64, err error) {
+	orphanFilesToDigests := entity.NewStringFileDigestMap()
+	candidateFilesToDigests := entity.NewStringFileDigestMap()
+	orphanDigestsToFiles := entity.NewFileDigestStringMultiMap()
+	candidateDigestsToFiles := entity.NewFileDigestStringMultiMap()
+	var sourceIndexErrs, destinationIndexErrs []error
+	var wg sync.WaitGroup
+	wg.Add(parallelismForSource + parallelismForDestination)
+	for i := 0; i < parallelismForSource; i++ {
+		go func(index int) {
+			defer wg.Done()
+			low := index * len(orphansAtSource) / parallelismForSource
+			high := (index + 1) * len(orphansAtSource) / parallelismForSource
+			sourceIndexErr := buildIndex(sourceDirPath, orphansAtSource[low:high], sourceCounter,
+				orphanFilesToDigests, orphanDigestsToFiles,
+			)
+			if sourceIndexErr != nil {
+				sourceIndexErrs = append(sourceIndexErrs, sourceIndexErr)
+			}
+		}(i)
 	}
-	_, candidateDigestsToFiles, destinationIndexErr := buildIndex(destinationDirPath, candidatesAtDestination)
-	if destinationIndexErr != nil {
-		return nil, 0, fmt.Errorf("error while building index on destination directory: %v", destinationIndexErr)
+	for i := 0; i < parallelismForDestination; i++ {
+		go func(index int) {
+			defer wg.Done()
+			low := index * len(candidatesAtDestination) / parallelismForDestination
+			high := (index + 1) * len(candidatesAtDestination) / parallelismForDestination
+			destinationIndexErr := buildIndex(destinationDirPath, candidatesAtDestination[low:high], destinationCounter,
+				candidateFilesToDigests, candidateDigestsToFiles,
+			)
+			if destinationIndexErr != nil {
+				destinationIndexErrs = append(destinationIndexErrs, destinationIndexErr)
+			}
+		}(i)
 	}
-	actions := make([]action.SyncAction, 0, len(orphanFilesToDigests))
-	uniquenessMap := make(map[string]struct{}, len(orphanFilesToDigests))
-	for orphanAtSource, orphanDigest := range orphanFilesToDigests {
-		if len(orphanDigestsToFiles[orphanDigest]) > 1 {
+	wg.Wait()
+	if len(sourceIndexErrs) > 0 {
+		return nil, 0, fmte.Errors("error(s) while building index on source directory: ",
+			sourceIndexErrs)
+	}
+	if len(destinationIndexErrs) > 0 {
+		return nil, 0, fmte.Errors("error(s) while building index on destination directory: ",
+			destinationIndexErrs)
+	}
+	actions = make([]action.SyncAction, 0, orphanFilesToDigests.Len())
+	uniquenessMap := make(map[string]struct{}, orphanFilesToDigests.Len())
+	for orphanAtSource, orphanDigest := range orphanFilesToDigests.Map() {
+		if len(orphanDigestsToFiles.Get(orphanDigest)) > 1 {
 			// many orphans at source have the same digest
 			continue
 		}
-		matchesAtDestination, existsAtDestination := candidateDigestsToFiles[orphanDigest]
-		if !existsAtDestination {
+		if !candidateDigestsToFiles.Exists(orphanDigest) {
 			// let rsync handle this
 			continue
 		}
+		matchesAtDestination := candidateDigestsToFiles.Get(orphanDigest)
 		var candidateAtDestination string
 		if len(matchesAtDestination) == 1 {
 			candidateAtDestination = matchesAtDestination[0]
@@ -127,5 +164,5 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 
 		}
 	}
-	return actions, savings, nil
+	return
 }

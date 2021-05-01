@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"time"
 )
 
 // Constants indicating return codes of this tool, when run from command line
@@ -46,7 +47,7 @@ func lineSeparatedStrToMap(lineSeparatedString string) map[string]struct{} {
 func handlePanic() {
 	err := recover()
 	if err != nil {
-		fmt.Printf("Program exited unexpectedly due to an unknown error.\n"+
+		_, _ = fmt.Fprintf(os.Stderr, "Program exited unexpectedly due to an unknown error.\n"+
 			"Please report the below eror to the author:\n"+
 			"error message: %+v\n", err)
 		_, _ = fmt.Fprintln(os.Stderr, string(debug.Stack()))
@@ -68,10 +69,18 @@ flags: (all optional)
 `
 	exclusionsFlag = "exclusions"
 	scriptGenFlag  = "shellscript"
+	extraInfoFlag  = "extrainfo"
 )
 
 //go:embed default_exclusions.txt
 var defaultExclusions string
+
+// RunID is a unique id for a run of this tool
+var RunID string
+
+func init() {
+	RunID = time.Now().Format("150405")
+}
 
 func main() {
 	defer handlePanic()
@@ -83,6 +92,9 @@ func main() {
 	scriptGenFlagPtr := flag.Bool(scriptGenFlag, false,
 		"instead of applying changes directly, generate a shell script"+
 			" (this flag is useful if you want run the shell script as a different user)",
+	)
+	extraInfoFlagPtr := flag.Bool(extraInfoFlag, false,
+		"generate extra information (caution: makes it slow!)",
 	)
 	flag.Usage = func() {
 		fmte.PrintfErr(usageString, getExecutable())
@@ -96,6 +108,7 @@ func main() {
 	}
 	exclusionsPath := *exclusionsPathFlagPtr
 	scriptGen := *scriptGenFlagPtr
+	extraInfo := *extraInfoFlagPtr
 	var exclusions map[string]struct{}
 	var eErr error
 	if exclusionsPath == "" {
@@ -119,7 +132,7 @@ func main() {
 			flag.Arg(1))
 		os.Exit(ExitCodeDestinationDirError)
 	}
-	syncErr := rsyncSidekick(sourceDirPath, exclusions, destinationDirPath, scriptGen)
+	syncErr := rsyncSidekick(sourceDirPath, exclusions, destinationDirPath, scriptGen, extraInfo)
 	if syncErr != nil {
 		fmte.PrintfErr("error while syncing: %+v\n", syncErr)
 		os.Exit(ExitCodeSyncError)

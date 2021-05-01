@@ -1,9 +1,12 @@
+// Package bytesutil helps you convert byte sizes (such as  file size, data uploaded/downloaded etc.) to
+// human-readable strings. This allows conversion to decimal and binary formats.
+//
+// See: https://en.m.wikipedia.org/wiki/Byte#Multiple-byte_units
 package bytesutil
 
 import "fmt"
 
 // Constants for byte sizes in decimal and binary formats
-// See: https://en.m.wikipedia.org/wiki/Byte#Multiple-byte_units
 const (
 	KILO int64 = 1000        // 1000 power 1 (10 power 3)
 	KIBI int64 = 1024        // 1024 power 1 (2 power 10)
@@ -19,7 +22,13 @@ const (
 	EXBI       = PEBI * KIBI // 1024 power 6 (2 power 60)
 )
 
-// BinaryFormat formats a byte size to a human readable string in binary format
+// BinaryFormat formats a byte size to a human readable string in binary format.
+// Uses binary prefixes. See: https://en.m.wikipedia.org/wiki/Binary_prefix
+//
+// For example,
+//		fmt.Println(bytesutil.BinaryFormat(2140))
+// prints
+//		2.09 KiB
 func BinaryFormat(size int64) string {
 	if size < 0 {
 		return ""
@@ -40,7 +49,13 @@ func BinaryFormat(size int64) string {
 	}
 }
 
-// DecimalFormat formats a byte size to a human readable string in decimal format
+// DecimalFormat formats a byte size to a human readable string in decimal format.
+// Uses metric prefixes. See: https://en.m.wikipedia.org/wiki/Metric_prefix
+//
+// For example,
+//		fmt.Println(bytesutil.DecimalFormat(2140))
+// prints
+//		2.14KB
 func DecimalFormat(size int64) string {
 	if size < 0 {
 		return ""

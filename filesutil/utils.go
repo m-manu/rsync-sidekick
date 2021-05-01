@@ -1,6 +1,7 @@
 package filesutil
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,4 +20,10 @@ func IsReadableDirectory(path string) bool {
 func GetFileExt(path string) string {
 	ext := filepath.Ext(path)
 	return strings.ToLower(ext)
+}
+
+// WriteSliceToFile writes a slice to a file
+func WriteSliceToFile(slice []string, fileName string) {
+	sliceAsString := strings.Join(slice, "\n")
+	_ = os.WriteFile(fileName, []byte(sliceAsString), fs.ModePerm)
 }

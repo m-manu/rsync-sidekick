@@ -2,56 +2,94 @@ package main
 
 import (
 	"fmt"
+	"github.com/m-manu/rsync-sidekick/action"
 	"github.com/m-manu/rsync-sidekick/bytesutil"
 	"github.com/m-manu/rsync-sidekick/entity"
 	"github.com/m-manu/rsync-sidekick/filesutil"
 	"github.com/m-manu/rsync-sidekick/fmte"
 	"github.com/m-manu/rsync-sidekick/service"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
-func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destinationDirPath string, scriptGen bool) error {
+const unixCommandLengthGuess = 200
+
+func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destinationDirPath string,
+	scriptGen bool, extraInfo bool) error {
 	var start, end time.Time
-	fmte.Printf("Scanning source directory \"%s\"...\n", sourceDirPath)
+	fmte.Printf("Scanning source (%s) and destination (%s) directories...\n", sourceDirPath, destinationDirPath)
 	start = time.Now()
-	sourceFiles, sourceSize, sourceFilesErr := service.FindFilesFromDirectories(sourceDirPath, exclusions)
+	var sourceFiles, destinationFiles map[string]entity.FileMeta
+	var sourceSize, destinationSize int64
+	var sourceFilesErr, destinationFilesErr error
+	var wgDirScan sync.WaitGroup
+	wgDirScan.Add(2)
+	go func() {
+		defer wgDirScan.Done()
+		sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectories(sourceDirPath, exclusions)
+	}()
+	go func() {
+		defer wgDirScan.Done()
+		destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectories(destinationDirPath, exclusions)
+	}()
+	wgDirScan.Wait()
 	end = time.Now()
 	if sourceFilesErr != nil {
 		return fmt.Errorf("error scanning source directory: %+v", sourceFilesErr)
 	}
-	fmte.Printf("Found %d files (total size %s) in %.1fs\n",
-		len(sourceFiles), bytesutil.BinaryFormat(sourceSize), end.Sub(start).Seconds())
-	fmte.Printf("Scanning destination directory \"%s\"...\n", destinationDirPath)
-	start = time.Now()
-	destinationFiles, destinationSize, destinationFilesErr := service.FindFilesFromDirectories(destinationDirPath, exclusions)
-	end = time.Now()
 	if destinationFilesErr != nil {
 		return fmt.Errorf("error scanning destination directory: %+v", destinationFilesErr)
 	}
-	fmte.Printf("Found %d files (total size %s) in %.1fs\n",
-		len(destinationFiles), bytesutil.BinaryFormat(destinationSize), end.Sub(start).Seconds())
+	fmte.Printf("Found %d files (total size %s) at source and %d files (total size %s) at destination in %.1fs\n",
+		len(sourceFiles), bytesutil.BinaryFormat(sourceSize), len(destinationFiles),
+		bytesutil.BinaryFormat(destinationSize), end.Sub(start).Seconds())
 	fmte.Printf("Finding files at source that don't have counterparts at destination...\n")
-	start = time.Now()
 	orphansAtSource := service.FindOrphans(sourceFiles, destinationFiles)
-	end = time.Now()
 	if len(orphansAtSource) == 0 {
 		fmte.Printf("All files at source directory have counterparts. So, no action needed 🙂!\n")
 		return nil
 	}
-	fmte.Printf("Found %d files in %.1fs.\n", len(orphansAtSource), end.Sub(start).Seconds())
+	sort.Strings(orphansAtSource)
+	fmte.Printf("Found %d files\n", len(orphansAtSource))
+	if extraInfo {
+		filesutil.WriteSliceToFile(orphansAtSource, fmt.Sprintf("./info_%s_orphans_at_source.txt", RunID))
+	}
 	fmte.Printf("Finding candidates at destination...\n")
 	candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, orphansAtSource)
 	if len(candidatesAtDestination) == 0 {
 		fmte.Printf("No candidates found. Looks like all %d files are new. rsync will do the rest.\n", len(orphansAtSource))
 		return nil
 	}
+	sort.Strings(candidatesAtDestination)
+	if extraInfo {
+		filesutil.WriteSliceToFile(candidatesAtDestination,
+			fmt.Sprintf("./info_%s_candidates_at_destination.txt", RunID),
+		)
+	}
 	fmte.Printf("Found %d candidates.\n", len(candidatesAtDestination))
-	fmte.Printf("Computing sync actions...\n")
+	fmte.Printf("Identifying file renames/movements and timestamp changes...\n")
 	start = time.Now()
-	actions, savings, syncErr := service.ComputeSyncActions(sourceDirPath, sourceFiles, orphansAtSource,
-		destinationDirPath, destinationFiles, candidatesAtDestination)
+	var actions []action.SyncAction
+	var savings int64
+	var syncErr error
+	var sourceCounter, destinationCounter int32
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		actions, savings, syncErr = service.ComputeSyncActions(sourceDirPath, sourceFiles, orphansAtSource,
+			destinationDirPath, destinationFiles, candidatesAtDestination, &sourceCounter, &destinationCounter)
+	}()
+	go func() {
+		defer wg.Done()
+		reportProgress(&sourceCounter, int32(len(orphansAtSource)),
+			&destinationCounter, int32(len(candidatesAtDestination)),
+		)
+	}()
+	wg.Wait()
 	end = time.Now()
 	if syncErr != nil {
 		return fmt.Errorf("error while computing sync actions: %+v", syncErr)
@@ -66,7 +104,7 @@ func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destina
 	if len(actions) == 0 {
 		return nil
 	}
-	shellScriptFileName := fmte.Sprintf("sync_actions_%s.sh", time.Now().Format("150405"))
+	shellScriptFileName := fmt.Sprintf("sync_actions_%s.sh", RunID)
 	if scriptGen {
 		fmte.Printf("Writing sync actions to shell script \"%s\"...\n", shellScriptFileName)
 		shellScriptFile, shellScriptCreateErr := os.Create(shellScriptFileName)
@@ -75,9 +113,9 @@ func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destina
 		}
 		defer shellScriptFile.Close()
 		var sb strings.Builder
-		sb.Grow(150 * len(actions))
-		for _, action := range actions {
-			sb.WriteString(action.UnixCommand())
+		sb.Grow(unixCommandLengthGuess * len(actions))
+		for _, a := range actions {
+			sb.WriteString(a.UnixCommand())
 			sb.WriteString("\n")
 		}
 		shellScriptFile.WriteString(sb.String())
@@ -86,9 +124,9 @@ func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destina
 		fmte.Printf("Applying sync actions...\n")
 		successCount := 0
 		start = time.Now()
-		for i, action := range actions {
-			fmte.Printf("%4d/%d %s: ", i+1, len(actions), action)
-			aErr := action.Perform()
+		for i, a := range actions {
+			fmte.Printf("%4d/%d %s: ", i+1, len(actions), a)
+			aErr := a.Perform()
 			if aErr == nil {
 				fmte.Printf("done\n")
 				successCount++
@@ -103,8 +141,19 @@ func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destina
 	return nil
 }
 
+func reportProgress(sourceActual *int32, sourceExpected int32, destinationActual *int32, destinationExpected int32) {
+	var sourceProgress, destinationProgress float64
+	time.Sleep(100 * time.Millisecond)
+	for *sourceActual < sourceExpected || *destinationActual < destinationExpected {
+		time.Sleep(2 * time.Second)
+		sourceProgress = 100.0 * float64(*sourceActual) / float64(sourceExpected)
+		destinationProgress = 100.0 * float64(*destinationActual) / float64(destinationExpected)
+		fmte.Printf("%.0f%% done at source and %.0f%% done at destination\n", sourceProgress, destinationProgress)
+	}
+}
+
 func findCandidatesAtDestination(sourceFiles, destinationFiles map[string]entity.FileMeta, orphansAtSource []string) []string {
-	orphansFileExtAndSizeMap := map[entity.FileExtAndSize]struct{}{}
+	orphansFileExtAndSizeMap := make(map[entity.FileExtAndSize]struct{}, len(orphansAtSource))
 	for _, path := range orphansAtSource {
 		fileMeta := sourceFiles[path]
 		key := entity.FileExtAndSize{FileExtension: filesutil.GetFileExt(path), FileSize: fileMeta.Size}
