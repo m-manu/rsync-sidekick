@@ -1,0 +1,5 @@
+.git/
+.idea/
+info*.txt
+*.sh
+.gitignore

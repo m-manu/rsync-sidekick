@@ -50,7 +50,20 @@ Use `rsync-sidekick -help` to see additional command line options.
 Run `rsync` as you would do normally:
 
 ```bash
+# (note the trailing slashes -- without them, rsync's behavior is different)
 rsync -av /Users/manu/Photos/ /Volumes/Portable/Photos/ 
+```
+
+## Running this from a Docker container
+
+Below is a simple example:
+
+```shell
+# Run rsync-sidekick:
+docker run --rm -v /Users/manu:/mnt/homedir manumk/rsync-sidekick rsync-sidekick /mnt/homedir/Photos/ /mnt/homedir/Photos_backup/
+
+# Then run rsync: (note the trailing slashes -- without them, rsync's behavior is different)
+docker run --rm -v /Users/manu:/mnt/homedir manumk/rsync-sidekick rsync /mnt/homedir/Photos/ /mnt/homedir/Photos_backup/
 ```
 
 ## FAQs
