@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -144,9 +145,9 @@ func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destina
 func reportProgress(sourceActual *int32, sourceExpected int32, destinationActual *int32, destinationExpected int32) {
 	var sourceProgress, destinationProgress float64
 	time.Sleep(100 * time.Millisecond)
-	for *sourceActual < sourceExpected || *destinationActual < destinationExpected {
+	for atomic.LoadInt32(sourceActual) < sourceExpected || atomic.LoadInt32(destinationActual) < destinationExpected {
 		time.Sleep(2 * time.Second)
-		sourceProgress = 100.0 * float64(*sourceActual) / float64(sourceExpected)
+		sourceProgress = 100.0 * float64(atomic.LoadInt32(sourceActual)) / float64(sourceExpected)
 		destinationProgress = 100.0 * float64(*destinationActual) / float64(destinationExpected)
 		fmte.Printf("%.0f%% done at source and %.0f%% done at destination\n", sourceProgress, destinationProgress)
 	}
