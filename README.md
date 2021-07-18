@@ -10,17 +10,22 @@
 `rsync` is a fantastic tool. Yet, by itself, it's a pain to use for repeated backing up of media files (videos, music,
 photos, etc.) _that are reorganized frequently_.
 
-`rsync-sidekick` is a light-weight tool that is designed to run **before** `rsync` is run. This propagates following
-changes from _source directory_ to _destination directory_ (or any combination of below):
+`rsync-sidekick` is a safe and simple tool that is designed to run **before** `rsync` is run.
+
+This propagates following changes from _source directory_ to _destination directory_ (or any combination of below):
 
 1. Change in file modification timestamp
 2. Rename of file/directory
 3. Moving a file from one directory to another
 
-Note that, this tool
+Note:
 
-* does *not* do any actual file transfer
-* does *not* delete anything
+* This tool **does not delete** any files or folders (under any circumstances) -- that's why safe-to-use 😌
+  * Your files are just _moved around_
+  * Now, if you're uncomfortable with this tool even moving your files around, there is a `-shellscript` option, that just generates a script for you to read and run (think of it like a `--dry-run` option)
+* This tool **does not** actually **transfer** files -- that's for `rsync` to do 🙂
+* Since you'd run `rsync` after this tool is run, any changes that this tool couldn't propagate would just be propagated by `rsync`
+  *  So the most that you might lose is some time with `rsync` doing more work than it could have -- Which is likely still much less than not using this tool at all 😄
 
 ## How to install?
 
@@ -43,15 +48,30 @@ Run this tool:
 rsync-sidekick /Users/manu/Photos/ /Volumes/Portable/Photos/
 ```
 
-Use `rsync-sidekick -help` to see additional command line options.
-
 ### Step 2
 
-Run `rsync` as you would do normally:
+Run `rsync` as you would normally do:
 
 ```bash
 # (note the trailing slashes -- without them, rsync's behavior is different)
 rsync -av /Users/manu/Photos/ /Volumes/Portable/Photos/ 
+```
+
+## Command line options
+Running `rsync-sidekick -help` displays following information:
+```
+usage:
+	rsync-sidekick <flags> [source-dir] [destination-dir]
+where:
+	source-dir        Source directory
+	destination-dir   Destination directory
+flags: (all optional)
+  -exclusions string
+    	path to a text file that contains ignorable file/directory names separated by new lines (even without this flag, this tool ignores commonly ignorable names such as 'System Volume Information', 'Thumbs.db' etc.)
+  -extrainfo
+    	generate extra information (caution: makes it slow!)
+  -shellscript
+    	instead of applying changes directly, generate a shell script (this flag is useful if you want run the shell script as a different user)
 ```
 
 ## Running this from a Docker container
@@ -75,5 +95,5 @@ and sometimes are dangerous! `rsync-sidekick` is reliable alternative to all the
 
 ### How will I benefit from using this tool?
 
-Using `rsync-sidekick` before `rsrync` makes your backup process significantly faster than using only `rsync` (sometimes
-even 100x faster if the only changes at _source directory_ are the 3 types mentioned earlier in this article)
+Using `rsync-sidekick` before `rsrync` makes your backup process significantly faster than using only `rsync`. Sometimes 
+this performance benefit can even be 100x😲, if the only changes at your _source directory_ are the 3 types mentioned earlier in this article.
