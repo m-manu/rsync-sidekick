@@ -1,6 +1,6 @@
 # rsync-sidekick
 
-[![Build Status](https://www.travis-ci.com/m-manu/rsync-sidekick.svg?branch=main)](https://www.travis-ci.com/m-manu/rsync-sidekick)
+[![build-and-test](https://github.com/m-manu/rsync-sidekick/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/m-manu/rsync-sidekick/actions/workflows/build-and-test.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/m-manu/rsync-sidekick)](https://goreportcard.com/report/github.com/m-manu/rsync-sidekick)
 [![Go Reference](https://pkg.go.dev/badge/github.com/m-manu/rsync-sidekick.svg)](https://pkg.go.dev/github.com/m-manu/rsync-sidekick)
 [![License](https://img.shields.io/badge/License-Apache%202-blue.svg)](./LICENSE)
