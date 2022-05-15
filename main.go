@@ -4,137 +4,203 @@ import (
 	_ "embed"
 	"flag"
 	"fmt"
-	"github.com/m-manu/rsync-sidekick/filesutil"
+	"github.com/m-manu/rsync-sidekick/entity"
 	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/m-manu/rsync-sidekick/service"
+	"github.com/m-manu/rsync-sidekick/utils"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
-	"time"
 )
 
 // Constants indicating return codes of this tool, when run from command line
 const (
-	ExitCodeMissingArguments = iota + 1
-	ExitCodeSourceDirError
-	ExitCodeDestinationDirError
-	ExitCodeSyncError
-	ExitCodeExclusionFilesError
+	exitCodeSuccess = iota
+	exitCodeInvalidNumArgs
+	exitCodeSourceDirError
+	exitCodeDestinationDirError
+	exitCodeListFilesDirError
+	exitCodeSyncError
+	exitCodeExclusionFilesError
+	exitCodeInvalidExclusions
 )
 
-func readExclusions(excludesFilePath string) (map[string]struct{}, error) {
-	rawContents, err := os.ReadFile(excludesFilePath)
-	if err != nil {
-		return nil, err
-	}
-	contents := strings.ReplaceAll(string(rawContents), "\r\n", "\n") // Windows
-	return lineSeparatedStrToMap(contents), nil
+//go:embed default_exclusions.txt
+var defaultExclusionsStr string
+
+var flags struct {
+	isHelp            func() bool
+	getExcludedFiles  func() entity.StringSet
+	isShellScriptMode func() bool
+	getListFilesDir   func() string
+	isExtraInfoOn     func() bool
 }
 
-func lineSeparatedStrToMap(lineSeparatedString string) map[string]struct{} {
-	m := map[string]struct{}{}
-	for _, e := range strings.Split(lineSeparatedString, "\n") {
-		m[e] = struct{}{}
-	}
-	for e := range m {
-		if strings.TrimSpace(e) == "" {
-			delete(m, e)
+func setupExclusionsOpt() {
+	const exclusionsFlag = "exclusions"
+	const exclusionsDefaultValue = ""
+	defaultExclusions, defaultExclusionsExamples := utils.LineSeparatedStrToMap(defaultExclusionsStr)
+	excludesListFilePathPtr := flag.String(exclusionsFlag, exclusionsDefaultValue,
+		fmt.Sprintf("path to file containing newline separated list of file/directory names to be excluded\n"+
+			"(if this is not set, by default these will be ignored: %s etc.)",
+			strings.Join(defaultExclusionsExamples, ", ")))
+	flags.getExcludedFiles = func() entity.StringSet {
+		excludesListFilePath := *excludesListFilePathPtr
+		var exclusions entity.StringSet
+		if excludesListFilePath == exclusionsDefaultValue {
+			exclusions = defaultExclusions
+		} else {
+			if !utils.IsReadableFile(excludesListFilePath) {
+				fmte.PrintfErr("error: argument to flag -%s should be a file\n", exclusionsFlag)
+				flag.Usage()
+				os.Exit(exitCodeInvalidExclusions)
+			}
+			rawContents, err := os.ReadFile(excludesListFilePath)
+			if err != nil {
+				fmte.PrintfErr("error: argument to flag -%s isn't readable: %+v\n", exclusionsFlag, err)
+				flag.Usage()
+				os.Exit(exitCodeExclusionFilesError)
+			}
+			contents := strings.ReplaceAll(string(rawContents), "\r\n", "\n") // Windows
+			exclusions, _ = utils.LineSeparatedStrToMap(contents)
 		}
+		return exclusions
 	}
-	return m
 }
 
 func handlePanic() {
 	err := recover()
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Program exited unexpectedly due to an unknown error.\n"+
+		_, _ = fmt.Fprintf(os.Stderr, "Program exited unexpectedly. "+
 			"Please report the below eror to the author:\n"+
-			"error message: %+v\n", err)
+			"%+v\n", err)
 		_, _ = fmt.Fprintln(os.Stderr, string(debug.Stack()))
 	}
 }
 
-func getExecutable() string {
-	executable, _ := os.Executable()
-	return filepath.Base(executable)
+func setupUsage() {
+	flag.Usage = func() {
+		fmte.PrintfErr("Run \"rsync-sidekick -help\" for usage\n")
+	}
 }
 
-const (
-	usageString = `usage:
-	%s <flags> [source-dir] [destination-dir]
-where:
+func showHelpAndExit() {
+	flag.CommandLine.SetOutput(os.Stdout)
+	fmt.Printf(`rsync-sidekick is a tool to propagate file renames, movements and timestamp changes from ` +
+		`a source directory to a destination directory.
+
+Usage:
+	 rsync-sidekick <flags> [source-dir] [destination-dir]
+
+where,
 	source-dir        Source directory
 	destination-dir   Destination directory
+
 flags: (all optional)
-`
-	exclusionsFlag = "exclusions"
-	scriptGenFlag  = "shellscript"
-	extraInfoFlag  = "extrainfo"
-)
+`)
+	flag.PrintDefaults()
+	fmt.Printf("\nMore details here: https://github.com/m-manu/rsync-sidekick\n")
+	os.Exit(exitCodeSuccess)
+}
 
-//go:embed default_exclusions.txt
-var defaultExclusions string
+func setupHelpOpt() {
+	helpPtr := flag.Bool("help", false, "display help")
+	flags.isHelp = func() bool {
+		return *helpPtr
+	}
+}
 
-// RunID is a unique id for a run of this tool
-var RunID string
+func setupShellScriptOpt() {
+	scriptGenFlagPtr := flag.Bool("shellscript", false,
+		"instead of applying changes directly, generate a shell script\n"+
+			"(this flag is useful if you want 'dry run' this tool or want to run the shell script as a different user)",
+	)
+	flags.isShellScriptMode = func() bool {
+		return *scriptGenFlagPtr
+	}
+}
 
-func init() {
-	RunID = time.Now().Format("150405")
+func setupIsExtraInfoOpt() {
+	scriptGenFlagPtr := flag.Bool("extrainfo", false,
+		"generate extra information (caution: makes it slow!)",
+	)
+	flags.isExtraInfoOn = func() bool {
+		return *scriptGenFlagPtr
+	}
+}
+
+func setupGetListFilesDir() {
+	listFilesDirPtr := flag.String("list", "", "list files along their metadata for given directory")
+	flags.getListFilesDir = func() string {
+		listFilesDir := *listFilesDirPtr
+		if listFilesDir == "" {
+			return ""
+		}
+		listFilesDirPath, listFilesDirErr := filepath.Abs(listFilesDir)
+		if listFilesDirErr != nil || !utils.IsReadableDirectory(listFilesDirPath) {
+			fmte.PrintfErr("error: list files directory path \"%s\" is not a readable directory\n", listFilesDir)
+			flag.Usage()
+			os.Exit(exitCodeListFilesDirError)
+		}
+		return listFilesDirPath
+	}
+}
+
+func readSourceAndDestination() (string, string) {
+	sourceDirPath, sourceDirErr := filepath.Abs(flag.Arg(0))
+	if sourceDirErr != nil || !utils.IsReadableDirectory(sourceDirPath) {
+		fmte.PrintfErr("error: source path \"%s\" is not a readable directory\n", flag.Arg(0))
+		flag.Usage()
+		os.Exit(exitCodeSourceDirError)
+	}
+	destinationDirPath, destinationDirErr := filepath.Abs(flag.Arg(1))
+	if destinationDirErr != nil || !utils.IsReadableDirectory(destinationDirPath) {
+		fmte.PrintfErr("error: destination path \"%s\" is not a readable directory\n", flag.Arg(1))
+		flag.Usage()
+		os.Exit(exitCodeDestinationDirError)
+	}
+	return sourceDirPath, destinationDirPath
+}
+
+func setupFlags() {
+	setupHelpOpt()
+	setupExclusionsOpt()
+	setupShellScriptOpt()
+	setupIsExtraInfoOpt()
+	setupGetListFilesDir()
+	setupUsage()
 }
 
 func main() {
 	defer handlePanic()
-	exclusionsPathFlagPtr := flag.String(exclusionsFlag, "",
-		"path to a text file that contains ignorable file/directory names separated by new lines"+
-			" (even without this flag, this tool ignores commonly ignorable names such as "+
-			"'System Volume Information', 'Thumbs.db' etc.)",
-	)
-	scriptGenFlagPtr := flag.Bool(scriptGenFlag, false,
-		"instead of applying changes directly, generate a shell script"+
-			" (this flag is useful if you want run the shell script as a different user)",
-	)
-	extraInfoFlagPtr := flag.Bool(extraInfoFlag, false,
-		"generate extra information (caution: makes it slow!)",
-	)
-	flag.Usage = func() {
-		fmte.PrintfErr(usageString, getExecutable())
-		flag.PrintDefaults()
-	}
+	setupFlags()
 	flag.Parse()
-	if flag.NArg() != 2 {
-		fmte.PrintfErr("error: missing arguments!\n")
+	if flag.NArg() == 0 && flag.NFlag() == 0 {
+		fmte.Printf("error: no input directories passed\n")
 		flag.Usage()
-		os.Exit(ExitCodeMissingArguments)
+		os.Exit(exitCodeInvalidNumArgs)
 	}
-	exclusionsPath := *exclusionsPathFlagPtr
-	scriptGen := *scriptGenFlagPtr
-	extraInfo := *extraInfoFlagPtr
-	var exclusions map[string]struct{}
-	var eErr error
-	if exclusionsPath == "" {
-		exclusions = lineSeparatedStrToMap(defaultExclusions)
-	} else {
-		exclusions, eErr = readExclusions(exclusionsPath)
-		if eErr != nil {
-			fmte.PrintfErr("error: couldn't read argument to flag %s due to: %+v\n", exclusionsFlag, eErr)
-			os.Exit(ExitCodeExclusionFilesError)
-		}
+	if flags.isHelp() {
+		showHelpAndExit()
 	}
-	sourceDirPath, sourceDirErr := filepath.Abs(flag.Arg(0))
-	if sourceDirErr != nil || !filesutil.IsReadableDirectory(sourceDirPath) {
-		fmte.PrintfErr("error: path for source directory \"%s\" is not a readable directory \n",
-			flag.Arg(0))
-		os.Exit(ExitCodeSourceDirError)
+	listFilesDir := flags.getListFilesDir()
+	if listFilesDir != "" && flag.NArg() == 0 {
+		file := os.Stdout
+		excludedFiles := flags.getExcludedFiles()
+		service.FindDirectoryResultToCsv(listFilesDir, excludedFiles, file)
+		os.Exit(exitCodeSuccess)
 	}
-	destinationDirPath, destinationDirErr := filepath.Abs(flag.Arg(1))
-	if destinationDirErr != nil || !filesutil.IsReadableDirectory(destinationDirPath) {
-		fmte.PrintfErr("error: path for destination directory \"%s\" is not a readable directory \n",
-			flag.Arg(1))
-		os.Exit(ExitCodeDestinationDirError)
+	if flag.NArg() != 2 {
+		fmte.PrintfErr("error: two arguments expected: source directory path and destination directory path\n")
+		flag.Usage()
+		os.Exit(exitCodeInvalidNumArgs)
 	}
-	syncErr := rsyncSidekick(sourceDirPath, exclusions, destinationDirPath, scriptGen, extraInfo)
+	sourcePath, destinationPath := readSourceAndDestination()
+	syncErr := rsyncSidekick(sourcePath, flags.getExcludedFiles(), destinationPath, flags.isShellScriptMode(),
+		flags.isExtraInfoOn())
 	if syncErr != nil {
 		fmte.PrintfErr("error while syncing: %+v\n", syncErr)
-		os.Exit(ExitCodeSyncError)
+		os.Exit(exitCodeSyncError)
 	}
 }

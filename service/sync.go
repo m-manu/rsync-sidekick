@@ -1,12 +1,15 @@
 package service
 
 import (
+	"encoding/csv"
 	"fmt"
 	"github.com/m-manu/rsync-sidekick/action"
 	"github.com/m-manu/rsync-sidekick/entity"
-	"github.com/m-manu/rsync-sidekick/filesutil"
 	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/m-manu/rsync-sidekick/utils"
+	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -100,7 +103,7 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 			destinationIndexErrs)
 	}
 	actions = make([]action.SyncAction, 0, orphanFilesToDigests.Len())
-	uniquenessMap := make(map[string]struct{}, orphanFilesToDigests.Len())
+	uniquenessMap := entity.NewStringSet(orphanFilesToDigests.Len())
 	for orphanAtSource, orphanDigest := range orphanFilesToDigests.Map() {
 		if len(orphanDigestsToFiles.Get(orphanDigest)) > 1 {
 			// many orphans at source have the same digest
@@ -115,11 +118,12 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 		if len(matchesAtDestination) == 1 {
 			candidateAtDestination = matchesAtDestination[0]
 		} else {
-			// If multiple files with same digest exists at destination,
-			// choose one that does not exist at source
-			for _, path := range matchesAtDestination {
-				if _, existsAtSource := sourceFiles[path]; !existsAtSource {
-					candidateAtDestination = path
+			// If multiple files with same digest exist at destination,
+			// choose a random one that does *not* exist at source
+			for _, destinationPath := range matchesAtDestination {
+				if _, existsAtSource := sourceFiles[destinationPath]; !existsAtSource {
+					candidateAtDestination = destinationPath
+					break
 				}
 			}
 		}
@@ -135,20 +139,20 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 			}
 			if _, exists := uniquenessMap[timestampAction.Uniqueness()]; !exists {
 				actions = append(actions, timestampAction)
-				uniquenessMap[timestampAction.Uniqueness()] = struct{}{}
+				uniquenessMap.Add(timestampAction.Uniqueness())
 				savings += sourceFiles[orphanAtSource].Size
 			}
 		}
 		if _, existsAtSource := sourceFiles[candidateAtDestination]; !existsAtSource &&
 			candidateAtDestination != orphanAtSource {
 			parentDir := filepath.Dir(filepath.Join(destinationDirPath, orphanAtSource))
-			if !filesutil.IsReadableDirectory(parentDir) {
+			if !utils.IsReadableDirectory(parentDir) {
 				directoryAction := action.MakeDirectoryAction{
 					AbsoluteDirPath: parentDir,
 				}
 				if _, exists := uniquenessMap[directoryAction.Uniqueness()]; !exists {
 					actions = append(actions, directoryAction)
-					uniquenessMap[directoryAction.Uniqueness()] = struct{}{}
+					uniquenessMap.Add(directoryAction.Uniqueness())
 				}
 			}
 			moveFileAction := action.MoveFileAction{
@@ -158,11 +162,28 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 			}
 			if _, exists := uniquenessMap[moveFileAction.Uniqueness()]; !exists {
 				actions = append(actions, moveFileAction)
-				uniquenessMap[moveFileAction.Uniqueness()] = struct{}{}
+				uniquenessMap.Add(moveFileAction.Uniqueness())
 				savings += sourceFiles[orphanAtSource].Size
 			}
-
 		}
 	}
 	return
+}
+
+func FindDirectoryResultToCsv(dirPath string, excludedFiles entity.StringSet, file *os.File) error {
+	files, _, fErr := FindFilesFromDirectory(dirPath, excludedFiles)
+	if fErr != nil {
+		return fErr
+	}
+	cw := csv.NewWriter(file)
+	for f, fileMeta := range files {
+		record := []string{f, strconv.FormatInt(fileMeta.Size, 10),
+			strconv.FormatInt(fileMeta.ModifiedTimestamp, 10)}
+		wErr := cw.Write(record)
+		if wErr != nil {
+			return fmt.Errorf("error while writing record %+v: %+v", record, wErr)
+		}
+	}
+	cw.Flush()
+	return nil
 }

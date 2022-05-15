@@ -1,12 +1,20 @@
-FROM golang:1.16.3-alpine3.13 as builder
+FROM golang:1.17-alpine3.14 as builder
+
+RUN apk --no-cache add build-base
 
 WORKDIR /opt/rsync-sidekick
 
-ADD . ./
+COPY ./go.mod ./go.sum ./
+
+RUN go mod download -x
+
+COPY . .
 
 RUN go build
 
-FROM alpine:3.13
+RUN go test ./...
+
+FROM alpine:3.14
 
 RUN apk --no-cache add bash rsync
 

@@ -5,9 +5,9 @@ import (
 	"github.com/m-manu/rsync-sidekick/action"
 	"github.com/m-manu/rsync-sidekick/bytesutil"
 	"github.com/m-manu/rsync-sidekick/entity"
-	"github.com/m-manu/rsync-sidekick/filesutil"
 	"github.com/m-manu/rsync-sidekick/fmte"
 	"github.com/m-manu/rsync-sidekick/service"
+	"github.com/m-manu/rsync-sidekick/utils"
 	"os"
 	"sort"
 	"strings"
@@ -18,8 +18,9 @@ import (
 
 const unixCommandLengthGuess = 200
 
-func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destinationDirPath string,
+func rsyncSidekick(sourceDirPath string, exclusions entity.StringSet, destinationDirPath string,
 	scriptGen bool, extraInfo bool) error {
+	runID := time.Now().Format("150405")
 	var start, end time.Time
 	fmte.Printf("Scanning source (%s) and destination (%s) directories...\n", sourceDirPath, destinationDirPath)
 	start = time.Now()
@@ -30,11 +31,11 @@ func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destina
 	wgDirScan.Add(2)
 	go func() {
 		defer wgDirScan.Done()
-		sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectories(sourceDirPath, exclusions)
+		sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions)
 	}()
 	go func() {
 		defer wgDirScan.Done()
-		destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectories(destinationDirPath, exclusions)
+		destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectory(destinationDirPath, exclusions)
 	}()
 	wgDirScan.Wait()
 	end = time.Now()
@@ -56,7 +57,7 @@ func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destina
 	sort.Strings(orphansAtSource)
 	fmte.Printf("Found %d files\n", len(orphansAtSource))
 	if extraInfo {
-		filesutil.WriteSliceToFile(orphansAtSource, fmt.Sprintf("./info_%s_orphans_at_source.txt", RunID))
+		utils.WriteSliceToFile(orphansAtSource, fmt.Sprintf("./info_%s_orphans_at_source.txt", runID))
 	}
 	fmte.Printf("Finding candidates at destination...\n")
 	candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, orphansAtSource)
@@ -66,8 +67,8 @@ func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destina
 	}
 	sort.Strings(candidatesAtDestination)
 	if extraInfo {
-		filesutil.WriteSliceToFile(candidatesAtDestination,
-			fmt.Sprintf("./info_%s_candidates_at_destination.txt", RunID),
+		utils.WriteSliceToFile(candidatesAtDestination,
+			fmt.Sprintf("./info_%s_candidates_at_destination.txt", runID),
 		)
 	}
 	fmte.Printf("Found %d candidates.\n", len(candidatesAtDestination))
@@ -105,7 +106,7 @@ func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destina
 	if len(actions) == 0 {
 		return nil
 	}
-	shellScriptFileName := fmt.Sprintf("sync_actions_%s.sh", RunID)
+	shellScriptFileName := fmt.Sprintf("sync_actions_%s.sh", runID)
 	if scriptGen {
 		fmte.Printf("Writing sync actions to shell script \"%s\"...\n", shellScriptFileName)
 		shellScriptFile, shellScriptCreateErr := os.Create(shellScriptFileName)
@@ -122,12 +123,12 @@ func rsyncSidekick(sourceDirPath string, exclusions map[string]struct{}, destina
 		shellScriptFile.WriteString(sb.String())
 		fmte.Printf("Done. You may run it now.\n")
 	} else {
-		fmte.Printf("Applying sync actions...\n")
+		fmte.Printf("Applying sync actions at destination...\n")
 		successCount := 0
 		start = time.Now()
-		for i, a := range actions {
-			fmte.Printf("%4d/%d %s: ", i+1, len(actions), a)
-			aErr := a.Perform()
+		for i, syncAction := range actions {
+			fmte.Printf("%4d/%d %s: ", i+1, len(actions), syncAction)
+			aErr := syncAction.Perform()
 			if aErr == nil {
 				fmte.Printf("done\n")
 				successCount++
@@ -157,12 +158,12 @@ func findCandidatesAtDestination(sourceFiles, destinationFiles map[string]entity
 	orphansFileExtAndSizeMap := make(map[entity.FileExtAndSize]struct{}, len(orphansAtSource))
 	for _, path := range orphansAtSource {
 		fileMeta := sourceFiles[path]
-		key := entity.FileExtAndSize{FileExtension: filesutil.GetFileExt(path), FileSize: fileMeta.Size}
+		key := entity.FileExtAndSize{FileExtension: utils.GetFileExt(path), FileSize: fileMeta.Size}
 		orphansFileExtAndSizeMap[key] = struct{}{}
 	}
 	candidatesAtDestination := make([]string, 0, len(orphansAtSource))
 	for path, fileMeta := range destinationFiles {
-		key := entity.FileExtAndSize{FileExtension: filesutil.GetFileExt(path), FileSize: fileMeta.Size}
+		key := entity.FileExtAndSize{FileExtension: utils.GetFileExt(path), FileSize: fileMeta.Size}
 		if _, exists := orphansFileExtAndSizeMap[key]; exists {
 			candidatesAtDestination = append(candidatesAtDestination, path)
 		}

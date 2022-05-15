@@ -21,15 +21,18 @@ This propagates following changes from _source directory_ to _destination direct
 Note:
 
 * This tool **does not delete** any files or folders (under any circumstances) -- that's why safe-to-use 😌
-  * Your files are just _moved around_
-  * Now, if you're uncomfortable with this tool even moving your files around, there is a `-shellscript` option, that just generates a script for you to read and run (think of it like a `--dry-run` option)
+    * Your files are just _moved around_
+    * Now, if you're uncomfortable with this tool even moving your files around, there is a `-shellscript` option, that
+      just generates a script for you to read and run (think of it like a `--dry-run` option)
 * This tool **does not** actually **transfer** files -- that's for `rsync` to do 🙂
-* Since you'd run `rsync` after this tool is run, any changes that this tool couldn't propagate would just be propagated by `rsync`
-  *  So the most that you might lose is some time with `rsync` doing more work than it could have -- Which is likely still much less than not using this tool at all 😄
+* Since you'd run `rsync` after this tool is run, any changes that this tool couldn't propagate would just be propagated
+  by `rsync`
+    * So the most that you might lose is some time with `rsync` doing more work than it could have -- Which is likely
+      still much less than not using this tool at all 😄
 
 ## How to install?
 
-1. Install Go **1.16**
+1. Install Go version at least **1.17**
     * On Ubuntu: `snap install go`
     * On Mac: `brew install go`
     * For anything else: [Go downloads page](https://golang.org/dl/)
@@ -58,7 +61,9 @@ rsync -av /Users/manu/Photos/ /Volumes/Portable/Photos/
 ```
 
 ## Command line options
+
 Running `rsync-sidekick -help` displays following information:
+
 ```
 usage:
 	rsync-sidekick <flags> [source-dir] [destination-dir]
@@ -95,5 +100,6 @@ and sometimes are dangerous! `rsync-sidekick` is reliable alternative to all the
 
 ### How will I benefit from using this tool?
 
-Using `rsync-sidekick` before `rsrync` makes your backup process significantly faster than using only `rsync`. Sometimes 
-this performance benefit can even be 100x😲, if the only changes at your _source directory_ are the 3 types mentioned earlier in this article.
+Using `rsync-sidekick` before `rsrync` makes your backup process significantly faster than using only `rsync`. Sometimes
+this performance benefit can even be 100x😲, if the only changes at your _source directory_ are the 3 types mentioned
+earlier in this article.

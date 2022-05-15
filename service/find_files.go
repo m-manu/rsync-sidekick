@@ -11,9 +11,9 @@ import (
 
 const numFilesGuess = 10_000
 
-// FindFilesFromDirectories finds all regular files in a given directory
+// FindFilesFromDirectory finds all regular files in a given directory
 // (Very similar to `find` command on unix-like operating systems)
-func FindFilesFromDirectories(dirPath string, excludedFiles map[string]struct{}) (
+func FindFilesFromDirectory(dirPath string, excludedFiles entity.StringSet) (
 	files map[string]entity.FileMeta,
 	totalSizeOfFiles int64,
 	findFilesErr error,
@@ -40,7 +40,11 @@ func FindFilesFromDirectories(dirPath string, excludedFiles map[string]struct{})
 				fmte.PrintfErr("couldn't get metadata of \"%s\": %+v\n", path, infoErr)
 				return nil
 			}
-			relativePath := strings.Replace(path, dirPath, "", 1)
+			relativePath, relErr := filepath.Rel(dirPath, path)
+			if relErr != nil {
+				fmte.PrintfErr("couldn't comprehend path \"%s\": %+v\n", path, relErr)
+				return nil
+			}
 			allFiles[relativePath] = entity.FileMeta{
 				Size:              info.Size(),
 				ModifiedTimestamp: info.ModTime().Unix(),

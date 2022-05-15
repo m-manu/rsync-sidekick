@@ -3,7 +3,7 @@ package service
 import (
 	"github.com/m-manu/rsync-sidekick/bytesutil"
 	"github.com/stretchr/testify/assert"
-	"os"
+	"runtime"
 	"testing"
 )
 
@@ -12,13 +12,9 @@ func TestConfig(t *testing.T) {
 }
 
 func TestGetDigest(t *testing.T) {
-	goRoot, ok := os.LookupEnv("GOROOT")
-	if !ok {
-		assert.FailNow(t, "Can't run test as GOROOT is not set")
-	}
 	var paths = []string{
-		goRoot + "/src/io/io.go",
-		goRoot + "/src/io/pipe.go",
+		runtime.GOROOT() + "/src/io/io.go",
+		runtime.GOROOT() + "/src/io/pipe.go",
 	}
 	for _, path := range paths {
 		digest, err := GetDigest(path)
