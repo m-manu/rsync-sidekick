@@ -38,7 +38,7 @@ Note:
     * For anything else: [Go downloads page](https://golang.org/dl/)
 2. Run command:
    ```bash
-   go get github.com/m-manu/rsync-sidekick
+   go install github.com/m-manu/rsync-sidekick@latest
    ```
 
 ## How to use?
