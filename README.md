@@ -33,12 +33,14 @@ Note:
 ## How to install?
 
 1. Install Go version at least **1.17**
-    * On Ubuntu: `snap install go`
-    * On Mac: `brew install go`
-    * For anything else: [Go downloads page](https://golang.org/dl/)
+    * See: [Go installation instructions](https://go.dev/doc/install)
 2. Run command:
    ```bash
    go install github.com/m-manu/rsync-sidekick@latest
+   ```
+3. Add following line in your `.bashrc`/`.zshrc` file:
+   ```bash
+   export PATH="$PATH:$HOME/go/bin"
    ```
 
 ## How to use?
