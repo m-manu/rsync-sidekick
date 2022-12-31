@@ -6,8 +6,8 @@ import (
 	"github.com/m-manu/rsync-sidekick/bytesutil"
 	"github.com/m-manu/rsync-sidekick/entity"
 	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/m-manu/rsync-sidekick/lib"
 	"github.com/m-manu/rsync-sidekick/service"
-	"github.com/m-manu/rsync-sidekick/utils"
 	"os"
 	"sort"
 	"strings"
@@ -18,9 +18,11 @@ import (
 
 const unixCommandLengthGuess = 200
 
-func rsyncSidekick(sourceDirPath string, exclusions entity.StringSet, destinationDirPath string,
-	scriptGen bool, extraInfo bool) error {
-	runID := time.Now().Format("150405")
+func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions lib.Set[string],
+	destinationDirPath string, verbose bool) ([]action.SyncAction, error) {
+	if verbose {
+		fmte.VerboseOn()
+	}
 	var start, end time.Time
 	fmte.Printf("Scanning source (%s) and destination (%s) directories...\n", sourceDirPath, destinationDirPath)
 	start = time.Now()
@@ -40,10 +42,10 @@ func rsyncSidekick(sourceDirPath string, exclusions entity.StringSet, destinatio
 	wgDirScan.Wait()
 	end = time.Now()
 	if sourceFilesErr != nil {
-		return fmt.Errorf("error scanning source directory: %+v", sourceFilesErr)
+		return nil, fmt.Errorf("error scanning source directory: %+v", sourceFilesErr)
 	}
 	if destinationFilesErr != nil {
-		return fmt.Errorf("error scanning destination directory: %+v", destinationFilesErr)
+		return nil, fmt.Errorf("error scanning destination directory: %+v", destinationFilesErr)
 	}
 	fmte.Printf("Found %d files (total size %s) at source and %d files (total size %s) at destination in %.1fs\n",
 		len(sourceFiles), bytesutil.BinaryFormat(sourceSize), len(destinationFiles),
@@ -52,22 +54,22 @@ func rsyncSidekick(sourceDirPath string, exclusions entity.StringSet, destinatio
 	orphansAtSource := service.FindOrphans(sourceFiles, destinationFiles)
 	if len(orphansAtSource) == 0 {
 		fmte.Printf("All files at source directory have counterparts. So, no action needed 🙂!\n")
-		return nil
+		return []action.SyncAction{}, nil
 	}
 	sort.Strings(orphansAtSource)
 	fmte.Printf("Found %d files\n", len(orphansAtSource))
-	if extraInfo {
-		utils.WriteSliceToFile(orphansAtSource, fmt.Sprintf("./info_%s_orphans_at_source.txt", runID))
+	if verbose {
+		lib.WriteSliceToFile(orphansAtSource, fmt.Sprintf("./info_%s_orphans_at_source.txt", runID))
 	}
 	fmte.Printf("Finding candidates at destination...\n")
 	candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, orphansAtSource)
 	if len(candidatesAtDestination) == 0 {
 		fmte.Printf("No candidates found. Looks like all %d files are new. rsync will do the rest.\n", len(orphansAtSource))
-		return nil
+		return []action.SyncAction{}, nil
 	}
 	sort.Strings(candidatesAtDestination)
-	if extraInfo {
-		utils.WriteSliceToFile(candidatesAtDestination,
+	if verbose {
+		lib.WriteSliceToFile(candidatesAtDestination,
 			fmt.Sprintf("./info_%s_candidates_at_destination.txt", runID),
 		)
 	}
@@ -94,52 +96,71 @@ func rsyncSidekick(sourceDirPath string, exclusions entity.StringSet, destinatio
 	wg.Wait()
 	end = time.Now()
 	if syncErr != nil {
-		return fmt.Errorf("error while computing sync actions: %+v", syncErr)
+		return nil, fmt.Errorf("error while computing sync actions: %+v", syncErr)
 	}
 	fmte.Printf("Completed in %.1fs\n", end.Sub(start).Seconds())
 	if len(actions) == 0 {
 		fmte.Printf("No sync actions found. You may run rsync.\n")
-		return nil
+		return []action.SyncAction{}, nil
 	}
 	fmte.Printf("Found %d actions that can save you %s of files transfer!\n",
 		len(actions), bytesutil.BinaryFormat(savings))
-	if len(actions) == 0 {
-		return nil
+	return actions, nil
+}
+
+func rsyncSidekick(runID string, sourceDirPath string, exclusions lib.Set[string], destinationDirPath string,
+	scriptGen bool, verbose bool) error {
+	actions, err := getSyncActionsWithProgress(runID, sourceDirPath, exclusions, destinationDirPath, verbose)
+	if err != nil {
+		return err // no extra info needed
 	}
-	shellScriptFileName := fmt.Sprintf("sync_actions_%s.sh", runID)
 	if scriptGen {
-		fmte.Printf("Writing sync actions to shell script \"%s\"...\n", shellScriptFileName)
-		shellScriptFile, shellScriptCreateErr := os.Create(shellScriptFileName)
-		if shellScriptCreateErr != nil {
-			return fmt.Errorf("couldn't create: %v", shellScriptCreateErr)
-		}
-		defer shellScriptFile.Close()
-		var sb strings.Builder
-		sb.Grow(unixCommandLengthGuess * len(actions))
-		for _, a := range actions {
-			sb.WriteString(a.UnixCommand())
-			sb.WriteString("\n")
-		}
-		shellScriptFile.WriteString(sb.String())
-		fmte.Printf("Done. You may run it now.\n")
+		shellScriptFileName := fmt.Sprintf("sync_actions_%s.sh", runID)
+		return generateScript(actions, shellScriptFileName)
 	} else {
-		fmte.Printf("Applying sync actions at destination...\n")
-		successCount := 0
-		start = time.Now()
-		for i, syncAction := range actions {
-			fmte.Printf("%4d/%d %s: ", i+1, len(actions), syncAction)
-			aErr := syncAction.Perform()
-			if aErr == nil {
-				fmte.Printf("done\n")
-				successCount++
-			} else {
-				fmte.Printf("failed due to: %+v\n", aErr)
-			}
-		}
-		end = time.Now()
-		fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded\n",
-			end.Sub(start).Seconds(), successCount, len(actions))
+		return performActions(actions, destinationDirPath)
 	}
+}
+
+func performActions(actions []action.SyncAction, destinationDirPath string) error {
+	var start, end time.Time
+	fmte.Printf("Applying sync actions at destination...\n")
+	successCount := 0
+	start = time.Now()
+	for i, syncAction := range actions {
+		fmte.Println(strings.Replace(
+			fmt.Sprintf("%4d/%d %s: ", i+1, len(actions), syncAction),
+			destinationDirPath+"/", "", -1,
+		))
+		aErr := syncAction.Perform()
+		if aErr == nil {
+			fmte.Printf("done\n")
+			successCount++
+		} else {
+			fmte.Printf("failed due to: %+v\n", aErr)
+		}
+	}
+	end = time.Now()
+	fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded\n",
+		end.Sub(start).Seconds(), successCount, len(actions))
+	return nil
+}
+
+func generateScript(actions []action.SyncAction, shellScriptFileName string) error {
+	fmte.Printf("Writing sync actions to shell script \"%s\"...\n", shellScriptFileName)
+	shellScriptFile, shellScriptCreateErr := os.Create(shellScriptFileName)
+	if shellScriptCreateErr != nil {
+		return fmt.Errorf("couldn't create: %v", shellScriptCreateErr)
+	}
+	defer shellScriptFile.Close()
+	var sb strings.Builder
+	sb.Grow(unixCommandLengthGuess * len(actions))
+	for _, a := range actions {
+		sb.WriteString(a.UnixCommand())
+		sb.WriteString("\n")
+	}
+	shellScriptFile.WriteString(sb.String())
+	fmte.Printf("Done. You may run it now.\n")
 	return nil
 }
 
@@ -155,16 +176,16 @@ func reportProgress(sourceActual *int32, sourceExpected int32, destinationActual
 }
 
 func findCandidatesAtDestination(sourceFiles, destinationFiles map[string]entity.FileMeta, orphansAtSource []string) []string {
-	orphansFileExtAndSizeMap := make(map[entity.FileExtAndSize]struct{}, len(orphansAtSource))
+	orphansFileExtAndSizeMap := lib.NewSet[entity.FileExtAndSize](len(orphansAtSource))
 	for _, path := range orphansAtSource {
 		fileMeta := sourceFiles[path]
-		key := entity.FileExtAndSize{FileExtension: utils.GetFileExt(path), FileSize: fileMeta.Size}
-		orphansFileExtAndSizeMap[key] = struct{}{}
+		key := entity.FileExtAndSize{FileExtension: lib.GetFileExt(path), FileSize: fileMeta.Size}
+		orphansFileExtAndSizeMap.Add(key)
 	}
 	candidatesAtDestination := make([]string, 0, len(orphansAtSource))
 	for path, fileMeta := range destinationFiles {
-		key := entity.FileExtAndSize{FileExtension: utils.GetFileExt(path), FileSize: fileMeta.Size}
-		if _, exists := orphansFileExtAndSizeMap[key]; exists {
+		key := entity.FileExtAndSize{FileExtension: lib.GetFileExt(path), FileSize: fileMeta.Size}
+		if orphansFileExtAndSizeMap.Exists(key) {
 			candidatesAtDestination = append(candidatesAtDestination, path)
 		}
 	}

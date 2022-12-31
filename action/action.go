@@ -16,6 +16,8 @@ type SyncAction interface {
 	Uniqueness() string
 }
 
+const cmdSeparator = "\u0001"
+
 func escape(path string) string {
 	escaped := path
 	escaped = strings.ReplaceAll(escaped, "\\", "\\\\") // This replace should be first

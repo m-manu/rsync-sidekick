@@ -1,6 +1,7 @@
 package action
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,17 +24,23 @@ func (a MoveFileAction) destinationPath() string {
 
 // UnixCommand for moving or renaming a file
 func (a MoveFileAction) UnixCommand() string {
-	return fmt.Sprintf(`mv -v "%s" "%s"`, escape(a.sourcePath()), escape(a.destinationPath()))
+	return fmt.Sprintf(`mv -v -n "%s" "%s"`, escape(a.sourcePath()), escape(a.destinationPath()))
 }
 
 // Perform 'file move/rename' action
 func (a MoveFileAction) Perform() error {
-	return os.Rename(a.sourcePath(), a.destinationPath())
+	if _, err := os.Stat(a.destinationPath()); err == nil {
+		return fmt.Errorf(`error: file "%s" already exists`, a.destinationPath())
+	} else if errors.Is(err, os.ErrNotExist) {
+		return os.Rename(a.sourcePath(), a.destinationPath())
+	} else {
+		return err
+	}
 }
 
 // Uniqueness generates unique string for file renaming/movement
 func (a MoveFileAction) Uniqueness() string {
-	return "mv\u0001" + a.RelativeFromPath
+	return "mv" + cmdSeparator + a.RelativeFromPath
 }
 
 func (a MoveFileAction) String() string {

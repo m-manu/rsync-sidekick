@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/m-manu/rsync-sidekick/entity"
 	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/m-manu/rsync-sidekick/lib"
 	"io/fs"
 	"path/filepath"
 	"strings"
@@ -13,7 +14,7 @@ const numFilesGuess = 10_000
 
 // FindFilesFromDirectory finds all regular files in a given directory
 // (Very similar to `find` command on unix-like operating systems)
-func FindFilesFromDirectory(dirPath string, excludedFiles entity.StringSet) (
+func FindFilesFromDirectory(dirPath string, excludedFiles lib.Set[string]) (
 	files map[string]entity.FileMeta,
 	totalSizeOfFiles int64,
 	findFilesErr error,
@@ -24,7 +25,7 @@ func FindFilesFromDirectory(dirPath string, excludedFiles entity.StringSet) (
 			fmte.PrintfErr("skipping \"%s\": %+v\n", path, err)
 		}
 		// If the file/directory is in excluded files list, ignore it
-		if _, exists := excludedFiles[d.Name()]; exists {
+		if excludedFiles.Exists(d.Name()) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}

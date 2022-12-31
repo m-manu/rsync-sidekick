@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"github.com/m-manu/rsync-sidekick/bytesutil"
 	"github.com/m-manu/rsync-sidekick/entity"
-	"github.com/m-manu/rsync-sidekick/utils"
+	"github.com/m-manu/rsync-sidekick/lib"
 	"hash/crc32"
 	"os"
 )
@@ -14,9 +14,9 @@ const (
 	thresholdFileSize = 16 * bytesutil.KIBI
 )
 
-// GetDigest generates entity.FileDigest of the file provided in an extremely fast manner
+// getDigest generates entity.FileDigest of the file provided in an extremely fast manner
 // without compromising the quality of uniqueness
-func GetDigest(path string) (entity.FileDigest, error) {
+func getDigest(path string) (entity.FileDigest, error) {
 	info, statErr := os.Lstat(path)
 	if statErr != nil {
 		return entity.FileDigest{}, statErr
@@ -26,7 +26,7 @@ func GetDigest(path string) (entity.FileDigest, error) {
 		return entity.FileDigest{}, hashErr
 	}
 	return entity.FileDigest{
-		FileExtension: utils.GetFileExt(path),
+		FileExtension: lib.GetFileExt(path),
 		FileSize:      info.Size(),
 		FileFuzzyHash: hash,
 	}, nil

@@ -1,4 +1,4 @@
-FROM golang:1.17-alpine3.14 as builder
+FROM golang:1.18-alpine3.15 as builder
 
 RUN apk --no-cache add build-base
 
@@ -12,9 +12,9 @@ COPY . .
 
 RUN go build
 
-RUN go test ./...
+RUN go test -v ./...
 
-FROM alpine:3.14
+FROM alpine:3.15
 
 RUN apk --no-cache add bash rsync
 

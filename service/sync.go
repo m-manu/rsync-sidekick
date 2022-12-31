@@ -6,9 +6,10 @@ import (
 	"github.com/m-manu/rsync-sidekick/action"
 	"github.com/m-manu/rsync-sidekick/entity"
 	"github.com/m-manu/rsync-sidekick/fmte"
-	"github.com/m-manu/rsync-sidekick/utils"
+	"github.com/m-manu/rsync-sidekick/lib"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -16,8 +17,6 @@ import (
 
 const (
 	indexBuildErrorCountTolerance = 20
-	parallelismForSource          = 6
-	parallelismForDestination     = 6
 )
 
 // FindOrphans finds files at source that do not have corresponding files at destination.
@@ -34,13 +33,14 @@ func FindOrphans(sourceFiles, destinationFiles map[string]entity.FileMeta) []str
 }
 
 func buildIndex(baseDirPath string, filesToScan []string, counter *int32,
-	filesToDigests *entity.StringFileDigestMap, digestsToFiles *entity.FileDigestStringMultiMap,
+	filesToDigests lib.SafeMap[string, entity.FileDigest], digestsToFiles lib.MultiMap[entity.FileDigest, string],
 ) error {
 	errCount := 0
 	for _, relativePath := range filesToScan {
-		atomic.AddInt32(counter, 1)
+		newValue := atomic.AddInt32(counter, 1)
 		path := filepath.Join(baseDirPath, relativePath)
-		digest, err := GetDigest(path)
+		fmte.PrintfV("Evaluating file (#%d): %s\n", newValue, path)
+		digest, err := getDigest(path)
 		if err != nil {
 			errCount++
 			fmte.PrintfErr("couldn't index file \"%s\" (skipping): %+v\n", path, err)
@@ -60,11 +60,12 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 	destinationDirPath string, destinationFiles map[string]entity.FileMeta, candidatesAtDestination []string,
 	sourceCounter *int32, destinationCounter *int32,
 ) (actions []action.SyncAction, savings int64, err error) {
-	orphanFilesToDigests := entity.NewStringFileDigestMap()
-	candidateFilesToDigests := entity.NewStringFileDigestMap()
-	orphanDigestsToFiles := entity.NewFileDigestStringMultiMap()
-	candidateDigestsToFiles := entity.NewFileDigestStringMultiMap()
+	orphanFilesToDigests := lib.NewSafeMap[string, entity.FileDigest]()
+	candidateFilesToDigests := lib.NewSafeMap[string, entity.FileDigest]()
+	orphanDigestsToFiles := lib.NewMultiMap[entity.FileDigest, string]()
+	candidateDigestsToFiles := lib.NewMultiMap[entity.FileDigest, string]()
 	var sourceIndexErrs, destinationIndexErrs []error
+	parallelismForSource, parallelismForDestination := getParallelism(runtime.NumCPU())
 	var wg sync.WaitGroup
 	wg.Add(parallelismForSource + parallelismForDestination)
 	for i := 0; i < parallelismForSource; i++ {
@@ -103,8 +104,8 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 			destinationIndexErrs)
 	}
 	actions = make([]action.SyncAction, 0, orphanFilesToDigests.Len())
-	uniquenessMap := entity.NewStringSet(orphanFilesToDigests.Len())
-	for orphanAtSource, orphanDigest := range orphanFilesToDigests.Map() {
+	uniqueness := lib.NewSet[string](orphanFilesToDigests.Len())
+	for orphanAtSource, orphanDigest := range orphanFilesToDigests.Data {
 		if len(orphanDigestsToFiles.Get(orphanDigest)) > 1 {
 			// many orphans at source have the same digest
 			continue
@@ -137,22 +138,22 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 				SourceFileRelativePath:      orphanAtSource,
 				DestinationFileRelativePath: candidateAtDestination,
 			}
-			if _, exists := uniquenessMap[timestampAction.Uniqueness()]; !exists {
+			if !uniqueness.Exists(timestampAction.Uniqueness()) {
 				actions = append(actions, timestampAction)
-				uniquenessMap.Add(timestampAction.Uniqueness())
+				uniqueness.Add(timestampAction.Uniqueness())
 				savings += sourceFiles[orphanAtSource].Size
 			}
 		}
 		if _, existsAtSource := sourceFiles[candidateAtDestination]; !existsAtSource &&
 			candidateAtDestination != orphanAtSource {
 			parentDir := filepath.Dir(filepath.Join(destinationDirPath, orphanAtSource))
-			if !utils.IsReadableDirectory(parentDir) {
+			if !lib.IsReadableDirectory(parentDir) {
 				directoryAction := action.MakeDirectoryAction{
 					AbsoluteDirPath: parentDir,
 				}
-				if _, exists := uniquenessMap[directoryAction.Uniqueness()]; !exists {
+				if !uniqueness.Exists(directoryAction.Uniqueness()) {
 					actions = append(actions, directoryAction)
-					uniquenessMap.Add(directoryAction.Uniqueness())
+					uniqueness.Add(directoryAction.Uniqueness())
 				}
 			}
 			moveFileAction := action.MoveFileAction{
@@ -160,9 +161,9 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 				RelativeFromPath: candidateAtDestination,
 				RelativeToPath:   orphanAtSource,
 			}
-			if _, exists := uniquenessMap[moveFileAction.Uniqueness()]; !exists {
+			if !uniqueness.Exists(moveFileAction.Uniqueness()) {
 				actions = append(actions, moveFileAction)
-				uniquenessMap.Add(moveFileAction.Uniqueness())
+				uniqueness.Add(moveFileAction.Uniqueness())
 				savings += sourceFiles[orphanAtSource].Size
 			}
 		}
@@ -170,7 +171,18 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 	return
 }
 
-func FindDirectoryResultToCsv(dirPath string, excludedFiles entity.StringSet, file *os.File) error {
+func getParallelism(n int) (int, int) {
+	if n > 3 {
+		if n%2 == 0 {
+			return n/2 - 1, n / 2
+		} else {
+			return n / 2, n / 2
+		}
+	}
+	return 1, 1
+}
+
+func FindDirectoryResultToCsv(dirPath string, excludedFiles lib.Set[string], file *os.File) error {
 	files, _, fErr := FindFilesFromDirectory(dirPath, excludedFiles)
 	if fErr != nil {
 		return fErr

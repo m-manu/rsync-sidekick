@@ -1,7 +1,6 @@
-package utils
+package lib
 
 import (
-	"github.com/m-manu/rsync-sidekick/entity"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -39,8 +38,8 @@ func WriteSliceToFile(slice []string, fileName string) {
 }
 
 // LineSeparatedStrToMap converts a line-separated string to a map with keys and empty values
-func LineSeparatedStrToMap(lineSeparatedString string) (set entity.StringSet, firstFew []string) {
-	set = entity.NewStringSet(20)
+func LineSeparatedStrToMap(lineSeparatedString string) (set Set[string], firstFew []string) {
+	set = NewSet[string](20)
 	firstFew = []string{}
 	for _, e := range strings.Split(lineSeparatedString, "\n") {
 		set.Add(e)

@@ -30,7 +30,7 @@ func (a MakeDirectoryAction) Perform() error {
 
 // Uniqueness generates unique string for directory creation
 func (a MakeDirectoryAction) Uniqueness() string {
-	return "Mkdir\u0001" + a.AbsoluteDirPath
+	return "Mkdir" + cmdSeparator + a.AbsoluteDirPath
 }
 
 func (a MakeDirectoryAction) String() string {

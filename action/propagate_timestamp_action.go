@@ -39,7 +39,7 @@ func (a PropagateTimestampAction) Perform() error {
 
 // Uniqueness generate unique string for 'file modification timestamp' propagation action
 func (a PropagateTimestampAction) Uniqueness() string {
-	return "touch\u0001" + a.DestinationFileRelativePath
+	return "touch" + cmdSeparator + a.DestinationFileRelativePath
 }
 
 func (a PropagateTimestampAction) String() string {

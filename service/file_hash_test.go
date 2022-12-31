@@ -17,7 +17,7 @@ func TestGetDigest(t *testing.T) {
 		runtime.GOROOT() + "/src/io/pipe.go",
 	}
 	for _, path := range paths {
-		digest, err := GetDigest(path)
+		digest, err := getDigest(path)
 		assert.Equal(t, nil, err)
 		assert.Greater(t, digest.FileSize, int64(0))
 		assert.Equal(t, 9, len(digest.FileFuzzyHash))

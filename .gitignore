@@ -2,3 +2,5 @@
 /.idea/
 *.sh
 *.txt
+*.out
+/test_cases_*

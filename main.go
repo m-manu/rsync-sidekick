@@ -2,16 +2,26 @@ package main
 
 import (
 	_ "embed"
-	"flag"
 	"fmt"
-	"github.com/m-manu/rsync-sidekick/entity"
 	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/m-manu/rsync-sidekick/lib"
 	"github.com/m-manu/rsync-sidekick/service"
-	"github.com/m-manu/rsync-sidekick/utils"
+	flag "github.com/spf13/pflag"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"time"
+)
+
+const (
+	applicationMajorVersion = 1
+	applicationMinorVersion = 4
+	applicationPatchVersion = 0
+)
+
+var applicationVersion = fmt.Sprintf("v%d.%d.%d",
+	applicationMajorVersion, applicationMinorVersion, applicationPatchVersion,
 )
 
 // Constants indicating return codes of this tool, when run from command line
@@ -31,39 +41,40 @@ var defaultExclusionsStr string
 
 var flags struct {
 	isHelp            func() bool
-	getExcludedFiles  func() entity.StringSet
+	getExcludedFiles  func() lib.Set[string]
 	isShellScriptMode func() bool
-	getListFilesDir   func() string
-	isExtraInfoOn     func() bool
+	getListFilesDir   func() bool
+	isVerbose         func() bool
+	showVersion       func() bool
 }
 
 func setupExclusionsOpt() {
 	const exclusionsFlag = "exclusions"
 	const exclusionsDefaultValue = ""
-	defaultExclusions, defaultExclusionsExamples := utils.LineSeparatedStrToMap(defaultExclusionsStr)
-	excludesListFilePathPtr := flag.String(exclusionsFlag, exclusionsDefaultValue,
+	defaultExclusions, defaultExclusionsExamples := lib.LineSeparatedStrToMap(defaultExclusionsStr)
+	excludesListFilePathPtr := flag.StringP(exclusionsFlag, "x", exclusionsDefaultValue,
 		fmt.Sprintf("path to file containing newline separated list of file/directory names to be excluded\n"+
-			"(if this is not set, by default these will be ignored: %s etc.)",
+			"(even if this is not set, files/directories such these will still be ignored: %s etc.)",
 			strings.Join(defaultExclusionsExamples, ", ")))
-	flags.getExcludedFiles = func() entity.StringSet {
+	flags.getExcludedFiles = func() lib.Set[string] {
 		excludesListFilePath := *excludesListFilePathPtr
-		var exclusions entity.StringSet
+		var exclusions lib.Set[string]
 		if excludesListFilePath == exclusionsDefaultValue {
 			exclusions = defaultExclusions
 		} else {
-			if !utils.IsReadableFile(excludesListFilePath) {
-				fmte.PrintfErr("error: argument to flag -%s should be a file\n", exclusionsFlag)
+			if !lib.IsReadableFile(excludesListFilePath) {
+				fmte.PrintfErr("error: argument to flag --%s should be a file\n", exclusionsFlag)
 				flag.Usage()
 				os.Exit(exitCodeInvalidExclusions)
 			}
 			rawContents, err := os.ReadFile(excludesListFilePath)
 			if err != nil {
-				fmte.PrintfErr("error: argument to flag -%s isn't readable: %+v\n", exclusionsFlag, err)
+				fmte.PrintfErr("error: argument to flag --%s isn't readable: %+v\n", exclusionsFlag, err)
 				flag.Usage()
 				os.Exit(exitCodeExclusionFilesError)
 			}
 			contents := strings.ReplaceAll(string(rawContents), "\r\n", "\n") // Windows
-			exclusions, _ = utils.LineSeparatedStrToMap(contents)
+			exclusions, _ = lib.LineSeparatedStrToMap(contents)
 		}
 		return exclusions
 	}
@@ -81,7 +92,7 @@ func handlePanic() {
 
 func setupUsage() {
 	flag.Usage = func() {
-		fmte.PrintfErr("Run \"rsync-sidekick -help\" for usage\n")
+		fmte.PrintfErr("Run \"rsync-sidekick --help\" for usage\n")
 	}
 }
 
@@ -94,8 +105,8 @@ Usage:
 	 rsync-sidekick <flags> [source-dir] [destination-dir]
 
 where,
-	source-dir        Source directory
-	destination-dir   Destination directory
+	[source-dir]        Source directory
+	[destination-dir]   Destination directory
 
 flags: (all optional)
 `)
@@ -105,14 +116,21 @@ flags: (all optional)
 }
 
 func setupHelpOpt() {
-	helpPtr := flag.Bool("help", false, "display help")
+	helpPtr := flag.BoolP("help", "h", false, "display help")
 	flags.isHelp = func() bool {
 		return *helpPtr
 	}
 }
 
+func setupShowVersion() {
+	showVersionPtr := flag.Bool("version", false, "show application version ("+applicationVersion+") and exit")
+	flags.showVersion = func() bool {
+		return *showVersionPtr
+	}
+}
+
 func setupShellScriptOpt() {
-	scriptGenFlagPtr := flag.Bool("shellscript", false,
+	scriptGenFlagPtr := flag.BoolP("shellscript", "s", false,
 		"instead of applying changes directly, generate a shell script\n"+
 			"(this flag is useful if you want 'dry run' this tool or want to run the shell script as a different user)",
 	)
@@ -121,41 +139,32 @@ func setupShellScriptOpt() {
 	}
 }
 
-func setupIsExtraInfoOpt() {
-	scriptGenFlagPtr := flag.Bool("extrainfo", false,
-		"generate extra information (caution: makes it slow!)",
+func setupVerboseOpt() {
+	verbosePtr := flag.BoolP("verbose", "v", false,
+		"generates extra information, even a file dump (caution: makes it slow!)",
 	)
-	flags.isExtraInfoOn = func() bool {
-		return *scriptGenFlagPtr
+	flags.isVerbose = func() bool {
+		return *verbosePtr
 	}
 }
 
 func setupGetListFilesDir() {
-	listFilesDirPtr := flag.String("list", "", "list files along their metadata for given directory")
-	flags.getListFilesDir = func() string {
+	listFilesDirPtr := flag.Bool("list", false, "list files along their metadata for given directory")
+	flags.getListFilesDir = func() bool {
 		listFilesDir := *listFilesDirPtr
-		if listFilesDir == "" {
-			return ""
-		}
-		listFilesDirPath, listFilesDirErr := filepath.Abs(listFilesDir)
-		if listFilesDirErr != nil || !utils.IsReadableDirectory(listFilesDirPath) {
-			fmte.PrintfErr("error: list files directory path \"%s\" is not a readable directory\n", listFilesDir)
-			flag.Usage()
-			os.Exit(exitCodeListFilesDirError)
-		}
-		return listFilesDirPath
+		return listFilesDir
 	}
 }
 
 func readSourceAndDestination() (string, string) {
 	sourceDirPath, sourceDirErr := filepath.Abs(flag.Arg(0))
-	if sourceDirErr != nil || !utils.IsReadableDirectory(sourceDirPath) {
+	if sourceDirErr != nil || !lib.IsReadableDirectory(sourceDirPath) {
 		fmte.PrintfErr("error: source path \"%s\" is not a readable directory\n", flag.Arg(0))
 		flag.Usage()
 		os.Exit(exitCodeSourceDirError)
 	}
 	destinationDirPath, destinationDirErr := filepath.Abs(flag.Arg(1))
-	if destinationDirErr != nil || !utils.IsReadableDirectory(destinationDirPath) {
+	if destinationDirErr != nil || !lib.IsReadableDirectory(destinationDirPath) {
 		fmte.PrintfErr("error: destination path \"%s\" is not a readable directory\n", flag.Arg(1))
 		flag.Usage()
 		os.Exit(exitCodeDestinationDirError)
@@ -167,8 +176,9 @@ func setupFlags() {
 	setupHelpOpt()
 	setupExclusionsOpt()
 	setupShellScriptOpt()
-	setupIsExtraInfoOpt()
+	setupVerboseOpt()
 	setupGetListFilesDir()
+	setupShowVersion()
 	setupUsage()
 }
 
@@ -184,11 +194,8 @@ func main() {
 	if flags.isHelp() {
 		showHelpAndExit()
 	}
-	listFilesDir := flags.getListFilesDir()
-	if listFilesDir != "" && flag.NArg() == 0 {
-		file := os.Stdout
-		excludedFiles := flags.getExcludedFiles()
-		service.FindDirectoryResultToCsv(listFilesDir, excludedFiles, file)
+	if flags.showVersion() {
+		fmt.Println(applicationVersion)
 		os.Exit(exitCodeSuccess)
 	}
 	if flag.NArg() != 2 {
@@ -197,8 +204,21 @@ func main() {
 		os.Exit(exitCodeInvalidNumArgs)
 	}
 	sourcePath, destinationPath := readSourceAndDestination()
-	syncErr := rsyncSidekick(sourcePath, flags.getExcludedFiles(), destinationPath, flags.isShellScriptMode(),
-		flags.isExtraInfoOn())
+	// List
+	listFilesDir := flags.getListFilesDir()
+	if listFilesDir {
+		excludedFiles := flags.getExcludedFiles()
+		err := service.FindDirectoryResultToCsv(sourcePath, excludedFiles, os.Stdout)
+		if err == nil {
+			os.Exit(exitCodeSuccess)
+		} else {
+			fmte.PrintfErr("error while creating list: %+v", err)
+			os.Exit(exitCodeListFilesDirError)
+		}
+	}
+	runID := time.Now().Format("150405")
+	syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath, flags.isShellScriptMode(),
+		flags.isVerbose())
 	if syncErr != nil {
 		fmte.PrintfErr("error while syncing: %+v\n", syncErr)
 		os.Exit(exitCodeSyncError)
