@@ -12,7 +12,8 @@ photos, etc.) _that are reorganized frequently_.
 
 `rsync-sidekick` is a safe and simple tool that is designed to run **before** `rsync` is run.
 
-This propagates following changes (or any combination) from _source directory_ to _destination directory_:
+## What does this do?
+`rsync-sidekick` propagates following changes (or any combination) from _source directory_ to _destination directory_:
 
 1. Change in file modification timestamp
 2. Rename of file/directory

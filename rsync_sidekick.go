@@ -114,6 +114,9 @@ func rsyncSidekick(runID string, sourceDirPath string, exclusions lib.Set[string
 	if err != nil {
 		return err // no extra info needed
 	}
+	if len(actions) == 0 {
+		return nil
+	}
 	if scriptGen {
 		shellScriptFileName := fmt.Sprintf("sync_actions_%s.sh", runID)
 		return generateScript(actions, shellScriptFileName)
@@ -150,7 +153,11 @@ func generateScript(actions []action.SyncAction, shellScriptFileName string) err
 	fmte.Printf("Writing sync actions to shell script \"%s\"...\n", shellScriptFileName)
 	shellScriptFile, shellScriptCreateErr := os.Create(shellScriptFileName)
 	if shellScriptCreateErr != nil {
-		return fmt.Errorf("couldn't create: %v", shellScriptCreateErr)
+		return fmt.Errorf("couldn't create file '%s': %+v", shellScriptFileName, shellScriptCreateErr)
+	}
+	permsErr := os.Chmod(shellScriptFileName, 0700)
+	if permsErr != nil {
+		return fmt.Errorf("couldn't change permissions on file '%s': %+v", shellScriptFileName, permsErr)
 	}
 	defer shellScriptFile.Close()
 	var sb strings.Builder

@@ -112,7 +112,7 @@ func createDirectory(path string) {
 
 func TestRSyncSidekick(t *testing.T) {
 	setup()
-	//defer tearDown(t)
+	defer tearDown(t)
 	fmte.Off()
 	// Source and destination are in sync (base case)
 	actions1, syncErr1 := getSyncActionsWithProgress(runID, srcPath, exclusionsForTests, dstPath, true)
