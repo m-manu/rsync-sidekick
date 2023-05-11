@@ -18,6 +18,7 @@ type SyncAction interface {
 
 const cmdSeparator = "\u0001"
 
+// escape escapes the path for use in a unix command
 func escape(path string) string {
 	escaped := path
 	escaped = strings.ReplaceAll(escaped, "\\", "\\\\") // This replace should be first

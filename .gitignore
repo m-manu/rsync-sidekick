@@ -4,3 +4,4 @@
 *.txt
 *.out
 /test_cases_*
+.DS_Store

@@ -3,6 +3,7 @@ package main
 import (
 	_ "embed"
 	"fmt"
+	set "github.com/deckarep/golang-set/v2"
 	"github.com/m-manu/rsync-sidekick/fmte"
 	"github.com/m-manu/rsync-sidekick/lib"
 	"github.com/m-manu/rsync-sidekick/service"
@@ -16,8 +17,8 @@ import (
 
 const (
 	applicationMajorVersion = 1
-	applicationMinorVersion = 4
-	applicationPatchVersion = 1
+	applicationMinorVersion = 5
+	applicationPatchVersion = 0
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -34,6 +35,7 @@ const (
 	exitCodeSyncError
 	exitCodeExclusionFilesError
 	exitCodeInvalidExclusions
+	exitCodeScriptPathError
 )
 
 //go:embed default_exclusions.txt
@@ -41,8 +43,9 @@ var defaultExclusionsStr string
 
 var flags struct {
 	isHelp            func() bool
-	getExcludedFiles  func() lib.Set[string]
+	getExcludedFiles  func() set.Set[string]
 	isShellScriptMode func() bool
+	scriptOutputPath  func() string
 	getListFilesDir   func() bool
 	isVerbose         func() bool
 	showVersion       func() bool
@@ -56,9 +59,9 @@ func setupExclusionsOpt() {
 		fmt.Sprintf("path to file containing newline separated list of file/directory names to be excluded\n"+
 			"(even if this is not set, files/directories such these will still be ignored: %s etc.)",
 			strings.Join(defaultExclusionsExamples, ", ")))
-	flags.getExcludedFiles = func() lib.Set[string] {
+	flags.getExcludedFiles = func() set.Set[string] {
 		excludesListFilePath := *excludesListFilePathPtr
-		var exclusions lib.Set[string]
+		var exclusions set.Set[string]
 		if excludesListFilePath == exclusionsDefaultValue {
 			exclusions = defaultExclusions
 		} else {
@@ -129,13 +132,28 @@ func setupShowVersion() {
 	}
 }
 
+const (
+	shellScript       = "shellscript"
+	shellScriptAtPath = "shellscript-at-path"
+)
+
 func setupShellScriptOpt() {
-	scriptGenFlagPtr := flag.BoolP("shellscript", "s", false,
+	scriptGenFlagPtr := flag.BoolP(shellScript, "s", false,
 		"instead of applying changes directly, generate a shell script\n"+
 			"(this flag is useful if you want 'dry run' this tool or want to run the shell script as a different user)",
 	)
 	flags.isShellScriptMode = func() bool {
 		return *scriptGenFlagPtr
+	}
+}
+
+func setupShellScriptWithNameOpt() {
+	scriptOutputPathPtr := flag.StringP(shellScriptAtPath, "p", "",
+		"similar to --"+shellScript+" option but you can specify output script path\n"+
+			"(this flag cannot be specified if --"+shellScript+" option is specified)",
+	)
+	flags.scriptOutputPath = func() string {
+		return *scriptOutputPathPtr
 	}
 }
 
@@ -176,6 +194,7 @@ func setupFlags() {
 	setupHelpOpt()
 	setupExclusionsOpt()
 	setupShellScriptOpt()
+	setupShellScriptWithNameOpt()
 	setupVerboseOpt()
 	setupGetListFilesDir()
 	setupShowVersion()
@@ -216,9 +235,22 @@ func main() {
 			os.Exit(exitCodeListFilesDirError)
 		}
 	}
+	if flags.isShellScriptMode() && flags.scriptOutputPath() != "" {
+		fmte.PrintfErr("error: flags --%s and --%s are both specified (you can only specify one of them)", shellScript, shellScriptAtPath)
+		os.Exit(exitCodeScriptPathError)
+	}
+
 	runID := time.Now().Format("150405")
-	syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath, flags.isShellScriptMode(),
-		flags.isVerbose())
+
+	var scriptOutputPath string
+	if flags.isShellScriptMode() {
+		scriptOutputPath = fmt.Sprintf("./sync_actions_%s.sh", runID)
+	} else if flags.scriptOutputPath() != "" {
+		scriptOutputPath = flags.scriptOutputPath()
+	}
+
+	syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath,
+		scriptOutputPath, flags.isVerbose())
 	if syncErr != nil {
 		fmte.PrintfErr("error while syncing: %+v\n", syncErr)
 		os.Exit(exitCodeSyncError)

@@ -13,6 +13,7 @@ photos, etc.) _that are reorganized frequently_.
 `rsync-sidekick` is a safe and simple tool that is designed to run **before** `rsync` is run.
 
 ## What does this do?
+
 `rsync-sidekick` propagates following changes (or any combination) from _source directory_ to _destination directory_:
 
 1. Change in file modification timestamp
@@ -33,7 +34,7 @@ Note:
 
 ## How to install?
 
-1. Install Go version at least **1.18**
+1. Install Go version at least **1.19**
     * On Ubuntu: `snap install go`
     * On Mac: `brew install go`
     * For anything else: [Go downloads page](https://go.dev/dl/)
@@ -76,14 +77,16 @@ where,
 	[destination-dir]   Destination directory
 
 flags: (all optional)
-  -x, --exclusions string   path to file containing newline separated list of file/directory names to be excluded
-                            (even if this is not set, files/directories such these will still be ignored: $RECYCLE.BIN, desktop.ini, Thumbs.db etc.)
-  -h, --help                display help
-      --list                list files along their metadata for given directory
-  -s, --shellscript         instead of applying changes directly, generate a shell script
-                            (this flag is useful if you want 'dry run' this tool or want to run the shell script as a different user)
-  -v, --verbose             generates extra information, even a file dump (caution: makes it slow!)
-      --version             show version
+  -x, --exclusions string            path to file containing newline separated list of file/directory names to be excluded
+                                     (even if this is not set, files/directories such these will still be ignored: $RECYCLE.BIN, desktop.ini, Thumbs.db etc.)
+  -h, --help                         display help
+      --list                         list files along their metadata for given directory
+  -s, --shellscript                  instead of applying changes directly, generate a shell script
+                                     (this flag is useful if you want 'dry run' this tool or want to run the shell script as a different user)
+  -p, --shellscript-at-path string   similar to --shellscript option but you can specify output script path
+                                     (this flag cannot be specified if --shellscript option is specified)
+  -v, --verbose                      generates extra information, even a file dump (caution: makes it slow!)
+      --version                      show application version (v1.5.0) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```

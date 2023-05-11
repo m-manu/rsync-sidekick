@@ -1,6 +1,7 @@
 package lib
 
 import (
+	set "github.com/deckarep/golang-set/v2"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -31,27 +32,23 @@ func IsReadableFile(path string) bool {
 	return fileInfo.Mode().IsRegular()
 }
 
-// WriteSliceToFile writes a slice to a file
+// WriteSliceToFile writes a slice of strings to a file
 func WriteSliceToFile(slice []string, fileName string) {
 	sliceAsString := strings.Join(slice, "\n")
 	_ = os.WriteFile(fileName, []byte(sliceAsString), fs.ModePerm)
 }
 
-// LineSeparatedStrToMap converts a line-separated string to a map with keys and empty values
-func LineSeparatedStrToMap(lineSeparatedString string) (set Set[string], firstFew []string) {
-	set = NewSet[string](20)
+// LineSeparatedStrToMap converts a line-separated string to a Set of values
+func LineSeparatedStrToMap(lineSeparatedString string) (entries set.Set[string], firstFew []string) {
+	entries = set.NewThreadUnsafeSetWithSize[string](20)
 	firstFew = []string{}
 	for _, e := range strings.Split(lineSeparatedString, "\n") {
-		set.Add(e)
+		entries.Add(strings.TrimSpace(e))
 		firstFew = append(firstFew, e)
 	}
 	if len(firstFew) > 3 {
 		firstFew = firstFew[0:3]
 	}
-	for e := range set {
-		if strings.TrimSpace(e) == "" {
-			delete(set, e)
-		}
-	}
+	entries.Remove("")
 	return
 }

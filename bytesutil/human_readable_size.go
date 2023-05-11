@@ -22,13 +22,16 @@ const (
 	EXBI       = PEBI * KIBI // 1024 power 6 (2 power 60)
 )
 
-// BinaryFormat formats a byte size to a human readable string in binary format.
+// BinaryFormat formats a byte size to a human-readable string in binary format.
 // Uses binary prefixes. See: https://en.m.wikipedia.org/wiki/Binary_prefix
 //
 // For example,
-//		fmt.Println(bytesutil.BinaryFormat(2140))
+//
+//	fmt.Println(bytesutil.BinaryFormat(2140))
+//
 // prints
-//		2.09 KiB
+//
+//	2.09 KiB
 func BinaryFormat(size int64) string {
 	if size < 0 {
 		return ""
@@ -49,13 +52,16 @@ func BinaryFormat(size int64) string {
 	}
 }
 
-// DecimalFormat formats a byte size to a human readable string in decimal format.
+// DecimalFormat formats a byte size to a human-readable string in decimal format.
 // Uses metric prefixes. See: https://en.m.wikipedia.org/wiki/Metric_prefix
 //
 // For example,
-//		fmt.Println(bytesutil.DecimalFormat(2140))
+//
+//	fmt.Println(bytesutil.DecimalFormat(2140))
+//
 // prints
-//		2.14KB
+//
+//	2.14KB
 func DecimalFormat(size int64) string {
 	if size < 0 {
 		return ""

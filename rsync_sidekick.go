@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	set "github.com/deckarep/golang-set/v2"
 	"github.com/m-manu/rsync-sidekick/action"
 	"github.com/m-manu/rsync-sidekick/bytesutil"
 	"github.com/m-manu/rsync-sidekick/entity"
@@ -18,7 +19,7 @@ import (
 
 const unixCommandLengthGuess = 200
 
-func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions lib.Set[string],
+func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions set.Set[string],
 	destinationDirPath string, verbose bool) ([]action.SyncAction, error) {
 	if verbose {
 		fmte.VerboseOn()
@@ -108,8 +109,8 @@ func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions l
 	return actions, nil
 }
 
-func rsyncSidekick(runID string, sourceDirPath string, exclusions lib.Set[string], destinationDirPath string,
-	scriptGen bool, verbose bool) error {
+func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string], destinationDirPath string,
+	outputScriptPath string, verbose bool) error {
 	actions, err := getSyncActionsWithProgress(runID, sourceDirPath, exclusions, destinationDirPath, verbose)
 	if err != nil {
 		return err // no extra info needed
@@ -117,9 +118,8 @@ func rsyncSidekick(runID string, sourceDirPath string, exclusions lib.Set[string
 	if len(actions) == 0 {
 		return nil
 	}
-	if scriptGen {
-		shellScriptFileName := fmt.Sprintf("sync_actions_%s.sh", runID)
-		return generateScript(actions, shellScriptFileName)
+	if outputScriptPath != "" {
+		return generateScript(actions, outputScriptPath)
 	} else {
 		return performActions(actions, destinationDirPath)
 	}
@@ -183,7 +183,7 @@ func reportProgress(sourceActual *int32, sourceExpected int32, destinationActual
 }
 
 func findCandidatesAtDestination(sourceFiles, destinationFiles map[string]entity.FileMeta, orphansAtSource []string) []string {
-	orphansFileExtAndSizeMap := lib.NewSet[entity.FileExtAndSize](len(orphansAtSource))
+	orphansFileExtAndSizeMap := set.NewThreadUnsafeSetWithSize[entity.FileExtAndSize](len(orphansAtSource))
 	for _, path := range orphansAtSource {
 		fileMeta := sourceFiles[path]
 		key := entity.FileExtAndSize{FileExtension: lib.GetFileExt(path), FileSize: fileMeta.Size}
@@ -192,7 +192,7 @@ func findCandidatesAtDestination(sourceFiles, destinationFiles map[string]entity
 	candidatesAtDestination := make([]string, 0, len(orphansAtSource))
 	for path, fileMeta := range destinationFiles {
 		key := entity.FileExtAndSize{FileExtension: lib.GetFileExt(path), FileSize: fileMeta.Size}
-		if orphansFileExtAndSizeMap.Exists(key) {
+		if orphansFileExtAndSizeMap.Contains(key) {
 			candidatesAtDestination = append(candidatesAtDestination, path)
 		}
 	}

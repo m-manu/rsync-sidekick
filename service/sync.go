@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/csv"
 	"fmt"
+	set "github.com/deckarep/golang-set/v2"
 	"github.com/m-manu/rsync-sidekick/action"
 	"github.com/m-manu/rsync-sidekick/entity"
 	"github.com/m-manu/rsync-sidekick/fmte"
@@ -104,7 +105,7 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 			destinationIndexErrs)
 	}
 	actions = make([]action.SyncAction, 0, orphanFilesToDigests.Len())
-	uniqueness := lib.NewSet[string](orphanFilesToDigests.Len())
+	uniqueness := set.NewSetWithSize[string](orphanFilesToDigests.Len())
 	for orphanAtSource, orphanDigest := range orphanFilesToDigests.Data {
 		if len(orphanDigestsToFiles.Get(orphanDigest)) > 1 {
 			// many orphans at source have the same digest
@@ -138,7 +139,7 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 				SourceFileRelativePath:      orphanAtSource,
 				DestinationFileRelativePath: candidateAtDestination,
 			}
-			if !uniqueness.Exists(timestampAction.Uniqueness()) {
+			if !uniqueness.Contains(timestampAction.Uniqueness()) {
 				actions = append(actions, timestampAction)
 				uniqueness.Add(timestampAction.Uniqueness())
 				savings += sourceFiles[orphanAtSource].Size
@@ -151,7 +152,7 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 				directoryAction := action.MakeDirectoryAction{
 					AbsoluteDirPath: parentDir,
 				}
-				if !uniqueness.Exists(directoryAction.Uniqueness()) {
+				if !uniqueness.Contains(directoryAction.Uniqueness()) {
 					actions = append(actions, directoryAction)
 					uniqueness.Add(directoryAction.Uniqueness())
 				}
@@ -161,7 +162,7 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 				RelativeFromPath: candidateAtDestination,
 				RelativeToPath:   orphanAtSource,
 			}
-			if !uniqueness.Exists(moveFileAction.Uniqueness()) {
+			if !uniqueness.Contains(moveFileAction.Uniqueness()) {
 				actions = append(actions, moveFileAction)
 				uniqueness.Add(moveFileAction.Uniqueness())
 				savings += sourceFiles[orphanAtSource].Size
@@ -182,7 +183,7 @@ func getParallelism(n int) (int, int) {
 	return 1, 1
 }
 
-func FindDirectoryResultToCsv(dirPath string, excludedFiles lib.Set[string], file *os.File) error {
+func FindDirectoryResultToCsv(dirPath string, excludedFiles set.Set[string], file *os.File) error {
 	files, _, fErr := FindFilesFromDirectory(dirPath, excludedFiles)
 	if fErr != nil {
 		return fErr
