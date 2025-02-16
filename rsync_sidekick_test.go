@@ -30,7 +30,6 @@ var runID string
 var testCasesDir string
 
 func init() {
-	rand.Seed(time.Now().UTC().UnixNano())
 	runID = time.Now().Format("150405")
 	exclusionsForTests = set.NewSet[string]("Thumbs.db", "System Volume Information", ".Trashes")
 	var cdErr error
