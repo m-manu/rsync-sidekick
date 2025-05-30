@@ -110,7 +110,7 @@ func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions s
 }
 
 func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string], destinationDirPath string,
-	outputScriptPath string, verbose bool) error {
+	outputScriptPath string, verbose bool, dryRun bool) error {
 	actions, err := getSyncActionsWithProgress(runID, sourceDirPath, exclusions, destinationDirPath, verbose)
 	if err != nil {
 		return err // no extra info needed
@@ -121,31 +121,45 @@ func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string
 	if outputScriptPath != "" {
 		return generateScript(actions, outputScriptPath)
 	} else {
-		return performActions(actions, destinationDirPath)
+		return performActions(actions, destinationDirPath, dryRun)
 	}
 }
 
-func performActions(actions []action.SyncAction, destinationDirPath string) error {
+func performActions(actions []action.SyncAction, destinationDirPath string, dryRun bool) error {
 	var start, end time.Time
-	fmte.Printf("Applying sync actions at destination...\n")
+	if dryRun {
+		fmte.Printf("Simulating sync actions at destination (dry run)...\n")
+	} else {
+		fmte.Printf("Applying sync actions at destination...\n")
+	}
 	successCount := 0
 	start = time.Now()
 	for i, syncAction := range actions {
-		fmte.Println(strings.Replace(
+		fmte.Print(strings.Replace(
 			fmt.Sprintf("%4d/%d %s: ", i+1, len(actions), syncAction),
 			destinationDirPath+"/", "", -1,
 		))
-		aErr := syncAction.Perform()
-		if aErr == nil {
-			fmte.Printf("done\n")
+		if dryRun {
+			fmte.Printf("skipping (dry run)\n")
 			successCount++
 		} else {
-			fmte.Printf("failed due to: %+v\n", aErr)
+			aErr := syncAction.Perform()
+			if aErr == nil {
+				fmte.Printf("done\n")
+				successCount++
+			} else {
+				fmte.Printf("failed due to: %+v\n", aErr)
+			}
 		}
 	}
 	end = time.Now()
-	fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded\n",
-		end.Sub(start).Seconds(), successCount, len(actions))
+	if dryRun {
+		fmte.Printf("Dry run completed in %.1fs: %d actions would be performed\n",
+			end.Sub(start).Seconds(), successCount)
+	} else {
+		fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded\n",
+			end.Sub(start).Seconds(), successCount, len(actions))
+	}
 	return nil
 }
 

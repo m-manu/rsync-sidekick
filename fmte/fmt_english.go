@@ -59,6 +59,15 @@ func Println(a ...any) {
 	mx.Unlock()
 }
 
+func Print(a ...any) {
+	if !normalPrint {
+		return
+	}
+	mx.Lock()
+	_, _ = p.Print(a...)
+	mx.Unlock()
+}
+
 // PrintfErr is goroutine-safe fmt.Printf to StdErr for English
 func PrintfErr(format string, a ...any) {
 	mx.Lock()

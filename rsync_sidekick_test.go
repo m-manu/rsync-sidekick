@@ -156,7 +156,7 @@ func TestRSyncSidekick(t *testing.T) {
 	// Case 6: Rename file inside ignored directory
 	moveFile(atSrc(".Trashes/go.sum"), atSrc(".Trashes/go1.sum"))
 	// Propagate these changes to destination and verify:
-	rsErr1 := rsyncSidekick(runID, srcPath, exclusionsForTests, dstPath, "", false)
+	rsErr1 := rsyncSidekick(runID, srcPath, exclusionsForTests, dstPath, "", false, false)
 	stopIfError(t, rsErr1)
 	// Assert at destination:
 	assert.FileExists(t, atDst("/go1_renamed"))
