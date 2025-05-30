@@ -34,7 +34,7 @@ Note:
 
 ## How to install?
 
-1. Install Go version at least **1.22**
+1. Install Go version at least **1.23**
     * On Ubuntu: `snap install go`
     * On Mac: `brew install go`
     * For anything else: [Go downloads page](https://go.dev/dl/)
