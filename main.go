@@ -3,16 +3,17 @@ package main
 import (
 	_ "embed"
 	"fmt"
-	set "github.com/deckarep/golang-set/v2"
-	"github.com/m-manu/rsync-sidekick/fmte"
-	"github.com/m-manu/rsync-sidekick/lib"
-	"github.com/m-manu/rsync-sidekick/service"
-	flag "github.com/spf13/pflag"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
+
+	set "github.com/deckarep/golang-set/v2"
+	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/m-manu/rsync-sidekick/lib"
+	"github.com/m-manu/rsync-sidekick/service"
+	flag "github.com/spf13/pflag"
 )
 
 const (

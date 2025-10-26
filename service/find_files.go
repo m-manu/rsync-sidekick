@@ -2,12 +2,13 @@ package service
 
 import (
 	"fmt"
-	set "github.com/deckarep/golang-set/v2"
-	"github.com/m-manu/rsync-sidekick/entity"
-	"github.com/m-manu/rsync-sidekick/fmte"
 	"io/fs"
 	"path/filepath"
 	"strings"
+
+	set "github.com/deckarep/golang-set/v2"
+	"github.com/m-manu/rsync-sidekick/entity"
+	"github.com/m-manu/rsync-sidekick/fmte"
 )
 
 const numFilesGuess = 10_000
@@ -21,15 +22,16 @@ func FindFilesFromDirectory(dirPath string, excludedFiles set.Set[string]) (
 ) {
 	allFiles := make(map[string]entity.FileMeta, numFilesGuess)
 	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			fmte.PrintfErr("skipping \"%s\": %+v\n", path, err)
-		}
 		// If the file/directory is in excluded files list, ignore it
 		if excludedFiles.Contains(d.Name()) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if err != nil {
+			// If we couldn't access this path, report and skip it.
+			fmte.PrintfErr("skipping \"%s\": %+v\n", path, err)
 		}
 		// Ignore dot files (Mac)
 		if strings.HasPrefix(d.Name(), "._") {

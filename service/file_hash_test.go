@@ -1,10 +1,11 @@
 package service
 
 import (
+	"os"
+	"testing"
+
 	"github.com/m-manu/rsync-sidekick/bytesutil"
 	"github.com/stretchr/testify/assert"
-	"runtime"
-	"testing"
 )
 
 func TestConfig(t *testing.T) {
@@ -13,8 +14,8 @@ func TestConfig(t *testing.T) {
 
 func TestGetDigest(t *testing.T) {
 	var paths = []string{
-		runtime.GOROOT() + "/src/io/io.go",
-		runtime.GOROOT() + "/src/io/pipe.go",
+		os.Getenv("GOROOT") + "/src/io/io.go",
+		os.Getenv("GOROOT") + "/src/io/pipe.go",
 	}
 	for _, path := range paths {
 		digest, err := getDigest(path)

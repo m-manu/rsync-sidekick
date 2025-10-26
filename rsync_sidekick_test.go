@@ -2,17 +2,17 @@ package main
 
 import (
 	"fmt"
-	set "github.com/deckarep/golang-set/v2"
-	"github.com/m-manu/rsync-sidekick/action"
-	"github.com/m-manu/rsync-sidekick/fmte"
-	"github.com/stretchr/testify/assert"
 	"math/rand"
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
+
+	set "github.com/deckarep/golang-set/v2"
+	"github.com/m-manu/rsync-sidekick/action"
+	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/stretchr/testify/assert"
 )
 
 // These would be inside the test cases directory
@@ -94,7 +94,7 @@ const (
 )
 
 func copyFromGoRootAs(pathInsideGoRoot string, relativePath string, place Where) {
-	p := path.Join(runtime.GOROOT(), pathInsideGoRoot)
+	p := path.Join(os.Getenv("GOROOT"), pathInsideGoRoot)
 	if place == Source || place == Both {
 		copyFile(p, atSrc(relativePath))
 	}

@@ -1,14 +1,14 @@
 module github.com/m-manu/rsync-sidekick
 
-go 1.23.0
+go 1.24.0
 
-toolchain go1.23.2
+toolchain go1.24.9
 
 require (
 	github.com/deckarep/golang-set/v2 v2.8.0
-	github.com/spf13/pflag v1.0.6
-	github.com/stretchr/testify v1.10.0
-	golang.org/x/text v0.25.0
+	github.com/spf13/pflag v1.0.10
+	github.com/stretchr/testify v1.11.1
+	golang.org/x/text v0.30.0
 )
 
 require (

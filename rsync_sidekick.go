@@ -2,6 +2,13 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
 	set "github.com/deckarep/golang-set/v2"
 	"github.com/m-manu/rsync-sidekick/action"
 	"github.com/m-manu/rsync-sidekick/bytesutil"
@@ -9,12 +16,6 @@ import (
 	"github.com/m-manu/rsync-sidekick/fmte"
 	"github.com/m-manu/rsync-sidekick/lib"
 	"github.com/m-manu/rsync-sidekick/service"
-	"os"
-	"sort"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
 )
 
 const unixCommandLengthGuess = 200
@@ -180,7 +181,10 @@ func generateScript(actions []action.SyncAction, shellScriptFileName string) err
 		sb.WriteString(a.UnixCommand())
 		sb.WriteString("\n")
 	}
-	shellScriptFile.WriteString(sb.String())
+	_, errFC := shellScriptFile.WriteString(sb.String())
+	if errFC != nil {
+		return fmt.Errorf("couldn't write to file '%s': %+v", shellScriptFileName, errFC)
+	}
 	fmte.Printf("Done. You may run it now.\n")
 	return nil
 }
