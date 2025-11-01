@@ -13,6 +13,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: 1.24
+      - name: Set GOROOT environment variable
+        run: echo "GOROOT=$(go env GOROOT)" >> $GITHUB_ENV
       - name: Build code
         run: go build
       - name: Test code
