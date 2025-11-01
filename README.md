@@ -86,7 +86,7 @@ flags: (all optional)
   -p, --shellscript-at-path string   similar to --shellscript option but you can specify output script path
                                      (this flag cannot be specified if --shellscript option is specified)
   -v, --verbose                      generates extra information, even a file dump (caution: makes it slow!)
-      --version                      show application version (v1.7.0) and exit
+      --version                      show application version (v1.8.0) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```

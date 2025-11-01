@@ -134,16 +134,19 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 			continue
 		}
 		if destinationFiles[candidateAtDestination].ModifiedTimestamp != sourceFiles[orphanAtSource].ModifiedTimestamp {
-			timestampAction := action.PropagateTimestampAction{
-				SourceBaseDirPath:           sourceDirPath,
-				DestinationBaseDirPath:      destinationDirPath,
-				SourceFileRelativePath:      orphanAtSource,
-				DestinationFileRelativePath: candidateAtDestination,
-			}
-			if !uniqueness.Contains(timestampAction.Uniqueness()) {
-				actions = append(actions, timestampAction)
-				uniqueness.Add(timestampAction.Uniqueness())
-				savings += sourceFiles[orphanAtSource].Size
+			// Avoid propagating timestamp to a destination file that already matches its counterpart at source
+			if srcMetaForCandidate, existsAtSourceForCandidate := sourceFiles[candidateAtDestination]; !(existsAtSourceForCandidate && srcMetaForCandidate == destinationFiles[candidateAtDestination]) {
+				timestampAction := action.PropagateTimestampAction{
+					SourceBaseDirPath:           sourceDirPath,
+					DestinationBaseDirPath:      destinationDirPath,
+					SourceFileRelativePath:      orphanAtSource,
+					DestinationFileRelativePath: candidateAtDestination,
+				}
+				if !uniqueness.Contains(timestampAction.Uniqueness()) {
+					actions = append(actions, timestampAction)
+					uniqueness.Add(timestampAction.Uniqueness())
+					savings += sourceFiles[orphanAtSource].Size
+				}
 			}
 		}
 		if _, existsAtSource := sourceFiles[candidateAtDestination]; !existsAtSource &&

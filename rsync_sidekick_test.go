@@ -29,6 +29,8 @@ var runID string
 
 var testCasesDir string
 
+var originalWorkingDir string
+
 func init() {
 	runID = time.Now().Format("150405")
 	exclusionsForTests = set.NewSet[string]("Thumbs.db", "System Volume Information", ".Trashes")
@@ -62,18 +64,25 @@ func cd(path string) {
 }
 
 func setup() {
+	// Remember current working directory so we can restore it in tearDown
+	wd, err := os.Getwd()
+	if err != nil {
+		panic(fmt.Errorf("error: Unable to get current working directory: %+v", err))
+	}
+	originalWorkingDir = wd
+
 	createDirectory(testCasesDir)
 	cd(testCasesDir)
-	createDirectoryAt(".", Both)
+	createDirectoryAt(".", SourceAndDestination)
 	// Files and folders in sync between source and destination:
-	copyFromGoRootAs("bin/go", "/go1", Both)
-	copyFromGoRootAs("bin/gofmt", "gofmt1", Both)
-	createDirectoryAt("code", Both)
-	copyFromGoRootAs("src/sort/sort.go", "code/sort.go.txt", Both)
-	copyFromGoRootAs("src/unicode/tables.go", "code/tables.go.txt", Both)
-	copyFromGoRootAs("src/sync/map.go", "map.go.txt", Both)
-	createDirectoryAt(".Trashes", Both)
-	copyFromGoRootAs("src/cmd/go.sum", ".Trashes/go.sum", Both)
+	copyFromGoRootAs("bin/go", "/go1", SourceAndDestination)
+	copyFromGoRootAs("bin/gofmt", "gofmt1", SourceAndDestination)
+	createDirectoryAt("code", SourceAndDestination)
+	copyFromGoRootAs("src/sort/sort.go", "code/sort.go.txt", SourceAndDestination)
+	copyFromGoRootAs("src/unicode/tables.go", "code/tables.go.txt", SourceAndDestination)
+	copyFromGoRootAs("src/sync/map.go", "map.go.txt", SourceAndDestination)
+	createDirectoryAt(".Trashes", SourceAndDestination)
+	copyFromGoRootAs("src/cmd/go.sum", ".Trashes/go.sum", SourceAndDestination)
 	// Files and folders only in source:
 	createDirectoryAt("random_empty_directory_at_source", Source)
 	copyFromGoRootAs("VERSION", "some_file_at_source.txt", Source)
@@ -90,15 +99,15 @@ type Where int8
 const (
 	Source Where = iota
 	Destination
-	Both
+	SourceAndDestination
 )
 
 func copyFromGoRootAs(pathInsideGoRoot string, relativePath string, place Where) {
 	p := path.Join(os.Getenv("GOROOT"), pathInsideGoRoot)
-	if place == Source || place == Both {
+	if place == Source || place == SourceAndDestination {
 		copyFile(p, atSrc(relativePath))
 	}
-	if place == Destination || place == Both {
+	if place == Destination || place == SourceAndDestination {
 		copyFile(p, atDst(relativePath))
 	}
 }
@@ -120,10 +129,10 @@ func createDirectory(path string) {
 }
 
 func createDirectoryAt(relativePath string, where Where) {
-	if where == Source || where == Both {
+	if where == Source || where == SourceAndDestination {
 		createDirectory(atSrc(relativePath))
 	}
-	if where == Destination || where == Both {
+	if where == Destination || where == SourceAndDestination {
 		createDirectory(atDst(relativePath))
 	}
 }
@@ -235,6 +244,12 @@ func overwriteFileAtWith(filename string, position int, content string) {
 }
 
 func tearDown(t *testing.T) {
+	// Switch back to the original working directory before deleting the test directory.
+	// If we delete the current working directory, subsequent calls to filepath.Abs/os.Getwd()
+	// in later tests can fail with "getwd: no such file or directory".
+	if originalWorkingDir != "" {
+		_ = os.Chdir(originalWorkingDir)
+	}
 	err := os.RemoveAll(testCasesDir)
 	stopIfError(t, err)
 }
@@ -243,4 +258,88 @@ func stopIfError(t *testing.T, err error) {
 	if err != nil {
 		t.Fatalf("Failed due to error: %+v", err)
 	}
+}
+
+// TestTimestampPropagationBug reproduces the bug where rsync-sidekick incorrectly propagates
+// the timestamp of a source file to a destination file with the same content, even though
+// the destination file is already in sync with another source file.
+func TestTimestampPropagationBug(t *testing.T) {
+	// Create a test directory with source and destination subdirectories
+	testDir, err := filepath.Abs("./test_timestamp_bug_" + runID)
+	stopIfError(t, err)
+	createDirectory(testDir)
+	defer func() {
+		errRemDir := os.RemoveAll(testDir)
+		if errRemDir != nil {
+			panic(errRemDir)
+		}
+	}()
+
+	// Create source and destination directories
+	srcDir := filepath.Join(testDir, "source")
+	dstDir := filepath.Join(testDir, "destination")
+	createDirectory(srcDir)
+	createDirectory(dstDir)
+
+	// Create file-1 with the same content and timestamp in source and destination
+	fileContent := []byte("The quick brown fox jumps over the lazy dog")
+	file1SrcPath := filepath.Join(srcDir, "file-1")
+	file1DstPath := filepath.Join(dstDir, "file-1")
+	err = os.WriteFile(file1SrcPath, fileContent, 0644)
+	stopIfError(t, err)
+	err = os.WriteFile(file1DstPath, fileContent, 0644)
+	stopIfError(t, err)
+
+	// Ensure file-1 has the same timestamp in source and destination
+	file1Time := time.Now().Add(-1 * time.Hour)
+	err = os.Chtimes(file1SrcPath, file1Time, file1Time)
+	stopIfError(t, err)
+	err = os.Chtimes(file1DstPath, file1Time, file1Time)
+	stopIfError(t, err)
+
+	// Create file-2 with different content in destination
+	file2DstPath := filepath.Join(dstDir, "file-2")
+	err = os.WriteFile(file2DstPath, []byte("b"), 0644)
+	stopIfError(t, err)
+	file2DstTime := time.Now().Add(-30 * time.Minute)
+	err = os.Chtimes(file2DstPath, file2DstTime, file2DstTime)
+	stopIfError(t, err)
+
+	// Create file-2 in source with the same content as file-1
+	file2SrcPath := filepath.Join(srcDir, "file-2")
+	err = os.WriteFile(file2SrcPath, fileContent, 0644)
+	stopIfError(t, err)
+	file2SrcTime := time.Now().Add(-15 * time.Minute)
+	err = os.Chtimes(file2SrcPath, file2SrcTime, file2SrcTime)
+	stopIfError(t, err)
+
+	// Verify the initial setup
+	assert.Equal(t, file1Time.Unix(), modifiedTime(file1SrcPath))
+	assert.Equal(t, file1Time.Unix(), modifiedTime(file1DstPath))
+	assert.Equal(t, file2SrcTime.Unix(), modifiedTime(file2SrcPath))
+	assert.Equal(t, file2DstTime.Unix(), modifiedTime(file2DstPath))
+
+	// Run rsync-sidekick
+	fmte.Off()
+	exclusions := set.NewSet[string]()
+	actions, syncErr := getSyncActionsWithProgress(runID, srcDir, exclusions, dstDir, true)
+	stopIfError(t, syncErr)
+
+	// The bug is that rsync-sidekick will incorrectly create an action to propagate
+	// the timestamp of source/file-2 to destination/file-1
+
+	// Check if there's an action to propagate timestamp from source/file-2 to destination/file-1
+	foundIncorrectAction := false
+	for _, a := range actions {
+		if propAction, ok := a.(action.PropagateTimestampAction); ok {
+			if propAction.SourceFileRelativePath == "file-2" &&
+				propAction.DestinationFileRelativePath == "file-1" {
+				foundIncorrectAction = true
+				break
+			}
+		}
+	}
+
+	// This assertion should fail when the bug is present
+	assert.False(t, foundIncorrectAction, "Bug detected: rsync-sidekick incorrectly propagates timestamp from source/file-2 to destination/file-1")
 }
