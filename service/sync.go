@@ -3,17 +3,18 @@ package service
 import (
 	"encoding/csv"
 	"fmt"
-	set "github.com/deckarep/golang-set/v2"
-	"github.com/m-manu/rsync-sidekick/action"
-	"github.com/m-manu/rsync-sidekick/entity"
-	"github.com/m-manu/rsync-sidekick/fmte"
-	"github.com/m-manu/rsync-sidekick/lib"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
+
+	set "github.com/deckarep/golang-set/v2"
+	"github.com/m-manu/rsync-sidekick/action"
+	"github.com/m-manu/rsync-sidekick/entity"
+	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/m-manu/rsync-sidekick/lib"
 )
 
 const (

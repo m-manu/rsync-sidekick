@@ -3,11 +3,12 @@ package service
 import (
 	"encoding/hex"
 	"fmt"
+	"hash/crc32"
+	"os"
+
 	"github.com/m-manu/rsync-sidekick/bytesutil"
 	"github.com/m-manu/rsync-sidekick/entity"
 	"github.com/m-manu/rsync-sidekick/lib"
-	"hash/crc32"
-	"os"
 )
 
 const (

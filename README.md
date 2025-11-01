@@ -22,10 +22,9 @@ photos, etc.) _that are reorganized frequently_.
 
 Note:
 
-* This tool **does not delete** any files or folders (under any circumstances) -- that's why safe-to-use 😌
+* This tool **does not delete** any files or folders (under any circumstances) -- that's why it's safe to use 😌
     * Your files are just _moved around_
-    * Now, if you're uncomfortable with this tool even moving your files around, there is a `--shellscript` option, that
-      just generates a script for you to read and run (think of it like a `--dry-run` option)
+    * Now, if you're uncomfortable with this tool even moving your files around, consider using the `--dry-run` option
 * This tool **does not** actually **transfer** files -- that's for `rsync` to do 🙂
 * Since you'd run `rsync` after this tool is run, any changes that this tool couldn't propagate would just be propagated
   by `rsync`
@@ -34,7 +33,7 @@ Note:
 
 ## How to install?
 
-1. Install Go version at least **1.22**
+1. Install Go version at least **1.24**
     * On Ubuntu: `snap install go`
     * On Mac: `brew install go`
     * For anything else: [Go downloads page](https://go.dev/dl/)
@@ -77,16 +76,17 @@ where,
 	[destination-dir]   Destination directory
 
 flags: (all optional)
+  -n, --dry-run                      show what would be done, but don't actually perform any actions
   -x, --exclusions string            path to file containing newline separated list of file/directory names to be excluded
                                      (even if this is not set, files/directories such these will still be ignored: $RECYCLE.BIN, desktop.ini, Thumbs.db etc.)
   -h, --help                         display help
       --list                         list files along their metadata for given directory
   -s, --shellscript                  instead of applying changes directly, generate a shell script
-                                     (this flag is useful if you want 'dry run' this tool or want to run the shell script as a different user)
+                                     (this flag is useful if you want to run the shell script as a different user)
   -p, --shellscript-at-path string   similar to --shellscript option but you can specify output script path
                                      (this flag cannot be specified if --shellscript option is specified)
   -v, --verbose                      generates extra information, even a file dump (caution: makes it slow!)
-      --version                      show application version (v1.5.0) and exit
+      --version                      show application version (v1.7.0) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```

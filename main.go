@@ -3,27 +3,25 @@ package main
 import (
 	_ "embed"
 	"fmt"
-	set "github.com/deckarep/golang-set/v2"
-	"github.com/m-manu/rsync-sidekick/fmte"
-	"github.com/m-manu/rsync-sidekick/lib"
-	"github.com/m-manu/rsync-sidekick/service"
-	flag "github.com/spf13/pflag"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
+
+	set "github.com/deckarep/golang-set/v2"
+	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/m-manu/rsync-sidekick/lib"
+	"github.com/m-manu/rsync-sidekick/service"
+	flag "github.com/spf13/pflag"
 )
 
 const (
 	applicationMajorVersion = 1
-	applicationMinorVersion = 6
-	applicationPatchVersion = 0
+	applicationMinorVersion = 7
 )
 
-var applicationVersion = fmt.Sprintf("v%d.%d.%d",
-	applicationMajorVersion, applicationMinorVersion, applicationPatchVersion,
-)
+var applicationVersion = fmt.Sprintf("v%d.%d", applicationMajorVersion, applicationMinorVersion)
 
 // Constants indicating return codes of this tool, when run from command line
 const (
@@ -49,6 +47,7 @@ var flags struct {
 	getListFilesDir   func() bool
 	isVerbose         func() bool
 	showVersion       func() bool
+	isDryRun          func() bool
 }
 
 func setupExclusionsOpt() {
@@ -140,7 +139,7 @@ const (
 func setupShellScriptOpt() {
 	scriptGenFlagPtr := flag.BoolP(shellScript, "s", false,
 		"instead of applying changes directly, generate a shell script\n"+
-			"(this flag is useful if you want 'dry run' this tool or want to run the shell script as a different user)",
+			"(this flag is useful if you want to run the shell script as a different user)",
 	)
 	flags.isShellScriptMode = func() bool {
 		return *scriptGenFlagPtr
@@ -190,6 +189,15 @@ func readSourceAndDestination() (string, string) {
 	return sourceDirPath, destinationDirPath
 }
 
+func setupDryRunOpt() {
+	dryRunPtr := flag.BoolP("dry-run", "n", false,
+		"show what would be done, but don't actually perform any actions",
+	)
+	flags.isDryRun = func() bool {
+		return *dryRunPtr
+	}
+}
+
 func setupFlags() {
 	setupHelpOpt()
 	setupExclusionsOpt()
@@ -198,6 +206,7 @@ func setupFlags() {
 	setupVerboseOpt()
 	setupGetListFilesDir()
 	setupShowVersion()
+	setupDryRunOpt()
 	setupUsage()
 }
 
@@ -240,7 +249,7 @@ func main() {
 		os.Exit(exitCodeScriptPathError)
 	}
 
-	runID := time.Now().Format("150405")
+	runID := time.Now().Format("060102_150405")
 
 	var scriptOutputPath string
 	if flags.isShellScriptMode() {
@@ -250,7 +259,7 @@ func main() {
 	}
 
 	syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath,
-		scriptOutputPath, flags.isVerbose())
+		scriptOutputPath, flags.isVerbose(), flags.isDryRun())
 	if syncErr != nil {
 		fmte.PrintfErr("error while syncing: %+v\n", syncErr)
 		os.Exit(exitCodeSyncError)
