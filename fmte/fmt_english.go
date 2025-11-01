@@ -1,12 +1,13 @@
 package fmte
 
 import (
-	"fmt"
-	"golang.org/x/text/language"
-	"golang.org/x/text/message"
+	"errors"
 	"os"
 	"strings"
 	"sync"
+
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
 )
 
 var p *message.Printer
@@ -21,7 +22,7 @@ func init() {
 	p = message.NewPrinter(language.English)
 }
 
-// Off turns off print functions within fmte package
+// Off function turns off print functions within fmte package
 func Off() {
 	normalPrint = false
 }
@@ -50,12 +51,13 @@ func PrintfV(format string, a ...any) {
 	}
 }
 
-func Println(a ...any) {
+// Print is a goroutine-safe fmt.Print for English
+func Print(a ...any) {
 	if !normalPrint {
 		return
 	}
 	mx.Lock()
-	_, _ = p.Println(a...)
+	_, _ = p.Print(a...)
 	mx.Unlock()
 }
 
@@ -75,6 +77,6 @@ func Errors(message string, errs []error) error {
 		sb.WriteString(err.Error())
 		sb.WriteString(", ")
 	}
-	combinedError := fmt.Errorf(sb.String())
+	combinedError := errors.New(sb.String())
 	return combinedError
 }

@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine3.19 AS builder
+FROM golang:1.24-alpine3.20 AS builder
 
 RUN apk --no-cache add build-base
 
@@ -10,11 +10,13 @@ RUN go mod download -x
 
 COPY . .
 
+ENV GOROOT="/usr/local/go/"
+
 RUN go build
 
 RUN go test ./...
 
-FROM alpine:3.19
+FROM alpine:3.20
 
 RUN apk --no-cache add bash
 

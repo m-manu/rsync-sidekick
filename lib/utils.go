@@ -1,11 +1,12 @@
 package lib
 
 import (
-	set "github.com/deckarep/golang-set/v2"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+
+	set "github.com/deckarep/golang-set/v2"
 )
 
 // IsReadableDirectory checks whether a readable directory exists at given path

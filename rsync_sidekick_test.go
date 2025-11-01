@@ -2,17 +2,17 @@ package main
 
 import (
 	"fmt"
-	set "github.com/deckarep/golang-set/v2"
-	"github.com/m-manu/rsync-sidekick/action"
-	"github.com/m-manu/rsync-sidekick/fmte"
-	"github.com/stretchr/testify/assert"
 	"math/rand"
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
+
+	set "github.com/deckarep/golang-set/v2"
+	"github.com/m-manu/rsync-sidekick/action"
+	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/stretchr/testify/assert"
 )
 
 // These would be inside the test cases directory
@@ -94,7 +94,7 @@ const (
 )
 
 func copyFromGoRootAs(pathInsideGoRoot string, relativePath string, place Where) {
-	p := path.Join(runtime.GOROOT(), pathInsideGoRoot)
+	p := path.Join(os.Getenv("GOROOT"), pathInsideGoRoot)
 	if place == Source || place == Both {
 		copyFile(p, atSrc(relativePath))
 	}
@@ -156,7 +156,7 @@ func TestRSyncSidekick(t *testing.T) {
 	// Case 6: Rename file inside ignored directory
 	moveFile(atSrc(".Trashes/go.sum"), atSrc(".Trashes/go1.sum"))
 	// Propagate these changes to destination and verify:
-	rsErr1 := rsyncSidekick(runID, srcPath, exclusionsForTests, dstPath, "", false)
+	rsErr1 := rsyncSidekick(runID, srcPath, exclusionsForTests, dstPath, "", false, false)
 	stopIfError(t, rsErr1)
 	// Assert at destination:
 	assert.FileExists(t, atDst("/go1_renamed"))
