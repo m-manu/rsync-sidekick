@@ -21,7 +21,7 @@ import (
 const unixCommandLengthGuess = 200
 
 func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions set.Set[string],
-	destinationDirPath string, verbose bool) ([]action.SyncAction, error) {
+	destinationDirPath string, verbose bool, progressFrequency time.Duration) ([]action.SyncAction, error) {
 	if verbose {
 		fmte.VerboseOn()
 	}
@@ -93,6 +93,7 @@ func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions s
 		defer wg.Done()
 		reportProgress(&sourceCounter, int32(len(orphansAtSource)),
 			&destinationCounter, int32(len(candidatesAtDestination)),
+			progressFrequency,
 		)
 	}()
 	wg.Wait()
@@ -111,8 +112,8 @@ func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions s
 }
 
 func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string], destinationDirPath string,
-	outputScriptPath string, verbose bool, dryRun bool) error {
-	actions, err := getSyncActionsWithProgress(runID, sourceDirPath, exclusions, destinationDirPath, verbose)
+	outputScriptPath string, verbose bool, dryRun bool, progressFrequency time.Duration) error {
+	actions, err := getSyncActionsWithProgress(runID, sourceDirPath, exclusions, destinationDirPath, verbose, progressFrequency)
 	if err != nil {
 		return err // no extra info needed
 	}
@@ -170,11 +171,11 @@ func generateScript(actions []action.SyncAction, shellScriptFileName string) err
 	if shellScriptCreateErr != nil {
 		return fmt.Errorf("couldn't create file '%s': %+v", shellScriptFileName, shellScriptCreateErr)
 	}
+	defer shellScriptFile.Close()
 	permsErr := os.Chmod(shellScriptFileName, 0700)
 	if permsErr != nil {
 		return fmt.Errorf("couldn't change permissions on file '%s': %+v", shellScriptFileName, permsErr)
 	}
-	defer shellScriptFile.Close()
 	var sb strings.Builder
 	sb.Grow(unixCommandLengthGuess * len(actions))
 	for _, a := range actions {
@@ -189,11 +190,11 @@ func generateScript(actions []action.SyncAction, shellScriptFileName string) err
 	return nil
 }
 
-func reportProgress(sourceActual *int32, sourceExpected int32, destinationActual *int32, destinationExpected int32) {
+func reportProgress(sourceActual *int32, sourceExpected int32, destinationActual *int32, destinationExpected int32, reportingFrequency time.Duration) {
 	var sourceProgress, destinationProgress float64
 	time.Sleep(100 * time.Millisecond)
 	for atomic.LoadInt32(sourceActual) < sourceExpected || atomic.LoadInt32(destinationActual) < destinationExpected {
-		time.Sleep(2 * time.Second)
+		time.Sleep(reportingFrequency)
 		sourceProgress = 100.0 * float64(atomic.LoadInt32(sourceActual)) / float64(sourceExpected)
 		destinationProgress = 100.0 * float64(*destinationActual) / float64(destinationExpected)
 		fmte.Printf("%.0f%% done at source and %.0f%% done at destination\n", sourceProgress, destinationProgress)

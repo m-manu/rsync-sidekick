@@ -107,7 +107,7 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 	}
 	actions = make([]action.SyncAction, 0, orphanFilesToDigests.Len())
 	uniqueness := set.NewSetWithSize[string](orphanFilesToDigests.Len())
-	for orphanAtSource, orphanDigest := range orphanFilesToDigests.Data {
+	for orphanAtSource, orphanDigest := range orphanFilesToDigests.ForEach() {
 		if len(orphanDigestsToFiles.Get(orphanDigest)) > 1 {
 			// many orphans at source have the same digest
 			continue

@@ -76,17 +76,18 @@ where,
 	[destination-dir]   Destination directory
 
 flags: (all optional)
-  -n, --dry-run                      show what would be done, but don't actually perform any actions
-  -x, --exclusions string            path to file containing newline separated list of file/directory names to be excluded
-                                     (even if this is not set, files/directories such these will still be ignored: $RECYCLE.BIN, desktop.ini, Thumbs.db etc.)
-  -h, --help                         display help
-      --list                         list files along their metadata for given directory
-  -s, --shellscript                  instead of applying changes directly, generate a shell script
-                                     (this flag is useful if you want to run the shell script as a different user)
-  -p, --shellscript-at-path string   similar to --shellscript option but you can specify output script path
-                                     (this flag cannot be specified if --shellscript option is specified)
-  -v, --verbose                      generates extra information, even a file dump (caution: makes it slow!)
-      --version                      show application version (v1.8.0) and exit
+  -n, --dry-run                       show what would be done, but don't actually perform any actions
+  -x, --exclusions string             path to file containing newline separated list of file/directory names to be excluded
+                                      (even if this is not set, files/directories such these will still be ignored: $RECYCLE.BIN, desktop.ini, Thumbs.db etc.)
+  -h, --help                          display help
+      --list                          list files along their metadata for given directory
+  -f, --progress-frequency duration   frequency of progress reporting e.g. '5s', '1m' (default 2s)
+  -s, --shellscript                   instead of applying changes directly, generate a shell script
+                                      (this flag is useful if you want to run the shell script as a different user)
+  -p, --shellscript-at-path string    similar to --shellscript option but you can specify output script path
+                                      (this flag cannot be specified if --shellscript option is specified)
+  -v, --verbose                       generates extra information, even a file dump (caution: makes it slow!)
+      --version                       show application version (v1.9.0) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```

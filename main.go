@@ -18,7 +18,7 @@ import (
 
 const (
 	applicationMajorVersion = 1
-	applicationMinorVersion = 8
+	applicationMinorVersion = 9
 	applicationPatchVersion = 0
 )
 
@@ -51,6 +51,7 @@ var flags struct {
 	isVerbose         func() bool
 	showVersion       func() bool
 	isDryRun          func() bool
+	progressFrequency func() time.Duration
 }
 
 func setupExclusionsOpt() {
@@ -168,6 +169,13 @@ func setupVerboseOpt() {
 	}
 }
 
+func setupProgressFrequencyOpt() {
+	progressFrequencyPtr := flag.DurationP("progress-frequency", "f", 2*time.Second, "frequency of progress reporting e.g. '5s', '1m'")
+	flags.progressFrequency = func() time.Duration {
+		return *progressFrequencyPtr
+	}
+}
+
 func setupGetListFilesDir() {
 	listFilesDirPtr := flag.Bool("list", false, "list files along their metadata for given directory")
 	flags.getListFilesDir = func() bool {
@@ -207,6 +215,7 @@ func setupFlags() {
 	setupShellScriptOpt()
 	setupShellScriptWithNameOpt()
 	setupVerboseOpt()
+	setupProgressFrequencyOpt()
 	setupGetListFilesDir()
 	setupShowVersion()
 	setupDryRunOpt()
@@ -261,8 +270,8 @@ func main() {
 		scriptOutputPath = flags.scriptOutputPath()
 	}
 
-	syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath,
-		scriptOutputPath, flags.isVerbose(), flags.isDryRun())
+	syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath, scriptOutputPath,
+		flags.isVerbose(), flags.isDryRun(), flags.progressFrequency())
 	if syncErr != nil {
 		fmte.PrintfErr("error while syncing: %+v\n", syncErr)
 		os.Exit(exitCodeSyncError)
