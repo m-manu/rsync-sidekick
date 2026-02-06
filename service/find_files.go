@@ -2,13 +2,11 @@ package service
 
 import (
 	"fmt"
-	"io/fs"
-	"path/filepath"
-	"strings"
 
 	set "github.com/deckarep/golang-set/v2"
+	rsfs "github.com/m-manu/rsync-sidekick/fs"
+
 	"github.com/m-manu/rsync-sidekick/entity"
-	"github.com/m-manu/rsync-sidekick/fmte"
 )
 
 const numFilesGuess = 10_000
@@ -20,44 +18,31 @@ func FindFilesFromDirectory(dirPath string, excludedFiles set.Set[string]) (
 	totalSizeOfFiles int64,
 	findFilesErr error,
 ) {
-	allFiles := make(map[string]entity.FileMeta, numFilesGuess)
-	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
-		// If the file/directory is in excluded files list, ignore it
-		if excludedFiles.Contains(d.Name()) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if err != nil {
-			// If we couldn't access this path, report and skip it.
-			fmte.PrintfErr("skipping \"%s\": %+v\n", path, err)
-		}
-		// Ignore dot files (Mac)
-		if strings.HasPrefix(d.Name(), "._") {
-			return nil
-		}
-		if d.Type().IsRegular() {
-			info, infoErr := d.Info()
-			if infoErr != nil {
-				fmte.PrintfErr("couldn't get metadata of \"%s\": %+v\n", path, infoErr)
-				return nil
-			}
-			relativePath, relErr := filepath.Rel(dirPath, path)
-			if relErr != nil {
-				fmte.PrintfErr("couldn't comprehend path \"%s\": %+v\n", path, relErr)
-				return nil
-			}
-			allFiles[relativePath] = entity.FileMeta{
-				Size:              info.Size(),
-				ModifiedTimestamp: info.ModTime().Unix(),
-			}
-			totalSizeOfFiles += info.Size()
-		}
-		return nil
+	return FindFilesFromDirectoryWithFS(rsfs.NewLocalFS(), dirPath, excludedFiles)
+}
+
+// FindFilesFromDirectoryWithFS is like FindFilesFromDirectory but uses the given FileSystem.
+func FindFilesFromDirectoryWithFS(fsys rsfs.FileSystem, dirPath string, excludedFiles set.Set[string]) (
+	files map[string]entity.FileMeta,
+	totalSizeOfFiles int64,
+	findFilesErr error,
+) {
+	excludedMap := make(map[string]struct{}, excludedFiles.Cardinality())
+	excludedFiles.Each(func(s string) bool {
+		excludedMap[s] = struct{}{}
+		return false
 	})
+	entries, err := fsys.Walk(dirPath, excludedMap)
 	if err != nil {
 		return map[string]entity.FileMeta{}, 0, fmt.Errorf("couldn't scan directory %s: %v", dirPath, err)
+	}
+	allFiles := make(map[string]entity.FileMeta, len(entries))
+	for _, e := range entries {
+		allFiles[e.RelativePath] = entity.FileMeta{
+			Size:              e.Size,
+			ModifiedTimestamp: e.ModTime,
+		}
+		totalSizeOfFiles += e.Size
 	}
 	return allFiles, totalSizeOfFiles, nil
 }

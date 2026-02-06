@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	rsfs "github.com/m-manu/rsync-sidekick/fs"
 )
 
 // PropagateTimestampAction is a SyncAction for propagating 'file modification timestamp' from one file to another
@@ -12,6 +14,7 @@ type PropagateTimestampAction struct {
 	DestinationBaseDirPath      string
 	SourceFileRelativePath      string
 	DestinationFileRelativePath string
+	FS                          rsfs.FileSystem // optional; if nil, uses os.* directly
 }
 
 func (a PropagateTimestampAction) sourcePath() string {
@@ -29,6 +32,13 @@ func (a PropagateTimestampAction) UnixCommand() string {
 
 // Perform the 'file modification timestamp' propagation action
 func (a PropagateTimestampAction) Perform() error {
+	if a.FS != nil {
+		srcInfo, err := a.FS.Lstat(a.sourcePath())
+		if err != nil {
+			return err
+		}
+		return a.FS.Chtimes(a.destinationPath(), srcInfo.ModTime, srcInfo.ModTime)
+	}
 	fileInfo, err := os.Lstat(a.sourcePath())
 	if err != nil {
 		return err
