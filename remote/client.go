@@ -5,49 +5,48 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/m-manu/rsync-sidekick/entity"
-	"golang.org/x/crypto/ssh"
 )
 
-// AgentClient communicates with a remote rsync-sidekick agent over SSH.
+// AgentClient communicates with a remote rsync-sidekick agent over SSH
+// using the system ssh binary.
 type AgentClient struct {
-	session *ssh.Session
-	stdin   io.WriteCloser
-	stdout  *bufio.Reader
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Reader
 }
 
-// NewAgentClient starts the agent process on the remote host and returns
-// a client to interact with it.
-func NewAgentClient(sshClient *ssh.Client, sidekickPath string) (*AgentClient, error) {
-	session, err := sshClient.NewSession()
-	if err != nil {
-		return nil, fmt.Errorf("SSH session failed: %w", err)
-	}
+// NewAgentClient starts the agent process on the remote host via system ssh
+// and returns a client to interact with it.
+func NewAgentClient(loc Location, explicitKeyPath string, sidekickPath string) (*AgentClient, error) {
+	remoteCmd := sidekickPath + " --agent"
+	cmd := SSHCommand(loc, explicitKeyPath, remoteCmd)
 
-	stdin, err := session.StdinPipe()
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		session.Close()
 		return nil, fmt.Errorf("stdin pipe failed: %w", err)
 	}
 
-	stdout, err := session.StdoutPipe()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		session.Close()
 		return nil, fmt.Errorf("stdout pipe failed: %w", err)
 	}
 
-	cmd := sidekickPath + " --agent"
-	if err := session.Start(cmd); err != nil {
-		session.Close()
-		return nil, fmt.Errorf("failed to start remote agent (%s): %w", cmd, err)
+	// Pass SSH stderr through to our stderr so connection errors are visible
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start remote agent via ssh (%s): %w", remoteCmd, err)
 	}
 
 	return &AgentClient{
-		session: session,
-		stdin:   stdin,
-		stdout:  bufio.NewReader(stdout),
+		cmd:    cmd,
+		stdin:  stdin,
+		stdout: bufio.NewReader(stdout),
 	}, nil
 }
 
@@ -106,12 +105,12 @@ func (c *AgentClient) Perform(actions []ActionSpec, dryRun bool) ([]ActionResult
 	return performResp.Results, nil
 }
 
-// Close sends a quit message and closes the SSH session.
+// Close sends a quit message and waits for the ssh process to exit.
 func (c *AgentClient) Close() error {
 	// Best-effort quit
 	c.send(MsgQuit, nil)
 	c.stdin.Close()
-	return c.session.Wait()
+	return c.cmd.Wait()
 }
 
 func (c *AgentClient) roundTrip(msgType string, payload interface{}) (*Envelope, error) {

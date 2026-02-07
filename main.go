@@ -356,15 +356,9 @@ func main() {
 	}
 
 	fmte.Printf("Connecting to %s...\n", remoteLoc.SSHSpec())
-	sshClient, sshErr := remote.DialSSH(remoteLoc, flags.sshKeyPath())
-	if sshErr != nil {
-		fmte.PrintfErr("error: %+v\n", sshErr)
-		os.Exit(exitCodeSSHError)
-	}
-	defer sshClient.Close()
 
 	// Determine mode: remote-execution or SFTP
-	agentClient, setupErr := remote.SetupRemote(sshClient, flags.sidekickPath(), flags.isSFTP())
+	agentClient, setupErr := remote.SetupRemote(remoteLoc, flags.sshKeyPath(), flags.sidekickPath(), flags.isSFTP())
 	if setupErr != nil {
 		fmte.PrintfErr("error: %+v\n", setupErr)
 		os.Exit(exitCodeSSHError)
@@ -404,11 +398,11 @@ func main() {
 	var syncErr error
 	if sourceLoc.IsRemote {
 		syncErr = rsyncSidekickRemote(runID, remoteLoc, absLocalPath, true,
-			sshClient, agentClient, flags.getExcludedFiles(), scriptOutputPath,
+			flags.sshKeyPath(), agentClient, flags.getExcludedFiles(), scriptOutputPath,
 			flags.isVerbose(), flags.isDryRun(), flags.progressFrequency())
 	} else {
 		syncErr = rsyncSidekickRemote(runID, remoteLoc, absLocalPath, false,
-			sshClient, agentClient, flags.getExcludedFiles(), scriptOutputPath,
+			flags.sshKeyPath(), agentClient, flags.getExcludedFiles(), scriptOutputPath,
 			flags.isVerbose(), flags.isDryRun(), flags.progressFrequency())
 	}
 	if syncErr != nil {

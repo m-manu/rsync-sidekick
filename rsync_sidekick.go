@@ -19,7 +19,6 @@ import (
 	"github.com/m-manu/rsync-sidekick/remote"
 	"github.com/m-manu/rsync-sidekick/service"
 	"github.com/pkg/sftp"
-	"golang.org/x/crypto/ssh"
 )
 
 const unixCommandLengthGuess = 200
@@ -150,7 +149,7 @@ func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string
 // rsyncSidekickRemote handles the remote sync flow.
 // sourceIsRemote: true if source is on the remote host, false if destination is remote.
 func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath string,
-	sourceIsRemote bool, sshClient *ssh.Client, agentClient *remote.AgentClient,
+	sourceIsRemote bool, sshKeyPath string, agentClient *remote.AgentClient,
 	exclusions set.Set[string], outputScriptPath string,
 	verbose bool, dryRun bool, progressFrequency time.Duration,
 ) error {
@@ -162,12 +161,33 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 			verbose, dryRun, progressFrequency)
 	}
 
-	// SFTP mode
-	sftpClient, err := sftp.NewClient(sshClient)
+	// SFTP mode: launch ssh with -s sftp subsystem and pipe through sftp client
+	sshCmd := remote.SSHSubsystemCommand(remoteLoc, sshKeyPath, "sftp")
+	sshCmd.Stderr = os.Stderr
+
+	sshStdin, err := sshCmd.StdinPipe()
 	if err != nil {
+		return fmt.Errorf("SFTP stdin pipe failed: %w", err)
+	}
+	sshStdout, err := sshCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("SFTP stdout pipe failed: %w", err)
+	}
+	if err := sshCmd.Start(); err != nil {
+		return fmt.Errorf("SFTP ssh command failed: %w", err)
+	}
+
+	sftpClient, err := sftp.NewClientPipe(sshStdout, sshStdin)
+	if err != nil {
+		sshCmd.Process.Kill()
+		sshCmd.Wait()
 		return fmt.Errorf("SFTP connection failed: %w", err)
 	}
-	defer sftpClient.Close()
+	defer func() {
+		sftpClient.Close()
+		sshStdin.Close()
+		sshCmd.Wait()
+	}()
 
 	sftpFS := rsfs.NewSFTPFS(sftpClient)
 
