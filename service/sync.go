@@ -14,6 +14,7 @@ import (
 	"github.com/m-manu/rsync-sidekick/action"
 	"github.com/m-manu/rsync-sidekick/entity"
 	"github.com/m-manu/rsync-sidekick/fmte"
+	rsfs "github.com/m-manu/rsync-sidekick/fs"
 	"github.com/m-manu/rsync-sidekick/lib"
 )
 
@@ -56,9 +57,43 @@ func buildIndex(baseDirPath string, filesToScan []string, counter *int32,
 	return nil
 }
 
+func buildIndexWithFS(fsys rsfs.FileSystem, baseDirPath string, filesToScan []string, counter *int32,
+	filesToDigests lib.SafeMap[string, entity.FileDigest], digestsToFiles lib.MultiMap[entity.FileDigest, string],
+) error {
+	errCount := 0
+	for _, relativePath := range filesToScan {
+		newValue := atomic.AddInt32(counter, 1)
+		path := filepath.Join(baseDirPath, relativePath)
+		fmte.PrintfV("Evaluating file (#%d): %s\n", newValue, path)
+		digest, err := getDigestWithFS(fsys, path)
+		if err != nil {
+			errCount++
+			fmte.PrintfErr("couldn't index file \"%s\" (skipping): %+v\n", path, err)
+		}
+		if errCount > indexBuildErrorCountTolerance {
+			return fmt.Errorf("too many errors while building index")
+		}
+		filesToDigests.Set(relativePath, digest)
+		digestsToFiles.Set(digest, relativePath)
+	}
+	return nil
+}
+
 // ComputeSyncActions identifies the diff between source and destination directories that
 // do not require actual file transfer. This is the core function of this tool.
 func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.FileMeta, orphansAtSource []string,
+	destinationDirPath string, destinationFiles map[string]entity.FileMeta, candidatesAtDestination []string,
+	sourceCounter *int32, destinationCounter *int32,
+) (actions []action.SyncAction, savings int64, err error) {
+	return ComputeSyncActionsWithFS(nil, nil, sourceDirPath, sourceFiles, orphansAtSource,
+		destinationDirPath, destinationFiles, candidatesAtDestination,
+		sourceCounter, destinationCounter)
+}
+
+// ComputeSyncActionsWithFS is like ComputeSyncActions but uses the given FileSystems.
+// If sourceFS or destFS is nil, local OS calls are used for the respective side.
+func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
+	sourceDirPath string, sourceFiles map[string]entity.FileMeta, orphansAtSource []string,
 	destinationDirPath string, destinationFiles map[string]entity.FileMeta, candidatesAtDestination []string,
 	sourceCounter *int32, destinationCounter *int32,
 ) (actions []action.SyncAction, savings int64, err error) {
@@ -75,9 +110,14 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 			defer wg.Done()
 			low := index * len(orphansAtSource) / parallelismForSource
 			high := (index + 1) * len(orphansAtSource) / parallelismForSource
-			sourceIndexErr := buildIndex(sourceDirPath, orphansAtSource[low:high], sourceCounter,
-				orphanFilesToDigests, orphanDigestsToFiles,
-			)
+			var sourceIndexErr error
+			if sourceFS != nil {
+				sourceIndexErr = buildIndexWithFS(sourceFS, sourceDirPath, orphansAtSource[low:high], sourceCounter,
+					orphanFilesToDigests, orphanDigestsToFiles)
+			} else {
+				sourceIndexErr = buildIndex(sourceDirPath, orphansAtSource[low:high], sourceCounter,
+					orphanFilesToDigests, orphanDigestsToFiles)
+			}
 			if sourceIndexErr != nil {
 				sourceIndexErrs = append(sourceIndexErrs, sourceIndexErr)
 			}
@@ -88,9 +128,14 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 			defer wg.Done()
 			low := index * len(candidatesAtDestination) / parallelismForDestination
 			high := (index + 1) * len(candidatesAtDestination) / parallelismForDestination
-			destinationIndexErr := buildIndex(destinationDirPath, candidatesAtDestination[low:high], destinationCounter,
-				candidateFilesToDigests, candidateDigestsToFiles,
-			)
+			var destinationIndexErr error
+			if destFS != nil {
+				destinationIndexErr = buildIndexWithFS(destFS, destinationDirPath, candidatesAtDestination[low:high], destinationCounter,
+					candidateFilesToDigests, candidateDigestsToFiles)
+			} else {
+				destinationIndexErr = buildIndex(destinationDirPath, candidatesAtDestination[low:high], destinationCounter,
+					candidateFilesToDigests, candidateDigestsToFiles)
+			}
 			if destinationIndexErr != nil {
 				destinationIndexErrs = append(destinationIndexErrs, destinationIndexErr)
 			}
@@ -141,6 +186,7 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 					DestinationBaseDirPath:      destinationDirPath,
 					SourceFileRelativePath:      orphanAtSource,
 					DestinationFileRelativePath: candidateAtDestination,
+					FS:                          destFS,
 				}
 				if !uniqueness.Contains(timestampAction.Uniqueness()) {
 					actions = append(actions, timestampAction)
@@ -152,9 +198,16 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 		if _, existsAtSource := sourceFiles[candidateAtDestination]; !existsAtSource &&
 			candidateAtDestination != orphanAtSource {
 			parentDir := filepath.Dir(filepath.Join(destinationDirPath, orphanAtSource))
-			if !lib.IsReadableDirectory(parentDir) {
+			isReadable := false
+			if destFS != nil {
+				isReadable = destFS.IsReadableDirectory(parentDir)
+			} else {
+				isReadable = lib.IsReadableDirectory(parentDir)
+			}
+			if !isReadable {
 				directoryAction := action.MakeDirectoryAction{
 					AbsoluteDirPath: parentDir,
+					FS:              destFS,
 				}
 				if !uniqueness.Contains(directoryAction.Uniqueness()) {
 					actions = append(actions, directoryAction)
@@ -165,6 +218,7 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 				BasePath:         destinationDirPath,
 				RelativeFromPath: candidateAtDestination,
 				RelativeToPath:   orphanAtSource,
+				FS:               destFS,
 			}
 			if !uniqueness.Contains(moveFileAction.Uniqueness()) {
 				actions = append(actions, moveFileAction)
