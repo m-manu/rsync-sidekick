@@ -11,7 +11,7 @@ import (
 )
 
 // minAgentVersion is the minimum remote rsync-sidekick version required for agent mode.
-var minAgentVersion = [3]int{1, 10, 0}
+var minAgentVersion = [3]int{1, 10, 2}
 
 // ProbeRemoteAgent checks whether rsync-sidekick is available on the remote host
 // and whether its version is at least minAgentVersion.

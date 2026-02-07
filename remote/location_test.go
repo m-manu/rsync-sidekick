@@ -68,14 +68,15 @@ func TestIsVersionAtLeast(t *testing.T) {
 		min     [3]int
 		expect  bool
 	}{
-		{"v1.10.0", [3]int{1, 10, 0}, true},
-		{"v1.11.0", [3]int{1, 10, 0}, true},
-		{"v2.0.0", [3]int{1, 10, 0}, true},
-		{"v1.9.0", [3]int{1, 10, 0}, false},
-		{"v1.10.1", [3]int{1, 10, 0}, true},
-		{"v0.9.0", [3]int{1, 10, 0}, false},
-		{"garbage", [3]int{1, 10, 0}, false},
-		{"v1.9", [3]int{1, 10, 0}, false},
+		{"v1.10.1", [3]int{1, 10, 1}, true},
+		{"v1.11.0", [3]int{1, 10, 1}, true},
+		{"v2.0.0", [3]int{1, 10, 1}, true},
+		{"v1.10.0", [3]int{1, 10, 1}, false},
+		{"v1.9.0", [3]int{1, 10, 1}, false},
+		{"v1.10.2", [3]int{1, 10, 1}, true},
+		{"v0.9.0", [3]int{1, 10, 1}, false},
+		{"garbage", [3]int{1, 10, 1}, false},
+		{"v1.9", [3]int{1, 10, 1}, false},
 	}
 	for _, tt := range tests {
 		result := isVersionAtLeast(tt.version, tt.min)

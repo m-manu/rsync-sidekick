@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	rsfs "github.com/m-manu/rsync-sidekick/fs"
 )
@@ -14,6 +15,7 @@ type PropagateTimestampAction struct {
 	DestinationBaseDirPath      string
 	SourceFileRelativePath      string
 	DestinationFileRelativePath string
+	SourceModTime               time.Time       // if set, use this instead of Lstat on source
 	FS                          rsfs.FileSystem // optional; if nil, uses os.* directly
 }
 
@@ -32,6 +34,13 @@ func (a PropagateTimestampAction) UnixCommand() string {
 
 // Perform the 'file modification timestamp' propagation action
 func (a PropagateTimestampAction) Perform() error {
+	// If SourceModTime is pre-populated (remote mode), use it directly
+	if !a.SourceModTime.IsZero() {
+		if a.FS != nil {
+			return a.FS.Chtimes(a.destinationPath(), a.SourceModTime, a.SourceModTime)
+		}
+		return os.Chtimes(a.destinationPath(), a.SourceModTime, a.SourceModTime)
+	}
 	if a.FS != nil {
 		srcInfo, err := a.FS.Lstat(a.sourcePath())
 		if err != nil {

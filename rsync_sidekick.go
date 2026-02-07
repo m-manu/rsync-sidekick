@@ -480,6 +480,7 @@ func matchAndBuildActions(
 					DestinationBaseDirPath:      destDirPath,
 					SourceFileRelativePath:      orphanAtSource,
 					DestinationFileRelativePath: candidateAtDestination,
+					SourceModTime:               time.Unix(sourceFiles[orphanAtSource].ModifiedTimestamp, 0),
 				}
 				if !uniqueness.Contains(timestampAction.Uniqueness()) {
 					actions = append(actions, timestampAction)
@@ -538,17 +539,11 @@ func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.Sy
 				ToRelPath:   act.RelativeToPath,
 			})
 		case action.PropagateTimestampAction:
-			// Read the source file's modification time locally
-			srcPath := fmt.Sprintf("%s/%s", act.SourceBaseDirPath, act.SourceFileRelativePath)
-			srcInfo, err := os.Lstat(srcPath)
-			if err != nil {
-				return fmt.Errorf("cannot read source file %q for timestamp: %w", srcPath, err)
-			}
 			specs = append(specs, remote.ActionSpec{
 				Type:         "timestamp",
 				DestBasePath: act.DestinationBaseDirPath,
 				DestRelPath:  act.DestinationFileRelativePath,
-				ModTimestamp:  srcInfo.ModTime().Unix(),
+				ModTimestamp:  act.SourceModTime.Unix(),
 			})
 		case action.MakeDirectoryAction:
 			specs = append(specs, remote.ActionSpec{
