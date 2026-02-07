@@ -5,3 +5,4 @@
 *.out
 /test_cases_*
 .DS_Store
+openssf-scorecard.md
