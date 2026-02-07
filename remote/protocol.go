@@ -66,10 +66,9 @@ type ActionSpec struct {
 	FromRelPath  string `json:"from_rel_path,omitempty"`
 	ToRelPath    string `json:"to_rel_path,omitempty"`
 	// For timestamp:
-	SourceBasePath string `json:"source_base_path,omitempty"`
 	DestBasePath   string `json:"dest_base_path,omitempty"`
-	SourceRelPath  string `json:"source_rel_path,omitempty"`
 	DestRelPath    string `json:"dest_rel_path,omitempty"`
+	ModTimestamp   int64  `json:"mod_timestamp,omitempty"` // unix epoch seconds
 	// For mkdir:
 	DirPath string `json:"dir_path,omitempty"`
 }

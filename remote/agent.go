@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	set "github.com/deckarep/golang-set/v2"
 	"github.com/m-manu/rsync-sidekick/service"
@@ -154,13 +155,9 @@ func executeAction(spec ActionSpec) error {
 		return os.Rename(from, to)
 
 	case "timestamp":
-		srcPath := filepath.Join(spec.SourceBasePath, spec.SourceRelPath)
 		dstPath := filepath.Join(spec.DestBasePath, spec.DestRelPath)
-		info, err := os.Lstat(srcPath)
-		if err != nil {
-			return err
-		}
-		return os.Chtimes(dstPath, info.ModTime(), info.ModTime())
+		modTime := time.Unix(spec.ModTimestamp, 0)
+		return os.Chtimes(dstPath, modTime, modTime)
 
 	case "mkdir":
 		return os.MkdirAll(spec.DirPath, os.ModeDir|os.ModePerm)
