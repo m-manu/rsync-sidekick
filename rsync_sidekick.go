@@ -313,105 +313,106 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 
 	fmte.Printf("Finding files at source that don't have counterparts at destination...\n")
 	orphansAtSource := service.FindOrphans(sourceFiles, destinationFiles)
+
+	var actions []action.SyncAction
 	if len(orphansAtSource) == 0 {
-		fmte.Printf("All files at source directory have counterparts. So, no action needed 🙂!\n")
-		return nil
-	}
-	sort.Strings(orphansAtSource)
-	fmte.Printf("Found %d files\n", len(orphansAtSource))
-
-	fmte.Printf("Finding candidates at destination...\n")
-	candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, orphansAtSource)
-	if len(candidatesAtDestination) == 0 {
-		fmte.Printf("No candidates found. Looks like all %d files are new. rsync will do the rest.\n", len(orphansAtSource))
-		return nil
-	}
-	sort.Strings(candidatesAtDestination)
-	fmte.Printf("Found %d candidates.\n", len(candidatesAtDestination))
-
-	// Compute digests via agent for the remote side
-	fmte.Printf("Identifying file renames/movements and timestamp changes...\n")
-	start = time.Now()
-
-	var remoteOrphans, remoteCandiates []string
-	var localOrphans, localCandidates []string
-	if sourceIsRemote {
-		remoteOrphans = orphansAtSource
-		localCandidates = candidatesAtDestination
+		fmte.Printf("All files at source directory have counterparts.\n")
 	} else {
-		localOrphans = orphansAtSource
-		remoteCandiates = candidatesAtDestination
-	}
+		sort.Strings(orphansAtSource)
+		fmte.Printf("Found %d files\n", len(orphansAtSource))
 
-	// Hash remote files via agent, local files locally
-	var remoteDigests, localDigests map[string]entity.FileDigest
-	var remoteDigestErr, localDigestErr error
-	var wgDigest sync.WaitGroup
-	wgDigest.Add(2)
+		fmte.Printf("Finding candidates at destination...\n")
+		candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, orphansAtSource)
+		if len(candidatesAtDestination) == 0 {
+			fmte.Printf("No candidates found. Looks like all %d files are new. rsync will do the rest.\n", len(orphansAtSource))
+		} else {
+			sort.Strings(candidatesAtDestination)
+			fmte.Printf("Found %d candidates.\n", len(candidatesAtDestination))
 
-	go func() {
-		defer wgDigest.Done()
-		if sourceIsRemote && len(remoteOrphans) > 0 {
-			remoteDigests, remoteDigestErr = agentClient.BatchDigest(sourceDirPath, remoteOrphans)
-		} else if !sourceIsRemote && len(remoteCandiates) > 0 {
-			remoteDigests, remoteDigestErr = agentClient.BatchDigest(destDirPath, remoteCandiates)
-		}
-	}()
-	go func() {
-		defer wgDigest.Done()
-		if sourceIsRemote && len(localCandidates) > 0 {
-			localDigests, localDigestErr = batchDigestLocal(destDirPath, localCandidates)
-		} else if !sourceIsRemote && len(localOrphans) > 0 {
-			localDigests, localDigestErr = batchDigestLocal(sourceDirPath, localOrphans)
-		}
-	}()
-	wgDigest.Wait()
+			// Compute digests via agent for the remote side
+			fmte.Printf("Identifying file renames/movements and timestamp changes...\n")
+			start = time.Now()
 
-	if remoteDigestErr != nil {
-		return fmt.Errorf("error computing remote digests: %+v", remoteDigestErr)
-	}
-	if localDigestErr != nil {
-		return fmt.Errorf("error computing local digests: %+v", localDigestErr)
-	}
+			var remoteOrphans, remoteCandiates []string
+			var localOrphans, localCandidates []string
+			if sourceIsRemote {
+				remoteOrphans = orphansAtSource
+				localCandidates = candidatesAtDestination
+			} else {
+				localOrphans = orphansAtSource
+				remoteCandiates = candidatesAtDestination
+			}
 
-	// Build the orphan and candidate digest maps
-	orphanDigests := make(map[string]entity.FileDigest)
-	candidateDigests := make(map[string]entity.FileDigest)
-	if sourceIsRemote {
-		orphanDigests = remoteDigests
-		candidateDigests = localDigests
-	} else {
-		orphanDigests = localDigests
-		candidateDigests = remoteDigests
-	}
+			// Hash remote files via agent, local files locally
+			var remoteDigests, localDigests map[string]entity.FileDigest
+			var remoteDigestErr, localDigestErr error
+			var wgDigest sync.WaitGroup
+			wgDigest.Add(2)
 
-	// Match digests and build actions
-	actions := matchAndBuildActions(sourceDirPath, sourceFiles, orphansAtSource, orphanDigests,
-		destDirPath, destinationFiles, candidatesAtDestination, candidateDigests)
+			go func() {
+				defer wgDigest.Done()
+				if sourceIsRemote && len(remoteOrphans) > 0 {
+					remoteDigests, remoteDigestErr = agentClient.BatchDigest(sourceDirPath, remoteOrphans)
+				} else if !sourceIsRemote && len(remoteCandiates) > 0 {
+					remoteDigests, remoteDigestErr = agentClient.BatchDigest(destDirPath, remoteCandiates)
+				}
+			}()
+			go func() {
+				defer wgDigest.Done()
+				if sourceIsRemote && len(localCandidates) > 0 {
+					localDigests, localDigestErr = batchDigestLocal(destDirPath, localCandidates)
+				} else if !sourceIsRemote && len(localOrphans) > 0 {
+					localDigests, localDigestErr = batchDigestLocal(sourceDirPath, localOrphans)
+				}
+			}()
+			wgDigest.Wait()
 
-	end = time.Now()
-	fmte.Printf("Completed in %.1fs\n", end.Sub(start).Seconds())
+			if remoteDigestErr != nil {
+				return fmt.Errorf("error computing remote digests: %+v", remoteDigestErr)
+			}
+			if localDigestErr != nil {
+				return fmt.Errorf("error computing local digests: %+v", localDigestErr)
+			}
 
-	if len(actions) == 0 {
-		fmte.Printf("No sync actions found. You may run rsync.\n")
-		return nil
-	}
+			// Build the orphan and candidate digest maps
+			orphanDigests := make(map[string]entity.FileDigest)
+			candidateDigests := make(map[string]entity.FileDigest)
+			if sourceIsRemote {
+				orphanDigests = remoteDigests
+				candidateDigests = localDigests
+			} else {
+				orphanDigests = localDigests
+				candidateDigests = remoteDigests
+			}
 
-	savings := int64(0)
-	for _, a := range actions {
-		if mfa, ok := a.(action.MoveFileAction); ok {
-			if fm, exists := sourceFiles[mfa.RelativeToPath]; exists {
-				savings += fm.Size
+			// Match digests and build actions
+			actions = matchAndBuildActions(sourceDirPath, sourceFiles, orphansAtSource, orphanDigests,
+				destDirPath, destinationFiles, candidatesAtDestination, candidateDigests)
+
+			end = time.Now()
+			fmte.Printf("Completed in %.1fs\n", end.Sub(start).Seconds())
+
+			if len(actions) == 0 {
+				fmte.Printf("No sync actions found. You may run rsync.\n")
+			} else {
+				savings := int64(0)
+				for _, a := range actions {
+					if mfa, ok := a.(action.MoveFileAction); ok {
+						if fm, exists := sourceFiles[mfa.RelativeToPath]; exists {
+							savings += fm.Size
+						}
+					}
+					if pta, ok := a.(action.PropagateTimestampAction); ok {
+						if fm, exists := sourceFiles[pta.SourceFileRelativePath]; exists {
+							savings += fm.Size
+						}
+					}
+				}
+				fmte.Printf("Found %d actions that can save you %s of files transfer!\n",
+					len(actions), bytesutil.BinaryFormat(savings))
 			}
 		}
-		if pta, ok := a.(action.PropagateTimestampAction); ok {
-			if fm, exists := sourceFiles[pta.SourceFileRelativePath]; exists {
-				savings += fm.Size
-			}
-		}
 	}
-	fmte.Printf("Found %d actions that can save you %s of files transfer!\n",
-		len(actions), bytesutil.BinaryFormat(savings))
 
 	if syncDirTimestamps && sourceDirs != nil && destDirs != nil {
 		dirActions := computeDirTimestampActionsFromMaps(sourceDirPath, sourceDirs, destDirPath, destDirs)
@@ -419,6 +420,10 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 			fmte.Printf("Found %d directory timestamp actions\n", len(dirActions))
 			actions = append(actions, dirActions...)
 		}
+	}
+
+	if len(actions) == 0 {
+		return nil
 	}
 
 	if outputScriptPath != "" {
