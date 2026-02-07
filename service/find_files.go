@@ -27,17 +27,15 @@ func FindFilesFromDirectoryWithFS(fsys rsfs.FileSystem, dirPath string, excluded
 	totalSizeOfFiles int64,
 	findFilesErr error,
 ) {
-	excludedMap := make(map[string]struct{}, excludedFiles.Cardinality())
-	excludedFiles.Each(func(s string) bool {
-		excludedMap[s] = struct{}{}
-		return false
-	})
-	entries, err := fsys.Walk(dirPath, excludedMap)
+	entries, err := walkWithExclusions(fsys, dirPath, excludedFiles)
 	if err != nil {
-		return map[string]entity.FileMeta{}, 0, fmt.Errorf("couldn't scan directory %s: %v", dirPath, err)
+		return map[string]entity.FileMeta{}, 0, err
 	}
 	allFiles := make(map[string]entity.FileMeta, len(entries))
 	for _, e := range entries {
+		if e.IsDir {
+			continue
+		}
 		allFiles[e.RelativePath] = entity.FileMeta{
 			Size:              e.Size,
 			ModifiedTimestamp: e.ModTime,
@@ -45,4 +43,38 @@ func FindFilesFromDirectoryWithFS(fsys rsfs.FileSystem, dirPath string, excluded
 		totalSizeOfFiles += e.Size
 	}
 	return allFiles, totalSizeOfFiles, nil
+}
+
+// FindDirsFromDirectory returns a map of relative directory paths to their
+// modification timestamps for the given directory tree.
+func FindDirsFromDirectory(dirPath string, excludedFiles set.Set[string]) (map[string]int64, error) {
+	return FindDirsFromDirectoryWithFS(rsfs.NewLocalFS(), dirPath, excludedFiles)
+}
+
+// FindDirsFromDirectoryWithFS is like FindDirsFromDirectory but uses the given FileSystem.
+func FindDirsFromDirectoryWithFS(fsys rsfs.FileSystem, dirPath string, excludedFiles set.Set[string]) (map[string]int64, error) {
+	entries, err := walkWithExclusions(fsys, dirPath, excludedFiles)
+	if err != nil {
+		return nil, err
+	}
+	dirs := make(map[string]int64)
+	for _, e := range entries {
+		if e.IsDir {
+			dirs[e.RelativePath] = e.ModTime
+		}
+	}
+	return dirs, nil
+}
+
+func walkWithExclusions(fsys rsfs.FileSystem, dirPath string, excludedFiles set.Set[string]) ([]rsfs.DirEntry, error) {
+	excludedMap := make(map[string]struct{}, excludedFiles.Cardinality())
+	excludedFiles.Each(func(s string) bool {
+		excludedMap[s] = struct{}{}
+		return false
+	})
+	entries, err := fsys.Walk(dirPath, excludedMap)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't scan directory %s: %v", dirPath, err)
+	}
+	return entries, nil
 }

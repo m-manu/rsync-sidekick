@@ -79,8 +79,15 @@ func handleWalk(w io.Writer, payload []byte) {
 		return
 	}
 
+	dirs, dirErr := service.FindDirsFromDirectory(req.DirPath, excluded)
+	if dirErr != nil {
+		writeError(w, fmt.Sprintf("walk dirs failed: %v", dirErr))
+		return
+	}
+
 	resp := WalkResponse{
 		Files:     make(map[string]FileMeta, len(files)),
+		Dirs:      dirs,
 		TotalSize: totalSize,
 	}
 	for p, fm := range files {

@@ -34,9 +34,10 @@ type FileMeta struct {
 	ModifiedTimestamp int64 `json:"modified_timestamp"`
 }
 
-// WalkResponse returns the file map.
+// WalkResponse returns the file map and optionally directory timestamps.
 type WalkResponse struct {
 	Files     map[string]FileMeta `json:"files"`
+	Dirs      map[string]int64    `json:"dirs,omitempty"`
 	TotalSize int64               `json:"total_size"`
 }
 

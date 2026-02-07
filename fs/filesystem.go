@@ -49,12 +49,14 @@ type FileInfo struct {
 	IsDir   bool
 }
 
-// DirEntry represents a single file discovered during Walk.
+// DirEntry represents a single file or directory discovered during Walk.
 type DirEntry struct {
 	// RelativePath is the path relative to the walk root.
 	RelativePath string
-	// Size is the file size in bytes.
+	// Size is the file size in bytes (0 for directories).
 	Size int64
 	// ModTime is the modification time as a Unix timestamp.
 	ModTime int64
+	// IsDir is true for directory entries.
+	IsDir bool
 }

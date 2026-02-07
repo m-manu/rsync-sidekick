@@ -36,7 +36,7 @@ func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}) ([]Dir
 		if strings.HasPrefix(d.Name(), "._") {
 			return nil
 		}
-		if d.Type().IsRegular() {
+		if d.Type().IsRegular() || d.IsDir() {
 			info, infoErr := d.Info()
 			if infoErr != nil {
 				fmte.PrintfErr("couldn't get metadata of \"%s\": %+v\n", path, infoErr)
@@ -47,10 +47,15 @@ func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}) ([]Dir
 				fmte.PrintfErr("couldn't comprehend path \"%s\": %+v\n", path, relErr)
 				return nil
 			}
+			// Skip the root directory itself
+			if relativePath == "." {
+				return nil
+			}
 			entries = append(entries, DirEntry{
 				RelativePath: relativePath,
 				Size:         info.Size(),
 				ModTime:      info.ModTime().Unix(),
+				IsDir:        d.IsDir(),
 			})
 		}
 		return nil

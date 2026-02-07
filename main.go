@@ -20,7 +20,7 @@ import (
 const (
 	applicationMajorVersion = 1
 	applicationMinorVersion = 10
-	applicationPatchVersion = 2
+	applicationPatchVersion = 3
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -58,6 +58,7 @@ var flags struct {
 	sidekickPath      func() string
 	isSFTP            func() bool
 	isAgent           func() bool
+	syncDirTimestamps func() bool
 }
 
 func setupExclusionsOpt() {
@@ -220,6 +221,14 @@ func setupAgentOpt() {
 	flag.CommandLine.MarkHidden("agent")
 }
 
+func setupSyncDirTimestampsOpt() {
+	syncDirTsPtr := flag.BoolP("sync-dir-timestamps", "d", false,
+		"also propagate directory timestamps from source to destination")
+	flags.syncDirTimestamps = func() bool {
+		return *syncDirTsPtr
+	}
+}
+
 func readSourceAndDestination() (string, string) {
 	sourceDirPath, sourceDirErr := filepath.Abs(flag.Arg(0))
 	if sourceDirErr != nil || !lib.IsReadableDirectory(sourceDirPath) {
@@ -259,6 +268,7 @@ func setupFlags() {
 	setupSidekickPathOpt()
 	setupSFTPOpt()
 	setupAgentOpt()
+	setupSyncDirTimestampsOpt()
 	setupUsage()
 }
 
@@ -341,7 +351,7 @@ func main() {
 		}
 
 		syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath, scriptOutputPath,
-			flags.isVerbose(), flags.isDryRun(), flags.progressFrequency())
+			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency())
 		if syncErr != nil {
 			fmte.PrintfErr("error while syncing: %+v\n", syncErr)
 			os.Exit(exitCodeSyncError)
@@ -399,11 +409,11 @@ func main() {
 	if sourceLoc.IsRemote {
 		syncErr = rsyncSidekickRemote(runID, remoteLoc, absLocalPath, true,
 			flags.sshKeyPath(), agentClient, flags.getExcludedFiles(), scriptOutputPath,
-			flags.isVerbose(), flags.isDryRun(), flags.progressFrequency())
+			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency())
 	} else {
 		syncErr = rsyncSidekickRemote(runID, remoteLoc, absLocalPath, false,
 			flags.sshKeyPath(), agentClient, flags.getExcludedFiles(), scriptOutputPath,
-			flags.isVerbose(), flags.isDryRun(), flags.progressFrequency())
+			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency())
 	}
 	if syncErr != nil {
 		fmte.PrintfErr("error while syncing: %+v\n", syncErr)

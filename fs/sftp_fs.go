@@ -44,16 +44,21 @@ func (s *SFTPFS) Walk(dirPath string, excludedNames map[string]struct{}) ([]DirE
 			continue
 		}
 
-		if info.Mode().IsRegular() {
-			relPath, err := relPath(dirPath, walker.Path())
+		if info.Mode().IsRegular() || info.IsDir() {
+			rel, err := relPath(dirPath, walker.Path())
 			if err != nil {
 				fmte.PrintfErr("couldn't comprehend path \"%s\": %+v\n", walker.Path(), err)
 				continue
 			}
+			// Skip the root directory itself
+			if rel == "." {
+				continue
+			}
 			entries = append(entries, DirEntry{
-				RelativePath: relPath,
+				RelativePath: rel,
 				Size:         info.Size(),
 				ModTime:      info.ModTime().Unix(),
+				IsDir:        info.IsDir(),
 			})
 		}
 	}

@@ -51,23 +51,24 @@ func NewAgentClient(loc Location, explicitKeyPath string, sidekickPath string) (
 }
 
 // Walk asks the remote agent to scan a directory.
-func (c *AgentClient) Walk(dirPath string, excludedNames []string) (map[string]entity.FileMeta, int64, error) {
+// Returns files, dirs (relPath→modtime), totalSize, error.
+func (c *AgentClient) Walk(dirPath string, excludedNames []string) (map[string]entity.FileMeta, map[string]int64, int64, error) {
 	req := WalkRequest{DirPath: dirPath, ExcludedNames: excludedNames}
 	resp, err := c.roundTrip(MsgWalkRequest, req)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 
 	var walkResp WalkResponse
 	if err := json.Unmarshal(resp.Payload, &walkResp); err != nil {
-		return nil, 0, fmt.Errorf("bad walk response: %w", err)
+		return nil, nil, 0, fmt.Errorf("bad walk response: %w", err)
 	}
 
 	files := make(map[string]entity.FileMeta, len(walkResp.Files))
 	for p, fm := range walkResp.Files {
 		files[p] = fm.ToEntity()
 	}
-	return files, walkResp.TotalSize, nil
+	return files, walkResp.Dirs, walkResp.TotalSize, nil
 }
 
 // BatchDigest asks the remote agent to compute digests for a batch of files.

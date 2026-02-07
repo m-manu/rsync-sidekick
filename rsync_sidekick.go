@@ -131,10 +131,17 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 }
 
 func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string], destinationDirPath string,
-	outputScriptPath string, verbose bool, dryRun bool, progressFrequency time.Duration) error {
+	outputScriptPath string, verbose bool, dryRun bool, syncDirTimestamps bool, progressFrequency time.Duration) error {
 	actions, err := getSyncActionsWithProgress(runID, sourceDirPath, exclusions, destinationDirPath, verbose, progressFrequency)
 	if err != nil {
 		return err // no extra info needed
+	}
+	if syncDirTimestamps {
+		dirActions, dirErr := computeDirTimestampActions(sourceDirPath, nil, exclusions, destinationDirPath, nil)
+		if dirErr != nil {
+			return dirErr
+		}
+		actions = append(actions, dirActions...)
 	}
 	if len(actions) == 0 {
 		return nil
@@ -151,14 +158,14 @@ func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string
 func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath string,
 	sourceIsRemote bool, sshKeyPath string, agentClient *remote.AgentClient,
 	exclusions set.Set[string], outputScriptPath string,
-	verbose bool, dryRun bool, progressFrequency time.Duration,
+	verbose bool, dryRun bool, syncDirTimestamps bool, progressFrequency time.Duration,
 ) error {
 	remotePath := remoteLoc.Path
 
 	if agentClient != nil {
 		return rsyncSidekickRemoteExec(runID, remoteLoc, remotePath, localPath,
 			sourceIsRemote, agentClient, exclusions, outputScriptPath,
-			verbose, dryRun, progressFrequency)
+			verbose, dryRun, syncDirTimestamps, progressFrequency)
 	}
 
 	// SFTP mode: launch ssh with -s sftp subsystem and pipe through sftp client
@@ -208,6 +215,13 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 	if actionsErr != nil {
 		return actionsErr
 	}
+	if syncDirTimestamps {
+		dirActions, dirErr := computeDirTimestampActions(sourceDirPath, sourceFS, exclusions, destDirPath, destFS)
+		if dirErr != nil {
+			return dirErr
+		}
+		actions = append(actions, dirActions...)
+	}
 	if len(actions) == 0 {
 		return nil
 	}
@@ -228,7 +242,7 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 	remotePath, localPath string, sourceIsRemote bool,
 	agentClient *remote.AgentClient, exclusions set.Set[string],
 	outputScriptPath string, verbose bool, dryRun bool,
-	progressFrequency time.Duration,
+	syncDirTimestamps bool, progressFrequency time.Duration,
 ) error {
 	if verbose {
 		fmte.VerboseOn()
@@ -255,6 +269,7 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 	start = time.Now()
 
 	var sourceFiles, destinationFiles map[string]entity.FileMeta
+	var sourceDirs, destDirs map[string]int64
 	var sourceSize, destinationSize int64
 	var sourceFilesErr, destinationFilesErr error
 	var wgDirScan sync.WaitGroup
@@ -263,17 +278,23 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 	go func() {
 		defer wgDirScan.Done()
 		if sourceIsRemote {
-			sourceFiles, sourceSize, sourceFilesErr = agentClient.Walk(sourceDirPath, excludedNames)
+			sourceFiles, sourceDirs, sourceSize, sourceFilesErr = agentClient.Walk(sourceDirPath, excludedNames)
 		} else {
 			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions)
+			if sourceFilesErr == nil && syncDirTimestamps {
+				sourceDirs, sourceFilesErr = service.FindDirsFromDirectory(sourceDirPath, exclusions)
+			}
 		}
 	}()
 	go func() {
 		defer wgDirScan.Done()
 		if sourceIsRemote {
 			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectory(destDirPath, exclusions)
+			if destinationFilesErr == nil && syncDirTimestamps {
+				destDirs, destinationFilesErr = service.FindDirsFromDirectory(destDirPath, exclusions)
+			}
 		} else {
-			destinationFiles, destinationSize, destinationFilesErr = agentClient.Walk(destDirPath, excludedNames)
+			destinationFiles, destDirs, destinationSize, destinationFilesErr = agentClient.Walk(destDirPath, excludedNames)
 		}
 	}()
 	wgDirScan.Wait()
@@ -392,6 +413,14 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 	fmte.Printf("Found %d actions that can save you %s of files transfer!\n",
 		len(actions), bytesutil.BinaryFormat(savings))
 
+	if syncDirTimestamps && sourceDirs != nil && destDirs != nil {
+		dirActions := computeDirTimestampActionsFromMaps(sourceDirPath, sourceDirs, destDirPath, destDirs)
+		if len(dirActions) > 0 {
+			fmte.Printf("Found %d directory timestamp actions\n", len(dirActions))
+			actions = append(actions, dirActions...)
+		}
+	}
+
 	if outputScriptPath != "" {
 		var sshSpec *string
 		if !sourceIsRemote {
@@ -508,6 +537,64 @@ func matchAndBuildActions(
 				uniqueness.Add(moveFileAction.Uniqueness())
 			}
 		}
+	}
+	return actions
+}
+
+// computeDirTimestampActions scans source and destination for directories and
+// returns PropagateTimestampActions for directories that exist at both sides
+// but have different modification times.
+func computeDirTimestampActions(sourceDirPath string, sourceFS rsfs.FileSystem,
+	exclusions set.Set[string], destDirPath string, destFS rsfs.FileSystem,
+) ([]action.SyncAction, error) {
+	var sourceDirs, destDirs map[string]int64
+	var srcErr, dstErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if sourceFS != nil {
+			sourceDirs, srcErr = service.FindDirsFromDirectoryWithFS(sourceFS, sourceDirPath, exclusions)
+		} else {
+			sourceDirs, srcErr = service.FindDirsFromDirectory(sourceDirPath, exclusions)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if destFS != nil {
+			destDirs, dstErr = service.FindDirsFromDirectoryWithFS(destFS, destDirPath, exclusions)
+		} else {
+			destDirs, dstErr = service.FindDirsFromDirectory(destDirPath, exclusions)
+		}
+	}()
+	wg.Wait()
+	if srcErr != nil {
+		return nil, fmt.Errorf("error scanning source directories: %w", srcErr)
+	}
+	if dstErr != nil {
+		return nil, fmt.Errorf("error scanning destination directories: %w", dstErr)
+	}
+	return computeDirTimestampActionsFromMaps(sourceDirPath, sourceDirs, destDirPath, destDirs), nil
+}
+
+// computeDirTimestampActionsFromMaps builds PropagateTimestampActions for directories
+// that exist at both source and destination but have different timestamps.
+func computeDirTimestampActionsFromMaps(sourceDirPath string, sourceDirs map[string]int64,
+	destDirPath string, destDirs map[string]int64,
+) []action.SyncAction {
+	actions := make([]action.SyncAction, 0)
+	for relPath, srcModTime := range sourceDirs {
+		dstModTime, exists := destDirs[relPath]
+		if !exists || srcModTime == dstModTime {
+			continue
+		}
+		actions = append(actions, action.PropagateTimestampAction{
+			SourceBaseDirPath:           sourceDirPath,
+			DestinationBaseDirPath:      destDirPath,
+			SourceFileRelativePath:      relPath,
+			DestinationFileRelativePath: relPath,
+			SourceModTime:               time.Unix(srcModTime, 0),
+		})
 	}
 	return actions
 }
