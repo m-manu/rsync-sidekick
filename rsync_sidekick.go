@@ -464,13 +464,7 @@ func matchAndBuildActions(
 	destDirPath string, destinationFiles map[string]entity.FileMeta,
 	candidatesAtDestination []string, candidateDigests map[string]entity.FileDigest,
 ) []action.SyncAction {
-	// Build reverse maps: digest → files
-	orphanDigestToFiles := make(map[entity.FileDigest][]string)
-	for _, f := range orphansAtSource {
-		if d, ok := orphanDigests[f]; ok {
-			orphanDigestToFiles[d] = append(orphanDigestToFiles[d], f)
-		}
-	}
+	// Build reverse map: digest → candidate files
 	candidateDigestToFiles := make(map[entity.FileDigest][]string)
 	for _, f := range candidatesAtDestination {
 		if d, ok := candidateDigests[f]; ok {
@@ -480,33 +474,22 @@ func matchAndBuildActions(
 
 	actions := make([]action.SyncAction, 0)
 	uniqueness := set.NewSet[string]()
+	usedCandidates := set.NewSet[string]()
 
 	for _, orphanAtSource := range orphansAtSource {
 		orphanDigest, ok := orphanDigests[orphanAtSource]
 		if !ok {
 			continue
 		}
-		if len(orphanDigestToFiles[orphanDigest]) > 1 {
-			continue
-		}
 		candidates, hasCandidates := candidateDigestToFiles[orphanDigest]
 		if !hasCandidates {
 			continue
 		}
-		var candidateAtDestination string
-		if len(candidates) == 1 {
-			candidateAtDestination = candidates[0]
-		} else {
-			for _, dp := range candidates {
-				if _, existsAtSource := sourceFiles[dp]; !existsAtSource {
-					candidateAtDestination = dp
-					break
-				}
-			}
-		}
+		candidateAtDestination := service.PickBestCandidate(candidates, orphanAtSource, sourceFiles, usedCandidates)
 		if candidateAtDestination == "" {
 			continue
 		}
+		usedCandidates.Add(candidateAtDestination)
 		if destinationFiles[candidateAtDestination].ModifiedTimestamp != sourceFiles[orphanAtSource].ModifiedTimestamp {
 			if srcMetaForCandidate, existsAtSourceForCandidate := sourceFiles[candidateAtDestination]; !(existsAtSourceForCandidate && srcMetaForCandidate == destinationFiles[candidateAtDestination]) {
 				timestampAction := action.PropagateTimestampAction{

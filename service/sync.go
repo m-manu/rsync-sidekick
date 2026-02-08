@@ -152,32 +152,18 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 	}
 	actions = make([]action.SyncAction, 0, orphanFilesToDigests.Len())
 	uniqueness := set.NewSetWithSize[string](orphanFilesToDigests.Len())
+	usedCandidates := set.NewSet[string]()
 	for orphanAtSource, orphanDigest := range orphanFilesToDigests.ForEach() {
-		if len(orphanDigestsToFiles.Get(orphanDigest)) > 1 {
-			// many orphans at source have the same digest
-			continue
-		}
 		if !candidateDigestsToFiles.Exists(orphanDigest) {
 			// let rsync handle this
 			continue
 		}
 		matchesAtDestination := candidateDigestsToFiles.Get(orphanDigest)
-		var candidateAtDestination string
-		if len(matchesAtDestination) == 1 {
-			candidateAtDestination = matchesAtDestination[0]
-		} else {
-			// If multiple files with same digest exist at destination,
-			// choose a random one that does *not* exist at source
-			for _, destinationPath := range matchesAtDestination {
-				if _, existsAtSource := sourceFiles[destinationPath]; !existsAtSource {
-					candidateAtDestination = destinationPath
-					break
-				}
-			}
-		}
+		candidateAtDestination := PickBestCandidate(matchesAtDestination, orphanAtSource, sourceFiles, usedCandidates)
 		if candidateAtDestination == "" {
 			continue
 		}
+		usedCandidates.Add(candidateAtDestination)
 		if destinationFiles[candidateAtDestination].ModifiedTimestamp != sourceFiles[orphanAtSource].ModifiedTimestamp {
 			// Avoid propagating timestamp to a destination file that already matches its counterpart at source
 			if srcMetaForCandidate, existsAtSourceForCandidate := sourceFiles[candidateAtDestination]; !(existsAtSourceForCandidate && srcMetaForCandidate == destinationFiles[candidateAtDestination]) {
@@ -228,6 +214,42 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 		}
 	}
 	return
+}
+
+// PickBestCandidate selects the best candidate from a list of destination paths.
+// It skips already-used candidates, prefers candidates with the same basename as
+// the orphan, and avoids candidates that already exist at source (unless only one
+// candidate remains).
+func PickBestCandidate(candidates []string, orphanPath string, sourceFiles map[string]entity.FileMeta, usedCandidates set.Set[string]) string {
+	// Filter out already-used candidates
+	available := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if !usedCandidates.Contains(c) {
+			available = append(available, c)
+		}
+	}
+	if len(available) == 0 {
+		return ""
+	}
+	if len(available) == 1 {
+		return available[0]
+	}
+	// Multiple available: prefer one with same basename that doesn't exist at source
+	orphanBase := filepath.Base(orphanPath)
+	for _, c := range available {
+		if filepath.Base(c) == orphanBase {
+			if _, existsAtSource := sourceFiles[c]; !existsAtSource {
+				return c
+			}
+		}
+	}
+	// Fall back: any that doesn't exist at source
+	for _, c := range available {
+		if _, existsAtSource := sourceFiles[c]; !existsAtSource {
+			return c
+		}
+	}
+	return ""
 }
 
 func getParallelism(n int) (int, int) {
