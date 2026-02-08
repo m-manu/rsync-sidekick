@@ -24,14 +24,19 @@ import (
 const unixCommandLengthGuess = 200
 
 func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions set.Set[string],
-	destinationDirPath string, verbose bool, progressFrequency time.Duration) ([]action.SyncAction, error) {
+	destinationDirPath string, verbose bool, progressFrequency time.Duration,
+	copyDuplicates bool, useReflink bool, archivePaths []string,
+) ([]action.SyncAction, error) {
 	return getSyncActionsWithProgressFS(runID, sourceDirPath, nil, exclusions,
-		destinationDirPath, nil, verbose, progressFrequency)
+		destinationDirPath, nil, verbose, progressFrequency,
+		copyDuplicates, useReflink, archivePaths)
 }
 
 func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS rsfs.FileSystem,
 	exclusions set.Set[string], destinationDirPath string, destFS rsfs.FileSystem,
-	verbose bool, progressFrequency time.Duration) ([]action.SyncAction, error) {
+	verbose bool, progressFrequency time.Duration,
+	copyDuplicates bool, useReflink bool, archivePaths []string,
+) ([]action.SyncAction, error) {
 	if verbose {
 		fmte.VerboseOn()
 	}
@@ -83,56 +88,115 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 	}
 	fmte.Printf("Finding candidates at destination...\n")
 	candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, orphansAtSource)
-	if len(candidatesAtDestination) == 0 {
-		fmte.Printf("No candidates found. Looks like all %d files are new. rsync will do the rest.\n", len(orphansAtSource))
-		return []action.SyncAction{}, nil
-	}
-	sort.Strings(candidatesAtDestination)
-	if verbose {
-		lib.WriteSliceToFile(candidatesAtDestination,
-			fmt.Sprintf("./info_%s_candidates_at_destination.txt", runID),
-		)
-	}
-	fmte.Printf("Found %d candidates.\n", len(candidatesAtDestination))
-	fmte.Printf("Identifying file renames/movements and timestamp changes...\n")
-	start = time.Now()
 	var actions []action.SyncAction
-	var savings int64
-	var syncErr error
-	var sourceCounter, destinationCounter int32
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		actions, savings, syncErr = service.ComputeSyncActionsWithFS(sourceFS, destFS,
-			sourceDirPath, sourceFiles, orphansAtSource,
-			destinationDirPath, destinationFiles, candidatesAtDestination, &sourceCounter, &destinationCounter)
-	}()
-	go func() {
-		defer wg.Done()
-		reportProgress(&sourceCounter, int32(len(orphansAtSource)),
-			&destinationCounter, int32(len(candidatesAtDestination)),
-			progressFrequency,
-		)
-	}()
-	wg.Wait()
-	end = time.Now()
-	if syncErr != nil {
-		return nil, fmt.Errorf("error while computing sync actions: %+v", syncErr)
+	if len(candidatesAtDestination) == 0 {
+		fmte.Printf("No candidates found. Looks like all %d files are new.\n", len(orphansAtSource))
+	} else {
+		sort.Strings(candidatesAtDestination)
+		if verbose {
+			lib.WriteSliceToFile(candidatesAtDestination,
+				fmt.Sprintf("./info_%s_candidates_at_destination.txt", runID),
+			)
+		}
+		fmte.Printf("Found %d candidates.\n", len(candidatesAtDestination))
+		fmte.Printf("Identifying file renames/movements and timestamp changes...\n")
+		start = time.Now()
+		var savings int64
+		var syncErr error
+		var sourceCounter, destinationCounter int32
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			actions, savings, syncErr = service.ComputeSyncActionsWithFS(sourceFS, destFS,
+				sourceDirPath, sourceFiles, orphansAtSource,
+				destinationDirPath, destinationFiles, candidatesAtDestination, &sourceCounter, &destinationCounter,
+				copyDuplicates, useReflink)
+		}()
+		go func() {
+			defer wg.Done()
+			reportProgress(&sourceCounter, int32(len(orphansAtSource)),
+				&destinationCounter, int32(len(candidatesAtDestination)),
+				progressFrequency,
+			)
+		}()
+		wg.Wait()
+		end = time.Now()
+		if syncErr != nil {
+			return nil, fmt.Errorf("error while computing sync actions: %+v", syncErr)
+		}
+		fmte.Printf("Completed in %.1fs\n", end.Sub(start).Seconds())
+		if len(actions) > 0 {
+			fmte.Printf("Found %d actions that can save you %s of files transfer!\n",
+				len(actions), bytesutil.BinaryFormat(savings))
+		}
 	}
-	fmte.Printf("Completed in %.1fs\n", end.Sub(start).Seconds())
+
+	// Archive scanning (independent of --copy-duplicates)
+	if len(archivePaths) > 0 {
+		// Determine which orphans are still unmatched
+		resolvedOrphans := set.NewSet[string]()
+		for _, a := range actions {
+			switch act := a.(type) {
+			case action.MoveFileAction:
+				resolvedOrphans.Add(act.RelativeToPath)
+			case action.CopyFileAction:
+				// Extract relative path from absolute dest path
+				if len(act.AbsDestPath) > len(destinationDirPath)+1 {
+					resolvedOrphans.Add(act.AbsDestPath[len(destinationDirPath)+1:])
+				}
+			}
+		}
+		var unmatchedOrphans []string
+		for _, o := range orphansAtSource {
+			if !resolvedOrphans.Contains(o) {
+				unmatchedOrphans = append(unmatchedOrphans, o)
+			}
+		}
+		if len(unmatchedOrphans) > 0 {
+			fmte.Printf("Scanning %d archive path(s) for %d unmatched orphans...\n",
+				len(archivePaths), len(unmatchedOrphans))
+			// Compute digests for unmatched orphans at source
+			orphanDigests := make(map[string]entity.FileDigest)
+			for _, o := range unmatchedOrphans {
+				absPath := sourceDirPath + "/" + o
+				var digest entity.FileDigest
+				var err error
+				if sourceFS != nil {
+					digest, err = service.GetDigestWithFS(sourceFS, absPath)
+				} else {
+					digest, err = service.GetDigest(absPath)
+				}
+				if err == nil {
+					orphanDigests[o] = digest
+				}
+			}
+			archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
+				archivePaths, exclusions, unmatchedOrphans, orphanDigests,
+				sourceFiles, destinationDirPath, useReflink, destFS)
+			if archiveErr != nil {
+				return nil, fmt.Errorf("error scanning archives: %+v", archiveErr)
+			}
+			if len(archiveActions) > 0 {
+				fmte.Printf("Found %d additional actions from archive paths\n", len(archiveActions))
+				actions = append(actions, archiveActions...)
+			}
+		}
+	}
+
 	if len(actions) == 0 {
 		fmte.Printf("No sync actions found. You may run rsync.\n")
 		return []action.SyncAction{}, nil
 	}
-	fmte.Printf("Found %d actions that can save you %s of files transfer!\n",
-		len(actions), bytesutil.BinaryFormat(savings))
 	return actions, nil
 }
 
 func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string], destinationDirPath string,
-	outputScriptPath string, verbose bool, dryRun bool, syncDirTimestamps bool, progressFrequency time.Duration) error {
-	actions, err := getSyncActionsWithProgress(runID, sourceDirPath, exclusions, destinationDirPath, verbose, progressFrequency)
+	outputScriptPath string, verbose bool, dryRun bool, syncDirTimestamps bool, progressFrequency time.Duration,
+	copyDuplicates bool, useReflink bool, archivePaths []string,
+) error {
+	actions, err := getSyncActionsWithProgress(runID, sourceDirPath, exclusions, destinationDirPath, verbose, progressFrequency,
+		copyDuplicates, useReflink, archivePaths)
 	if err != nil {
 		return err // no extra info needed
 	}
@@ -159,13 +223,15 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 	sourceIsRemote bool, sshKeyPath string, agentClient *remote.AgentClient,
 	exclusions set.Set[string], outputScriptPath string,
 	verbose bool, dryRun bool, syncDirTimestamps bool, progressFrequency time.Duration,
+	copyDuplicates bool, useReflink bool, archivePaths []string,
 ) error {
 	remotePath := remoteLoc.Path
 
 	if agentClient != nil {
 		return rsyncSidekickRemoteExec(runID, remoteLoc, remotePath, localPath,
 			sourceIsRemote, agentClient, exclusions, outputScriptPath,
-			verbose, dryRun, syncDirTimestamps, progressFrequency)
+			verbose, dryRun, syncDirTimestamps, progressFrequency,
+			copyDuplicates, useReflink, archivePaths)
 	}
 
 	// SFTP mode: launch ssh with -s sftp subsystem and pipe through sftp client
@@ -211,7 +277,8 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 	}
 
 	actions, actionsErr := getSyncActionsWithProgressFS(runID, sourceDirPath, sourceFS,
-		exclusions, destDirPath, destFS, verbose, progressFrequency)
+		exclusions, destDirPath, destFS, verbose, progressFrequency,
+		copyDuplicates, useReflink, archivePaths)
 	if actionsErr != nil {
 		return actionsErr
 	}
@@ -243,6 +310,7 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 	agentClient *remote.AgentClient, exclusions set.Set[string],
 	outputScriptPath string, verbose bool, dryRun bool,
 	syncDirTimestamps bool, progressFrequency time.Duration,
+	copyDuplicates bool, useReflink bool, archivePaths []string,
 ) error {
 	if verbose {
 		fmte.VerboseOn()
@@ -387,7 +455,8 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 
 			// Match digests and build actions
 			actions = matchAndBuildActions(sourceDirPath, sourceFiles, orphansAtSource, orphanDigests,
-				destDirPath, destinationFiles, candidatesAtDestination, candidateDigests)
+				destDirPath, destinationFiles, candidatesAtDestination, candidateDigests,
+				copyDuplicates, useReflink)
 
 			end = time.Now()
 			fmte.Printf("Completed in %.1fs\n", end.Sub(start).Seconds())
@@ -407,6 +476,15 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 							savings += fm.Size
 						}
 					}
+					if cfa, ok := a.(action.CopyFileAction); ok {
+						// Extract relative path from absolute dest path
+						if len(cfa.AbsDestPath) > len(destDirPath)+1 {
+							relPath := cfa.AbsDestPath[len(destDirPath)+1:]
+							if fm, exists := sourceFiles[relPath]; exists {
+								savings += fm.Size
+							}
+						}
+					}
 				}
 				fmte.Printf("Found %d actions that can save you %s of files transfer!\n",
 					len(actions), bytesutil.BinaryFormat(savings))
@@ -419,6 +497,66 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 		if len(dirActions) > 0 {
 			fmte.Printf("Found %d directory timestamp actions\n", len(dirActions))
 			actions = append(actions, dirActions...)
+		}
+	}
+
+	// Archive scanning — archives are on the destination side
+	if len(archivePaths) > 0 && len(orphansAtSource) > 0 {
+		resolvedOrphans := set.NewSet[string]()
+		for _, a := range actions {
+			switch act := a.(type) {
+			case action.MoveFileAction:
+				resolvedOrphans.Add(act.RelativeToPath)
+			case action.CopyFileAction:
+				if len(act.AbsDestPath) > len(destDirPath)+1 {
+					resolvedOrphans.Add(act.AbsDestPath[len(destDirPath)+1:])
+				}
+			}
+		}
+		var unmatchedOrphans []string
+		for _, o := range orphansAtSource {
+			if !resolvedOrphans.Contains(o) {
+				unmatchedOrphans = append(unmatchedOrphans, o)
+			}
+		}
+		if len(unmatchedOrphans) > 0 {
+			fmte.Printf("Scanning %d archive path(s) for %d unmatched orphans...\n",
+				len(archivePaths), len(unmatchedOrphans))
+			// Compute digests for unmatched orphans at source
+			var unmatchedDigests map[string]entity.FileDigest
+			var digestErr error
+			if sourceIsRemote {
+				unmatchedDigests, digestErr = agentClient.BatchDigest(sourceDirPath, unmatchedOrphans)
+			} else {
+				unmatchedDigests, digestErr = batchDigestLocal(sourceDirPath, unmatchedOrphans)
+			}
+			if digestErr != nil {
+				return fmt.Errorf("error computing orphan digests for archive scan: %+v", digestErr)
+			}
+			if sourceIsRemote {
+				// Dest is local: scan archives locally
+				archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
+					archivePaths, exclusions, unmatchedOrphans, unmatchedDigests,
+					sourceFiles, destDirPath, useReflink, nil)
+				if archiveErr != nil {
+					return fmt.Errorf("error scanning archives: %+v", archiveErr)
+				}
+				if len(archiveActions) > 0 {
+					fmte.Printf("Found %d additional actions from archive paths\n", len(archiveActions))
+					actions = append(actions, archiveActions...)
+				}
+			} else {
+				// Dest is remote: scan archives via agent
+				archiveActions, archiveErr := scanArchivesViaAgent(agentClient, archivePaths, excludedNames,
+					unmatchedOrphans, unmatchedDigests, sourceFiles, destDirPath, useReflink)
+				if archiveErr != nil {
+					return fmt.Errorf("error scanning archives via agent: %+v", archiveErr)
+				}
+				if len(archiveActions) > 0 {
+					fmte.Printf("Found %d additional actions from archive paths\n", len(archiveActions))
+					actions = append(actions, archiveActions...)
+				}
+			}
 		}
 	}
 
@@ -458,11 +596,104 @@ func batchDigestLocal(basePath string, files []string) (map[string]entity.FileDi
 	return digests, nil
 }
 
+// scanArchivesViaAgent scans archive paths on the remote destination via the agent,
+// matching archive files against unmatched orphans by digest.
+func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string, excludedNames []string,
+	unmatchedOrphans []string, orphanDigests map[string]entity.FileDigest,
+	sourceFiles map[string]entity.FileMeta, destDirPath string, useReflink bool,
+) ([]action.SyncAction, error) {
+	// Build ext+size set from unmatched orphans
+	type orphanKey struct {
+		ext  string
+		size int64
+	}
+	orphansByKey := make(map[orphanKey][]string)
+	for _, o := range unmatchedOrphans {
+		fm := sourceFiles[o]
+		k := orphanKey{ext: lib.GetFileExt(o), size: fm.Size}
+		orphansByKey[k] = append(orphansByKey[k], o)
+	}
+
+	matchedOrphans := set.NewSet[string]()
+	var actions []action.SyncAction
+	uniqueness := set.NewSet[string]()
+
+	for _, archivePath := range archivePaths {
+		// Walk archive via agent
+		archiveFiles, _, _, walkErr := agentClient.Walk(archivePath, excludedNames)
+		if walkErr != nil {
+			return nil, fmt.Errorf("error scanning archive %s via agent: %w", archivePath, walkErr)
+		}
+
+		// Filter archive files by ext+size match with orphans
+		var candidates []string
+		for relPath, meta := range archiveFiles {
+			k := orphanKey{ext: lib.GetFileExt(relPath), size: meta.Size}
+			if _, ok := orphansByKey[k]; ok {
+				candidates = append(candidates, relPath)
+			}
+		}
+		if len(candidates) == 0 {
+			continue
+		}
+
+		// Digest archive candidates via agent
+		archiveDigests, digestErr := agentClient.BatchDigest(archivePath, candidates)
+		if digestErr != nil {
+			return nil, fmt.Errorf("error computing archive digests via agent: %w", digestErr)
+		}
+
+		// Match orphans against archive digests
+		for relPath, archiveDigest := range archiveDigests {
+			archiveAbsPath := archivePath + "/" + relPath
+			k := orphanKey{ext: lib.GetFileExt(relPath), size: archiveFiles[relPath].Size}
+			orphans, ok := orphansByKey[k]
+			if !ok {
+				continue
+			}
+			for _, orphan := range orphans {
+				if matchedOrphans.Contains(orphan) {
+					continue
+				}
+				oDigest, ok := orphanDigests[orphan]
+				if !ok {
+					continue
+				}
+				if oDigest == archiveDigest {
+					absDest := destDirPath + "/" + orphan
+					parentDir := parentPath(orphan)
+					mkdirAction := action.MakeDirectoryAction{
+						AbsoluteDirPath: destDirPath + "/" + parentDir,
+					}
+					if !uniqueness.Contains(mkdirAction.Uniqueness()) {
+						actions = append(actions, mkdirAction)
+						uniqueness.Add(mkdirAction.Uniqueness())
+					}
+					copyAction := action.CopyFileAction{
+						AbsSourcePath: archiveAbsPath,
+						AbsDestPath:   absDest,
+						SourceModTime: time.Unix(sourceFiles[orphan].ModifiedTimestamp, 0),
+						UseReflink:    useReflink,
+					}
+					if !uniqueness.Contains(copyAction.Uniqueness()) {
+						actions = append(actions, copyAction)
+						uniqueness.Add(copyAction.Uniqueness())
+						matchedOrphans.Add(orphan)
+					}
+				}
+			}
+		}
+	}
+
+	return actions, nil
+}
+
 func matchAndBuildActions(
 	sourceDirPath string, sourceFiles map[string]entity.FileMeta,
 	orphansAtSource []string, orphanDigests map[string]entity.FileDigest,
 	destDirPath string, destinationFiles map[string]entity.FileMeta,
 	candidatesAtDestination []string, candidateDigests map[string]entity.FileDigest,
+	copyDuplicates bool, useReflink bool,
 ) []action.SyncAction {
 	// Build reverse map: digest → candidate files
 	candidateDigestToFiles := make(map[entity.FileDigest][]string)
@@ -489,7 +720,7 @@ func matchAndBuildActions(
 		if candidateAtDestination == "" {
 			continue
 		}
-		usedCandidates.Add(candidateAtDestination)
+		_, candidateExistsAtSource := sourceFiles[candidateAtDestination]
 		if destinationFiles[candidateAtDestination].ModifiedTimestamp != sourceFiles[orphanAtSource].ModifiedTimestamp {
 			if srcMetaForCandidate, existsAtSourceForCandidate := sourceFiles[candidateAtDestination]; !(existsAtSourceForCandidate && srcMetaForCandidate == destinationFiles[candidateAtDestination]) {
 				timestampAction := action.PropagateTimestampAction{
@@ -505,8 +736,9 @@ func matchAndBuildActions(
 				}
 			}
 		}
-		if _, existsAtSource := sourceFiles[candidateAtDestination]; !existsAtSource &&
-			candidateAtDestination != orphanAtSource {
+		if !candidateExistsAtSource && candidateAtDestination != orphanAtSource {
+			// Move: candidate doesn't exist at source, safe to move
+			usedCandidates.Add(candidateAtDestination)
 			parentDir := destDirPath + "/" + parentPath(orphanAtSource)
 			directoryAction := action.MakeDirectoryAction{
 				AbsoluteDirPath: parentDir,
@@ -523,6 +755,28 @@ func matchAndBuildActions(
 			if !uniqueness.Contains(moveFileAction.Uniqueness()) {
 				actions = append(actions, moveFileAction)
 				uniqueness.Add(moveFileAction.Uniqueness())
+			}
+		} else if copyDuplicates && candidateExistsAtSource && candidateAtDestination != orphanAtSource {
+			// Copy: candidate exists at source too, so we can't move it — copy instead
+			absSource := destDirPath + "/" + candidateAtDestination
+			absDest := destDirPath + "/" + orphanAtSource
+			parentDir := destDirPath + "/" + parentPath(orphanAtSource)
+			directoryAction := action.MakeDirectoryAction{
+				AbsoluteDirPath: parentDir,
+			}
+			if !uniqueness.Contains(directoryAction.Uniqueness()) {
+				actions = append(actions, directoryAction)
+				uniqueness.Add(directoryAction.Uniqueness())
+			}
+			copyAction := action.CopyFileAction{
+				AbsSourcePath: absSource,
+				AbsDestPath:   absDest,
+				SourceModTime: time.Unix(sourceFiles[orphanAtSource].ModifiedTimestamp, 0),
+				UseReflink:    useReflink,
+			}
+			if !uniqueness.Contains(copyAction.Uniqueness()) {
+				actions = append(actions, copyAction)
+				uniqueness.Add(copyAction.Uniqueness())
 			}
 		}
 	}
@@ -624,6 +878,14 @@ func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.Sy
 			specs = append(specs, remote.ActionSpec{
 				Type:    "mkdir",
 				DirPath: act.AbsoluteDirPath,
+			})
+		case action.CopyFileAction:
+			specs = append(specs, remote.ActionSpec{
+				Type:         "copy",
+				FromAbsPath:  act.AbsSourcePath,
+				ToAbsPath:    act.AbsDestPath,
+				ModTimestamp:  act.SourceModTime.Unix(),
+				UseReflink:   act.UseReflink,
 			})
 		}
 	}

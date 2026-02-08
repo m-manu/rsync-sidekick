@@ -142,7 +142,7 @@ func TestRSyncSidekick(t *testing.T) {
 	defer tearDown(t)
 	fmte.Off()
 	// Source and destination are in sync (base case)
-	actions1, syncErr1 := getSyncActionsWithProgress(runID, srcPath, exclusionsForTests, dstPath, true, 2*time.Second)
+	actions1, syncErr1 := getSyncActionsWithProgress(runID, srcPath, exclusionsForTests, dstPath, true, 2*time.Second, false, false, nil)
 	stopIfError(t, syncErr1)
 	assert.Equal(t, []action.SyncAction{}, actions1)
 	// Do series of changes at source:
@@ -165,7 +165,7 @@ func TestRSyncSidekick(t *testing.T) {
 	// Case 6: Rename file inside ignored directory
 	moveFile(atSrc(".Trashes/go.sum"), atSrc(".Trashes/go1.sum"))
 	// Propagate these changes to destination and verify:
-	rsErr1 := rsyncSidekick(runID, srcPath, exclusionsForTests, dstPath, "", false, false, false, 2*time.Second)
+	rsErr1 := rsyncSidekick(runID, srcPath, exclusionsForTests, dstPath, "", false, false, false, 2*time.Second, false, false, nil)
 	stopIfError(t, rsErr1)
 	// Assert at destination:
 	assert.FileExists(t, atDst("/go1_renamed"))
@@ -177,11 +177,11 @@ func TestRSyncSidekick(t *testing.T) {
 	assert.NoFileExists(t, atDst("map1.go.txt"))
 	assert.NoFileExists(t, atDst(".Trashes/go1.sum"))
 	// Source and destination are back in sync
-	actions2, syncErr2 := getSyncActionsWithProgress(runID, srcPath, exclusionsForTests, dstPath, false, 2*time.Second)
+	actions2, syncErr2 := getSyncActionsWithProgress(runID, srcPath, exclusionsForTests, dstPath, false, 2*time.Second, false, false, nil)
 	stopIfError(t, syncErr2)
 	assert.Equal(t, []action.SyncAction{}, actions2)
 	deleteFile(atSrc("/another_code/sort.go.txt"))
-	actions3, syncErr3 := getSyncActionsWithProgress(runID, srcPath, exclusionsForTests, dstPath, true, 2*time.Second)
+	actions3, syncErr3 := getSyncActionsWithProgress(runID, srcPath, exclusionsForTests, dstPath, true, 2*time.Second, false, false, nil)
 	stopIfError(t, syncErr3)
 	assert.Equal(t, []action.SyncAction{}, actions3)
 }
@@ -322,7 +322,7 @@ func TestTimestampPropagationBug(t *testing.T) {
 	// Run rsync-sidekick
 	fmte.Off()
 	exclusions := set.NewSet[string]()
-	actions, syncErr := getSyncActionsWithProgress(runID, srcDir, exclusions, dstDir, true, 0)
+	actions, syncErr := getSyncActionsWithProgress(runID, srcDir, exclusions, dstDir, true, 0, false, false, nil)
 	stopIfError(t, syncErr)
 
 	// The bug is that rsync-sidekick will incorrectly create an action to propagate

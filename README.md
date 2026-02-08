@@ -20,6 +20,8 @@ photos, etc.) _that are reorganized frequently_.
 2. Rename of file/directory
 3. Moving a file from one directory to another
 4. Directory timestamp synchronization (with `-d` flag)
+5. Local copying of duplicate-content files at the destination (with `-c` flag)
+6. Copying from archive/backup directories on the destination side (with `-a` flag)
 
 It works with **local directories**, **remote hosts via SSH** (using a remote agent or SFTP fallback), and inside **Docker containers**.
 
@@ -86,12 +88,19 @@ where,
 	[destination]   Destination directory (local path or user@host:/path)
 
 flags: (all optional)
+  -a, --archive-path stringArray      additional directory on the destination side to scan for copy sources
+                                      (can be specified multiple times; files are copied from archive, never moved;
+                                      implies --copy-duplicates)
+  -c, --copy-duplicates               copy files locally at destination when content already exists there
+                                      (avoids re-transfer of duplicate-content files via rsync)
   -n, --dry-run                       show what would be done, but don't actually perform any actions
   -x, --exclusions string             path to file containing newline separated list of file/directory names to be excluded
                                       (even if this is not set, files/directories such these will still be ignored: $RECYCLE.BIN, desktop.ini, Thumbs.db etc.)
   -h, --help                          display help
       --list                          list files along their metadata for given directory
   -f, --progress-frequency duration   frequency of progress reporting e.g. '5s', '1m' (default 2s)
+      --reflink                       use cp --reflink=auto for copy actions (instant on CoW filesystems like btrfs/XFS)
+                                      (only effective when copies are performed via --copy-duplicates or --archive-path)
       --sftp                          force SFTP mode (don't try remote-execution)
   -s, --shellscript                   instead of applying changes directly, generate a shell script
                                       (this flag is useful if you want to run the shell script as a different user)
@@ -101,7 +110,7 @@ flags: (all optional)
   -i, --ssh-key string                path to SSH private key for remote connections
   -d, --sync-dir-timestamps           also propagate directory timestamps from source to destination
   -v, --verbose                       generates extra information, even a file dump (caution: makes it slow!)
-      --version                       show application version (v1.10.5) and exit
+      --version                       show application version and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```
@@ -126,6 +135,52 @@ rsync-sidekick --sidekick-path /usr/local/bin/rsync-sidekick /local/path/ user@s
 
 # Run the remote agent with sudo (useful when syncing to root-owned directories):
 rsync-sidekick --sidekick-path "sudo rsync-sidekick" /local/path/ user@server:/remote/path/
+```
+
+## Copying duplicate-content files (`--copy-duplicates`)
+
+By default, `rsync-sidekick` only **moves** files at the destination. If the same content exists at multiple paths at
+source but only one of those paths exists at the destination, the extra copies are left for `rsync` to transfer.
+
+With `--copy-duplicates` (or `-c`), `rsync-sidekick` will **copy** the file locally at the destination instead, saving
+network transfer time:
+
+```bash
+# Source has photo.jpg at paths A, B, C (same content). Destination only has it at A.
+# Without -c: B and C must be transferred by rsync.
+# With -c: rsync-sidekick copies A→B and A→C locally at the destination.
+rsync-sidekick -c /Users/manu/Photos/ /Volumes/Portable/Photos/
+```
+
+## Using archive directories (`--archive-path`)
+
+The `--archive-path` (or `-a`) flag lets you specify additional directories **on the destination side** that are scanned
+for content matches. Files are only **copied** from archives, never moved. This is useful when you have an old
+backup or archive that might contain files matching orphans at the source.
+
+Archive paths imply `--copy-duplicates` behavior automatically.
+
+```bash
+# Scan an old backup directory for matching content:
+rsync-sidekick -a /Volumes/OldBackup/Photos/ /Users/manu/Photos/ /Volumes/Portable/Photos/
+
+# Multiple archive paths:
+rsync-sidekick -a /archive1/ -a /archive2/ /source/ /destination/
+
+# Works with remote destinations too (archives must be on the remote host):
+rsync-sidekick -a /remote/archive/ /local/source/ user@server:/remote/dest/
+```
+
+## Reflink copies (`--reflink`)
+
+On CoW (copy-on-write) filesystems like **btrfs** or **XFS**, the `--reflink` flag makes copy actions use
+`cp --reflink=auto`, which is instant and uses no additional disk space. On filesystems that don't support reflinks,
+it falls back to a regular copy automatically. This flag only has an effect when copies are being performed
+(via `--copy-duplicates` or `--archive-path`).
+
+```bash
+# Instant zero-cost copies on btrfs:
+rsync-sidekick -c --reflink /Users/manu/Photos/ /mnt/btrfs-backup/Photos/
 ```
 
 ## Running this from a Docker container

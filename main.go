@@ -20,7 +20,7 @@ import (
 const (
 	applicationMajorVersion = 1
 	applicationMinorVersion = 10
-	applicationPatchVersion = 5
+	applicationPatchVersion = 6
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -59,6 +59,9 @@ var flags struct {
 	isSFTP            func() bool
 	isAgent           func() bool
 	syncDirTimestamps func() bool
+	copyDuplicates    func() bool
+	useReflink        func() bool
+	archivePaths      func() []string
 }
 
 func setupExclusionsOpt() {
@@ -254,6 +257,34 @@ func setupDryRunOpt() {
 	}
 }
 
+func setupCopyDuplicatesOpt() {
+	copyDupPtr := flag.BoolP("copy-duplicates", "c", false,
+		"copy files locally at destination when content already exists there\n"+
+			"(avoids re-transfer of duplicate-content files via rsync)")
+	flags.copyDuplicates = func() bool {
+		return *copyDupPtr
+	}
+}
+
+func setupReflinkOpt() {
+	reflinkPtr := flag.Bool("reflink", false,
+		"use cp --reflink=auto for copy actions (instant on CoW filesystems like btrfs/XFS)\n"+
+			"(only effective when copies are performed via --copy-duplicates or --archive-path)")
+	flags.useReflink = func() bool {
+		return *reflinkPtr
+	}
+}
+
+func setupArchivePathOpt() {
+	archivePathsPtr := flag.StringArrayP("archive-path", "a", nil,
+		"additional directory on the destination side to scan for copy sources\n"+
+			"(can be specified multiple times; files are copied from archive, never moved;\n"+
+			"implies --copy-duplicates)")
+	flags.archivePaths = func() []string {
+		return *archivePathsPtr
+	}
+}
+
 func setupFlags() {
 	setupHelpOpt()
 	setupExclusionsOpt()
@@ -269,6 +300,9 @@ func setupFlags() {
 	setupSFTPOpt()
 	setupAgentOpt()
 	setupSyncDirTimestampsOpt()
+	setupCopyDuplicatesOpt()
+	setupReflinkOpt()
+	setupArchivePathOpt()
 	setupUsage()
 }
 
@@ -350,8 +384,10 @@ func main() {
 			scriptOutputPath = flags.scriptOutputPath()
 		}
 
+		copyDup := flags.copyDuplicates() || len(flags.archivePaths()) > 0
 		syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath, scriptOutputPath,
-			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency())
+			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
+			copyDup, flags.useReflink(), flags.archivePaths())
 		if syncErr != nil {
 			fmte.PrintfErr("error while syncing: %+v\n", syncErr)
 			os.Exit(exitCodeSyncError)
@@ -405,15 +441,18 @@ func main() {
 		scriptOutputPath = flags.scriptOutputPath()
 	}
 
+	copyDup := flags.copyDuplicates() || len(flags.archivePaths()) > 0
 	var syncErr error
 	if sourceLoc.IsRemote {
 		syncErr = rsyncSidekickRemote(runID, remoteLoc, absLocalPath, true,
 			flags.sshKeyPath(), agentClient, flags.getExcludedFiles(), scriptOutputPath,
-			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency())
+			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
+			copyDup, flags.useReflink(), flags.archivePaths())
 	} else {
 		syncErr = rsyncSidekickRemote(runID, remoteLoc, absLocalPath, false,
 			flags.sshKeyPath(), agentClient, flags.getExcludedFiles(), scriptOutputPath,
-			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency())
+			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
+			copyDup, flags.useReflink(), flags.archivePaths())
 	}
 	if syncErr != nil {
 		fmte.PrintfErr("error while syncing: %+v\n", syncErr)

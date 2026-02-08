@@ -93,7 +93,11 @@ func readCrucialBytes(filePath string, fileSize int64) ([]byte, error) {
 	return bytes, nil
 }
 
-// getDigestWithFS is like getDigest but uses the given FileSystem.
+// GetDigestWithFS is like GetDigest but uses the given FileSystem.
+func GetDigestWithFS(fsys rsfs.FileSystem, path string) (entity.FileDigest, error) {
+	return getDigestWithFS(fsys, path)
+}
+
 func getDigestWithFS(fsys rsfs.FileSystem, path string) (entity.FileDigest, error) {
 	info, statErr := fsys.Lstat(path)
 	if statErr != nil {

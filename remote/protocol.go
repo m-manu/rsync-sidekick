@@ -61,7 +61,7 @@ type DigestResponse struct {
 
 // ActionSpec describes an action to perform on the remote side.
 type ActionSpec struct {
-	Type string `json:"type"` // "move", "timestamp", "mkdir"
+	Type string `json:"type"` // "move", "timestamp", "mkdir", "copy"
 	// For move:
 	BasePath     string `json:"base_path,omitempty"`
 	FromRelPath  string `json:"from_rel_path,omitempty"`
@@ -72,6 +72,10 @@ type ActionSpec struct {
 	ModTimestamp   int64  `json:"mod_timestamp,omitempty"` // unix epoch seconds
 	// For mkdir:
 	DirPath string `json:"dir_path,omitempty"`
+	// For copy:
+	FromAbsPath string `json:"from_abs_path,omitempty"`
+	ToAbsPath   string `json:"to_abs_path,omitempty"`
+	UseReflink  bool   `json:"use_reflink,omitempty"`
 }
 
 // PerformRequest asks the agent to execute actions.

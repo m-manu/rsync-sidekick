@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	set "github.com/deckarep/golang-set/v2"
 	"github.com/m-manu/rsync-sidekick/action"
@@ -84,10 +85,11 @@ func buildIndexWithFS(fsys rsfs.FileSystem, baseDirPath string, filesToScan []st
 func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.FileMeta, orphansAtSource []string,
 	destinationDirPath string, destinationFiles map[string]entity.FileMeta, candidatesAtDestination []string,
 	sourceCounter *int32, destinationCounter *int32,
+	copyDuplicates bool, useReflink bool,
 ) (actions []action.SyncAction, savings int64, err error) {
 	return ComputeSyncActionsWithFS(nil, nil, sourceDirPath, sourceFiles, orphansAtSource,
 		destinationDirPath, destinationFiles, candidatesAtDestination,
-		sourceCounter, destinationCounter)
+		sourceCounter, destinationCounter, copyDuplicates, useReflink)
 }
 
 // ComputeSyncActionsWithFS is like ComputeSyncActions but uses the given FileSystems.
@@ -96,6 +98,7 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 	sourceDirPath string, sourceFiles map[string]entity.FileMeta, orphansAtSource []string,
 	destinationDirPath string, destinationFiles map[string]entity.FileMeta, candidatesAtDestination []string,
 	sourceCounter *int32, destinationCounter *int32,
+	copyDuplicates bool, useReflink bool,
 ) (actions []action.SyncAction, savings int64, err error) {
 	orphanFilesToDigests := lib.NewSafeMap[string, entity.FileDigest]()
 	candidateFilesToDigests := lib.NewSafeMap[string, entity.FileDigest]()
@@ -163,7 +166,7 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 		if candidateAtDestination == "" {
 			continue
 		}
-		usedCandidates.Add(candidateAtDestination)
+		_, candidateExistsAtSource := sourceFiles[candidateAtDestination]
 		if destinationFiles[candidateAtDestination].ModifiedTimestamp != sourceFiles[orphanAtSource].ModifiedTimestamp {
 			// Avoid propagating timestamp to a destination file that already matches its counterpart at source
 			if srcMetaForCandidate, existsAtSourceForCandidate := sourceFiles[candidateAtDestination]; !(existsAtSourceForCandidate && srcMetaForCandidate == destinationFiles[candidateAtDestination]) {
@@ -181,8 +184,9 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 				}
 			}
 		}
-		if _, existsAtSource := sourceFiles[candidateAtDestination]; !existsAtSource &&
-			candidateAtDestination != orphanAtSource {
+		if !candidateExistsAtSource && candidateAtDestination != orphanAtSource {
+			// Move: candidate doesn't exist at source, safe to move
+			usedCandidates.Add(candidateAtDestination)
 			parentDir := filepath.Dir(filepath.Join(destinationDirPath, orphanAtSource))
 			isReadable := false
 			if destFS != nil {
@@ -209,6 +213,38 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 			if !uniqueness.Contains(moveFileAction.Uniqueness()) {
 				actions = append(actions, moveFileAction)
 				uniqueness.Add(moveFileAction.Uniqueness())
+				savings += sourceFiles[orphanAtSource].Size
+			}
+		} else if copyDuplicates && candidateExistsAtSource && candidateAtDestination != orphanAtSource {
+			// Copy: candidate exists at source too, so we can't move it — copy instead
+			absSource := filepath.Join(destinationDirPath, candidateAtDestination)
+			absDest := filepath.Join(destinationDirPath, orphanAtSource)
+			parentDir := filepath.Dir(absDest)
+			isReadable := false
+			if destFS != nil {
+				isReadable = destFS.IsReadableDirectory(parentDir)
+			} else {
+				isReadable = lib.IsReadableDirectory(parentDir)
+			}
+			if !isReadable {
+				directoryAction := action.MakeDirectoryAction{
+					AbsoluteDirPath: parentDir,
+					FS:              destFS,
+				}
+				if !uniqueness.Contains(directoryAction.Uniqueness()) {
+					actions = append(actions, directoryAction)
+					uniqueness.Add(directoryAction.Uniqueness())
+				}
+			}
+			copyAction := action.CopyFileAction{
+				AbsSourcePath: absSource,
+				AbsDestPath:   absDest,
+				SourceModTime: time.Unix(sourceFiles[orphanAtSource].ModifiedTimestamp, 0),
+				UseReflink:    useReflink,
+			}
+			if !uniqueness.Contains(copyAction.Uniqueness()) {
+				actions = append(actions, copyAction)
+				uniqueness.Add(copyAction.Uniqueness())
 				savings += sourceFiles[orphanAtSource].Size
 			}
 		}
@@ -249,7 +285,9 @@ func PickBestCandidate(candidates []string, orphanPath string, sourceFiles map[s
 			return c
 		}
 	}
-	return ""
+	// All candidates exist at source too — return one anyway; caller decides
+	// whether to copy (--copy-duplicates) or skip.
+	return available[0]
 }
 
 func getParallelism(n int) (int, int) {
@@ -261,6 +299,108 @@ func getParallelism(n int) (int, int) {
 		}
 	}
 	return 1, 1
+}
+
+// ScanArchivesForCopiesWithDigests scans archive directories for files matching
+// unmatched orphans whose digests are already known. Archive paths are on the
+// destination side; if destFS is non-nil it is used to scan archives and check
+// directories (e.g. SFTP mode).
+func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[string],
+	unmatchedOrphans []string, orphanDigests map[string]entity.FileDigest,
+	sourceFiles map[string]entity.FileMeta,
+	destDirPath string, useReflink bool, destFS rsfs.FileSystem,
+) ([]action.SyncAction, error) {
+	if len(unmatchedOrphans) == 0 || len(archivePaths) == 0 {
+		return nil, nil
+	}
+
+	// Build ext+size set from unmatched orphans
+	type orphanKey struct {
+		ext  string
+		size int64
+	}
+	orphansByKey := make(map[orphanKey][]string)
+	for _, o := range unmatchedOrphans {
+		fm := sourceFiles[o]
+		k := orphanKey{ext: lib.GetFileExt(o), size: fm.Size}
+		orphansByKey[k] = append(orphansByKey[k], o)
+	}
+
+	matchedOrphans := set.NewSet[string]()
+	var actions []action.SyncAction
+	uniqueness := set.NewSet[string]()
+
+	for _, archivePath := range archivePaths {
+		var archiveFiles map[string]entity.FileMeta
+		var err error
+		if destFS != nil {
+			archiveFiles, _, err = FindFilesFromDirectoryWithFS(destFS, archivePath, exclusions)
+		} else {
+			archiveFiles, _, err = FindFilesFromDirectory(archivePath, exclusions)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error scanning archive %s: %w", archivePath, err)
+		}
+
+		for archiveRelPath, archiveMeta := range archiveFiles {
+			k := orphanKey{ext: lib.GetFileExt(archiveRelPath), size: archiveMeta.Size}
+			orphans, ok := orphansByKey[k]
+			if !ok {
+				continue
+			}
+
+			archiveAbsPath := filepath.Join(archivePath, archiveRelPath)
+			var archiveDigest entity.FileDigest
+			if destFS != nil {
+				archiveDigest, err = GetDigestWithFS(destFS, archiveAbsPath)
+			} else {
+				archiveDigest, err = GetDigest(archiveAbsPath)
+			}
+			if err != nil {
+				continue
+			}
+
+			for _, orphan := range orphans {
+				if matchedOrphans.Contains(orphan) {
+					continue
+				}
+				oDigest, ok := orphanDigests[orphan]
+				if !ok {
+					continue
+				}
+				if oDigest == archiveDigest {
+					absDest := filepath.Join(destDirPath, orphan)
+					parentDir := filepath.Dir(absDest)
+					isReadable := false
+					if destFS != nil {
+						isReadable = destFS.IsReadableDirectory(parentDir)
+					} else {
+						isReadable = lib.IsReadableDirectory(parentDir)
+					}
+					if !isReadable {
+						mkdirAction := action.MakeDirectoryAction{AbsoluteDirPath: parentDir, FS: destFS}
+						if !uniqueness.Contains(mkdirAction.Uniqueness()) {
+							actions = append(actions, mkdirAction)
+							uniqueness.Add(mkdirAction.Uniqueness())
+						}
+					}
+					copyAction := action.CopyFileAction{
+						AbsSourcePath: archiveAbsPath,
+						AbsDestPath:   absDest,
+						SourceModTime: time.Unix(sourceFiles[orphan].ModifiedTimestamp, 0),
+						UseReflink:    useReflink,
+					}
+					if !uniqueness.Contains(copyAction.Uniqueness()) {
+						actions = append(actions, copyAction)
+						uniqueness.Add(copyAction.Uniqueness())
+						matchedOrphans.Add(orphan)
+					}
+				}
+			}
+		}
+	}
+
+	return actions, nil
 }
 
 func FindDirectoryResultToCsv(dirPath string, excludedFiles set.Set[string], file *os.File) error {
