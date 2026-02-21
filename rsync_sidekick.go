@@ -47,6 +47,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 	var sourceSize, destinationSize int64
 	var sourceFilesErr, destinationFilesErr error
 	var scanSourceCounter, scanDestCounter int32
+	var sourceScanDone, destScanDone int32
 	var wgDirScan sync.WaitGroup
 	wgDirScan.Add(2)
 	go func() {
@@ -56,6 +57,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		} else {
 			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions, &scanSourceCounter)
 		}
+		atomic.StoreInt32(&sourceScanDone, 1)
 	}()
 	go func() {
 		defer wgDirScan.Done()
@@ -64,6 +66,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		} else {
 			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectory(destinationDirPath, exclusions, &scanDestCounter)
 		}
+		atomic.StoreInt32(&destScanDone, 1)
 	}()
 	scanDone := make(chan struct{})
 	if progressFrequency > 0 {
@@ -75,8 +78,15 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 				case <-scanDone:
 					return
 				case <-ticker.C:
-					fmte.Printf("Scanning: %d files at source, %d at destination...\n",
-						atomic.LoadInt32(&scanSourceCounter), atomic.LoadInt32(&scanDestCounter))
+					srcStr := fmt.Sprintf("%d", atomic.LoadInt32(&scanSourceCounter))
+					if atomic.LoadInt32(&sourceScanDone) == 1 {
+						srcStr += " DONE"
+					}
+					dstStr := fmt.Sprintf("%d", atomic.LoadInt32(&scanDestCounter))
+					if atomic.LoadInt32(&destScanDone) == 1 {
+						dstStr += " DONE"
+					}
+					fmte.Printf("Scanning: %s files at source, %s at destination...\n", srcStr, dstStr)
 				}
 			}
 		}()
@@ -359,6 +369,7 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 	var sourceSize, destinationSize int64
 	var sourceFilesErr, destinationFilesErr error
 	var localScanCounter, remoteScanCounter int32
+	var localScanDone, remoteScanDone int32
 	intervalMs := progressFrequency.Milliseconds()
 	var wgDirScan sync.WaitGroup
 	wgDirScan.Add(2)
@@ -367,11 +378,13 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 		defer wgDirScan.Done()
 		if sourceIsRemote {
 			sourceFiles, sourceDirs, sourceSize, sourceFilesErr = agentClient.Walk(sourceDirPath, excludedNames, &remoteScanCounter, intervalMs)
+			atomic.StoreInt32(&remoteScanDone, 1)
 		} else {
 			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions, &localScanCounter)
 			if sourceFilesErr == nil && syncDirTimestamps {
 				sourceDirs, sourceFilesErr = service.FindDirsFromDirectory(sourceDirPath, exclusions)
 			}
+			atomic.StoreInt32(&localScanDone, 1)
 		}
 	}()
 	go func() {
@@ -381,8 +394,10 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 			if destinationFilesErr == nil && syncDirTimestamps {
 				destDirs, destinationFilesErr = service.FindDirsFromDirectory(destDirPath, exclusions)
 			}
+			atomic.StoreInt32(&localScanDone, 1)
 		} else {
 			destinationFiles, destDirs, destinationSize, destinationFilesErr = agentClient.Walk(destDirPath, excludedNames, &remoteScanCounter, intervalMs)
+			atomic.StoreInt32(&remoteScanDone, 1)
 		}
 	}()
 	scanDone := make(chan struct{})
@@ -395,12 +410,18 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 				case <-scanDone:
 					return
 				case <-ticker.C:
-					lc := atomic.LoadInt32(&localScanCounter)
-					rc := atomic.LoadInt32(&remoteScanCounter)
+					lc := fmt.Sprintf("%d", atomic.LoadInt32(&localScanCounter))
+					if atomic.LoadInt32(&localScanDone) == 1 {
+						lc += " DONE"
+					}
+					rc := fmt.Sprintf("%d", atomic.LoadInt32(&remoteScanCounter))
+					if atomic.LoadInt32(&remoteScanDone) == 1 {
+						rc += " DONE"
+					}
 					if sourceIsRemote {
-						fmte.Printf("Scanning: found files: %d at source (remote), %d at destination (local)...\n", rc, lc)
+						fmte.Printf("Scanning: found files: %s at source (remote), %s at destination (local)...\n", rc, lc)
 					} else {
-						fmte.Printf("Scanning: found files: %d at source (local), %d at destination (remote)...\n", lc, rc)
+						fmte.Printf("Scanning: found files: %s at source (local), %s at destination (remote)...\n", lc, rc)
 					}
 				}
 			}
