@@ -78,15 +78,17 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 				case <-scanDone:
 					return
 				case <-ticker.C:
-					srcStr := fmt.Sprintf("%d", atomic.LoadInt32(&scanSourceCounter))
+					srcFinished := ""
 					if atomic.LoadInt32(&sourceScanDone) == 1 {
-						srcStr += " DONE"
+						srcFinished = " [FINISHED]"
 					}
-					dstStr := fmt.Sprintf("%d", atomic.LoadInt32(&scanDestCounter))
+					dstFinished := ""
 					if atomic.LoadInt32(&destScanDone) == 1 {
-						dstStr += " DONE"
+						dstFinished = " [FINISHED]"
 					}
-					fmte.Printf("Scanning: %s files at source, %s at destination...\n", srcStr, dstStr)
+					fmte.Printf("Scanning files: %d at source%s, %d at destination%s...\n",
+						atomic.LoadInt32(&scanSourceCounter), srcFinished,
+						atomic.LoadInt32(&scanDestCounter), dstFinished)
 				}
 			}
 		}()
@@ -410,18 +412,22 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 				case <-scanDone:
 					return
 				case <-ticker.C:
-					lc := fmt.Sprintf("%d", atomic.LoadInt32(&localScanCounter))
+					localFinished := ""
 					if atomic.LoadInt32(&localScanDone) == 1 {
-						lc += " DONE"
+						localFinished = " [FINISHED]"
 					}
-					rc := fmt.Sprintf("%d", atomic.LoadInt32(&remoteScanCounter))
+					remoteFinished := ""
 					if atomic.LoadInt32(&remoteScanDone) == 1 {
-						rc += " DONE"
+						remoteFinished = " [FINISHED]"
 					}
 					if sourceIsRemote {
-						fmte.Printf("Scanning: found files: %s at source (remote), %s at destination (local)...\n", rc, lc)
+						fmte.Printf("Scanning files: %d at source (remote)%s, %d at destination (local)%s...\n",
+							atomic.LoadInt32(&remoteScanCounter), remoteFinished,
+							atomic.LoadInt32(&localScanCounter), localFinished)
 					} else {
-						fmte.Printf("Scanning: found files: %s at source (local), %s at destination (remote)...\n", lc, rc)
+						fmte.Printf("Scanning files: %d at source (local)%s, %d at destination (remote)%s...\n",
+							atomic.LoadInt32(&localScanCounter), localFinished,
+							atomic.LoadInt32(&remoteScanCounter), remoteFinished)
 					}
 				}
 			}
