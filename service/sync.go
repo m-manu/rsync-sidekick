@@ -335,7 +335,7 @@ func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[
 		var archiveFiles map[string]entity.FileMeta
 		var err error
 		if destFS != nil {
-			archiveFiles, _, err = FindFilesFromDirectoryWithFS(destFS, archivePath, exclusions)
+			archiveFiles, _, err = FindFilesFromDirectoryWithFS(destFS, archivePath, exclusions, nil)
 		} else {
 			archiveFiles, _, err = FindFilesFromDirectory(archivePath, exclusions)
 		}

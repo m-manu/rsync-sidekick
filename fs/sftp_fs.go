@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"path"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/m-manu/rsync-sidekick/fmte"
@@ -21,7 +22,7 @@ func NewSFTPFS(client *sftp.Client) *SFTPFS {
 	return &SFTPFS{client: client}
 }
 
-func (s *SFTPFS) Walk(dirPath string, excludedNames map[string]struct{}) ([]DirEntry, error) {
+func (s *SFTPFS) Walk(dirPath string, excludedNames map[string]struct{}, counter *int32) ([]DirEntry, error) {
 	entries := make([]DirEntry, 0, 10_000)
 	walker := s.client.Walk(dirPath)
 	for walker.Step() {
@@ -60,6 +61,9 @@ func (s *SFTPFS) Walk(dirPath string, excludedNames map[string]struct{}) ([]DirE
 				ModTime:      info.ModTime().Unix(),
 				IsDir:        info.IsDir(),
 			})
+			if counter != nil && info.Mode().IsRegular() {
+				atomic.AddInt32(counter, 1)
+			}
 		}
 	}
 	return entries, nil

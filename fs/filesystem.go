@@ -10,7 +10,8 @@ import (
 type FileSystem interface {
 	// Walk recursively walks dirPath, returning all regular files.
 	// excludedNames contains base names to skip (files and directories).
-	Walk(dirPath string, excludedNames map[string]struct{}) ([]DirEntry, error)
+	// counter, if non-nil, is incremented atomically for each regular file found.
+	Walk(dirPath string, excludedNames map[string]struct{}, counter *int32) ([]DirEntry, error)
 
 	// Lstat returns file info without following symlinks.
 	Lstat(path string) (FileInfo, error)

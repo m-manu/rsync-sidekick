@@ -46,12 +46,13 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 	var sourceFiles, destinationFiles map[string]entity.FileMeta
 	var sourceSize, destinationSize int64
 	var sourceFilesErr, destinationFilesErr error
+	var scanSourceCounter, scanDestCounter int32
 	var wgDirScan sync.WaitGroup
 	wgDirScan.Add(2)
 	go func() {
 		defer wgDirScan.Done()
 		if sourceFS != nil {
-			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectoryWithFS(sourceFS, sourceDirPath, exclusions)
+			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectoryWithFS(sourceFS, sourceDirPath, exclusions, &scanSourceCounter)
 		} else {
 			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions)
 		}
@@ -59,12 +60,29 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 	go func() {
 		defer wgDirScan.Done()
 		if destFS != nil {
-			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectoryWithFS(destFS, destinationDirPath, exclusions)
+			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectoryWithFS(destFS, destinationDirPath, exclusions, &scanDestCounter)
 		} else {
 			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectory(destinationDirPath, exclusions)
 		}
 	}()
+	scanDone := make(chan struct{})
+	if progressFrequency > 0 {
+		go func() {
+			ticker := time.NewTicker(progressFrequency)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-scanDone:
+					return
+				case <-ticker.C:
+					fmte.Printf("Scanning: %d files at source, %d at destination...\n",
+						atomic.LoadInt32(&scanSourceCounter), atomic.LoadInt32(&scanDestCounter))
+				}
+			}
+		}()
+	}
 	wgDirScan.Wait()
+	close(scanDone)
 	end = time.Now()
 	if sourceFilesErr != nil {
 		return nil, fmt.Errorf("error scanning source directory: %+v", sourceFilesErr)

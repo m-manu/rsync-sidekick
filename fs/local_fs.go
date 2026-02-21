@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/m-manu/rsync-sidekick/fmte"
@@ -19,7 +20,7 @@ func NewLocalFS() *LocalFS {
 	return &LocalFS{}
 }
 
-func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}) ([]DirEntry, error) {
+func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}, counter *int32) ([]DirEntry, error) {
 	entries := make([]DirEntry, 0, 10_000)
 	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -57,6 +58,9 @@ func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}) ([]Dir
 				ModTime:      info.ModTime().Unix(),
 				IsDir:        d.IsDir(),
 			})
+			if counter != nil && d.Type().IsRegular() {
+				atomic.AddInt32(counter, 1)
+			}
 		}
 		return nil
 	})

@@ -18,16 +18,17 @@ func FindFilesFromDirectory(dirPath string, excludedFiles set.Set[string]) (
 	totalSizeOfFiles int64,
 	findFilesErr error,
 ) {
-	return FindFilesFromDirectoryWithFS(rsfs.NewLocalFS(), dirPath, excludedFiles)
+	return FindFilesFromDirectoryWithFS(rsfs.NewLocalFS(), dirPath, excludedFiles, nil)
 }
 
 // FindFilesFromDirectoryWithFS is like FindFilesFromDirectory but uses the given FileSystem.
-func FindFilesFromDirectoryWithFS(fsys rsfs.FileSystem, dirPath string, excludedFiles set.Set[string]) (
+// counter, if non-nil, is incremented atomically for each regular file found during the walk.
+func FindFilesFromDirectoryWithFS(fsys rsfs.FileSystem, dirPath string, excludedFiles set.Set[string], counter *int32) (
 	files map[string]entity.FileMeta,
 	totalSizeOfFiles int64,
 	findFilesErr error,
 ) {
-	entries, err := walkWithExclusions(fsys, dirPath, excludedFiles)
+	entries, err := walkWithExclusions(fsys, dirPath, excludedFiles, counter)
 	if err != nil {
 		return map[string]entity.FileMeta{}, 0, err
 	}
@@ -53,7 +54,7 @@ func FindDirsFromDirectory(dirPath string, excludedFiles set.Set[string]) (map[s
 
 // FindDirsFromDirectoryWithFS is like FindDirsFromDirectory but uses the given FileSystem.
 func FindDirsFromDirectoryWithFS(fsys rsfs.FileSystem, dirPath string, excludedFiles set.Set[string]) (map[string]int64, error) {
-	entries, err := walkWithExclusions(fsys, dirPath, excludedFiles)
+	entries, err := walkWithExclusions(fsys, dirPath, excludedFiles, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -66,13 +67,13 @@ func FindDirsFromDirectoryWithFS(fsys rsfs.FileSystem, dirPath string, excludedF
 	return dirs, nil
 }
 
-func walkWithExclusions(fsys rsfs.FileSystem, dirPath string, excludedFiles set.Set[string]) ([]rsfs.DirEntry, error) {
+func walkWithExclusions(fsys rsfs.FileSystem, dirPath string, excludedFiles set.Set[string], counter *int32) ([]rsfs.DirEntry, error) {
 	excludedMap := make(map[string]struct{}, excludedFiles.Cardinality())
 	excludedFiles.Each(func(s string) bool {
 		excludedMap[s] = struct{}{}
 		return false
 	})
-	entries, err := fsys.Walk(dirPath, excludedMap)
+	entries, err := fsys.Walk(dirPath, excludedMap, counter)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't scan directory %s: %v", dirPath, err)
 	}
