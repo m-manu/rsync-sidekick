@@ -5,14 +5,15 @@ import "github.com/m-manu/rsync-sidekick/entity"
 // Message types for the agent protocol (JSON-lines over SSH stdin/stdout).
 
 const (
-	MsgWalkRequest    = "walk_request"
-	MsgWalkResponse   = "walk_response"
-	MsgDigestRequest  = "digest_request"
-	MsgDigestResponse = "digest_response"
-	MsgPerformRequest = "perform_request"
+	MsgWalkRequest     = "walk_request"
+	MsgWalkResponse    = "walk_response"
+	MsgDigestRequest   = "digest_request"
+	MsgDigestProgress  = "digest_progress"
+	MsgDigestResponse  = "digest_response"
+	MsgPerformRequest  = "perform_request"
 	MsgPerformResponse = "perform_response"
-	MsgQuit           = "quit"
-	MsgError          = "error"
+	MsgQuit            = "quit"
+	MsgError           = "error"
 )
 
 // Envelope wraps every message.
@@ -45,6 +46,12 @@ type WalkResponse struct {
 type DigestRequest struct {
 	BasePath string   `json:"base_path"`
 	Files    []string `json:"files"`
+}
+
+// DigestProgress is sent by the agent after each file is hashed.
+type DigestProgress struct {
+	FilesHashed int `json:"files_hashed"`
+	Total       int `json:"total"`
 }
 
 // FileDigest mirrors entity.FileDigest for JSON transport.

@@ -447,11 +447,10 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 			go func() {
 				defer wgDigest.Done()
 				if sourceIsRemote && len(remoteOrphans) > 0 {
-					remoteDigests, remoteDigestErr = agentClient.BatchDigest(sourceDirPath, remoteOrphans)
+					remoteDigests, remoteDigestErr = agentClient.BatchDigest(sourceDirPath, remoteOrphans, &remoteCounter)
 				} else if !sourceIsRemote && len(remoteCandiates) > 0 {
-					remoteDigests, remoteDigestErr = agentClient.BatchDigest(destDirPath, remoteCandiates)
+					remoteDigests, remoteDigestErr = agentClient.BatchDigest(destDirPath, remoteCandiates, &remoteCounter)
 				}
-				atomic.StoreInt32(&remoteCounter, remoteTotal)
 			}()
 			go func() {
 				defer wgDigest.Done()
@@ -567,7 +566,7 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 			var unmatchedDigests map[string]entity.FileDigest
 			var digestErr error
 			if sourceIsRemote {
-				unmatchedDigests, digestErr = agentClient.BatchDigest(sourceDirPath, unmatchedOrphans)
+				unmatchedDigests, digestErr = agentClient.BatchDigest(sourceDirPath, unmatchedOrphans, nil)
 			} else {
 				unmatchedDigests, digestErr = batchDigestLocal(sourceDirPath, unmatchedOrphans, nil)
 			}
@@ -682,7 +681,7 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 		}
 
 		// Digest archive candidates via agent
-		archiveDigests, digestErr := agentClient.BatchDigest(archivePath, candidates)
+		archiveDigests, digestErr := agentClient.BatchDigest(archivePath, candidates, nil)
 		if digestErr != nil {
 			return nil, fmt.Errorf("error computing archive digests via agent: %w", digestErr)
 		}

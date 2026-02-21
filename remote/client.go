@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 
 	"github.com/m-manu/rsync-sidekick/entity"
 )
@@ -72,23 +73,43 @@ func (c *AgentClient) Walk(dirPath string, excludedNames []string) (map[string]e
 }
 
 // BatchDigest asks the remote agent to compute digests for a batch of files.
-func (c *AgentClient) BatchDigest(basePath string, files []string) (map[string]entity.FileDigest, error) {
+// counter, if non-nil, is updated atomically as the agent reports progress.
+func (c *AgentClient) BatchDigest(basePath string, files []string, counter *int32) (map[string]entity.FileDigest, error) {
 	req := DigestRequest{BasePath: basePath, Files: files}
-	resp, err := c.roundTrip(MsgDigestRequest, req)
-	if err != nil {
+	if err := c.send(MsgDigestRequest, req); err != nil {
 		return nil, err
 	}
 
-	var digestResp DigestResponse
-	if err := json.Unmarshal(resp.Payload, &digestResp); err != nil {
-		return nil, fmt.Errorf("bad digest response: %w", err)
+	for {
+		env, err := c.recv()
+		if err != nil {
+			return nil, err
+		}
+		switch env.Type {
+		case MsgDigestProgress:
+			if counter != nil {
+				var progress DigestProgress
+				if err := json.Unmarshal(env.Payload, &progress); err == nil {
+					atomic.StoreInt32(counter, int32(progress.FilesHashed))
+				}
+			}
+		case MsgDigestResponse:
+			var digestResp DigestResponse
+			if err := json.Unmarshal(env.Payload, &digestResp); err != nil {
+				return nil, fmt.Errorf("bad digest response: %w", err)
+			}
+			digests := make(map[string]entity.FileDigest, len(digestResp.Digests))
+			for p, fd := range digestResp.Digests {
+				digests[p] = fd.ToEntity()
+			}
+			if counter != nil {
+				atomic.StoreInt32(counter, int32(len(files)))
+			}
+			return digests, nil
+		default:
+			return nil, fmt.Errorf("unexpected message type during digest: %s", env.Type)
+		}
 	}
-
-	digests := make(map[string]entity.FileDigest, len(digestResp.Digests))
-	for p, fd := range digestResp.Digests {
-		digests[p] = fd.ToEntity()
-	}
-	return digests, nil
 }
 
 // Perform asks the remote agent to execute actions.

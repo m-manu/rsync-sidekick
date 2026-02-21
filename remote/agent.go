@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	set "github.com/deckarep/golang-set/v2"
@@ -105,19 +104,18 @@ func handleDigest(w io.Writer, payload []byte) {
 		return
 	}
 
+	total := len(req.Files)
 	resp := DigestResponse{
-		Digests: make(map[string]FileDigest, len(req.Files)),
+		Digests: make(map[string]FileDigest, total),
 	}
 
-	var counter int32
-	for _, relPath := range req.Files {
-		atomic.AddInt32(&counter, 1)
+	for i, relPath := range req.Files {
 		absPath := filepath.Join(req.BasePath, relPath)
 		digest, err := service.GetDigest(absPath)
-		if err != nil {
-			continue
+		if err == nil {
+			resp.Digests[relPath] = FileDigestFromEntity(digest)
 		}
-		resp.Digests[relPath] = FileDigestFromEntity(digest)
+		writeResponse(w, MsgDigestProgress, DigestProgress{FilesHashed: i + 1, Total: total})
 	}
 
 	writeResponse(w, MsgDigestResponse, resp)
