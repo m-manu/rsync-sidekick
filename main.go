@@ -12,14 +12,15 @@ import (
 	set "github.com/deckarep/golang-set/v2"
 	"github.com/m-manu/rsync-sidekick/fmte"
 	"github.com/m-manu/rsync-sidekick/lib"
+	"github.com/m-manu/rsync-sidekick/remote"
 	"github.com/m-manu/rsync-sidekick/service"
 	flag "github.com/spf13/pflag"
 )
 
 const (
 	applicationMajorVersion = 1
-	applicationMinorVersion = 9
-	applicationPatchVersion = 0
+	applicationMinorVersion = 10
+	applicationPatchVersion = 15
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -37,6 +38,7 @@ const (
 	exitCodeExclusionFilesError
 	exitCodeInvalidExclusions
 	exitCodeScriptPathError
+	exitCodeSSHError
 )
 
 //go:embed default_exclusions.txt
@@ -52,6 +54,14 @@ var flags struct {
 	showVersion       func() bool
 	isDryRun          func() bool
 	progressFrequency func() time.Duration
+	sshKeyPath        func() string
+	sidekickPath      func() string
+	isSFTP            func() bool
+	isAgent           func() bool
+	syncDirTimestamps func() bool
+	copyDuplicates    func() bool
+	useReflink        func() bool
+	archivePaths      func() []string
 }
 
 func setupExclusionsOpt() {
@@ -108,11 +118,11 @@ func showHelpAndExit() {
 		`a source directory to a destination directory.
 
 Usage:
-	 rsync-sidekick <flags> [source-dir] [destination-dir]
+	 rsync-sidekick <flags> [source] [destination]
 
 where,
-	[source-dir]        Source directory
-	[destination-dir]   Destination directory
+	[source]        Source directory (local path or user@host:/path)
+	[destination]   Destination directory (local path or user@host:/path)
 
 flags: (all optional)
 `)
@@ -184,6 +194,44 @@ func setupGetListFilesDir() {
 	}
 }
 
+func setupSSHKeyOpt() {
+	sshKeyPtr := flag.StringP("ssh-key", "i", "", "path to SSH private key for remote connections")
+	flags.sshKeyPath = func() string {
+		return *sshKeyPtr
+	}
+}
+
+func setupSidekickPathOpt() {
+	sidekickPathPtr := flag.String("sidekick-path", "rsync-sidekick",
+		"remote rsync-sidekick command (e.g. \"sudo rsync-sidekick\")")
+	flags.sidekickPath = func() string {
+		return *sidekickPathPtr
+	}
+}
+
+func setupSFTPOpt() {
+	sftpPtr := flag.Bool("sftp", false, "force SFTP mode (don't try remote-execution)")
+	flags.isSFTP = func() bool {
+		return *sftpPtr
+	}
+}
+
+func setupAgentOpt() {
+	agentPtr := flag.Bool("agent", false, "run in agent mode (used internally for remote-execution)")
+	flags.isAgent = func() bool {
+		return *agentPtr
+	}
+	flag.CommandLine.MarkHidden("agent")
+}
+
+func setupSyncDirTimestampsOpt() {
+	syncDirTsPtr := flag.BoolP("sync-dir-timestamps", "d", false,
+		"also propagate directory timestamps from source to destination")
+	flags.syncDirTimestamps = func() bool {
+		return *syncDirTsPtr
+	}
+}
+
 func readSourceAndDestination() (string, string) {
 	sourceDirPath, sourceDirErr := filepath.Abs(flag.Arg(0))
 	if sourceDirErr != nil || !lib.IsReadableDirectory(sourceDirPath) {
@@ -209,6 +257,34 @@ func setupDryRunOpt() {
 	}
 }
 
+func setupCopyDuplicatesOpt() {
+	copyDupPtr := flag.BoolP("copy-duplicates", "c", false,
+		"copy files locally at destination when content already exists there\n"+
+			"(avoids re-transfer of duplicate-content files via rsync)")
+	flags.copyDuplicates = func() bool {
+		return *copyDupPtr
+	}
+}
+
+func setupReflinkOpt() {
+	reflinkPtr := flag.Bool("reflink", false,
+		"use cp --reflink=auto for copy actions (instant on CoW filesystems like btrfs/XFS)\n"+
+			"(only effective when copies are performed via --copy-duplicates or --archive-path)")
+	flags.useReflink = func() bool {
+		return *reflinkPtr
+	}
+}
+
+func setupArchivePathOpt() {
+	archivePathsPtr := flag.StringArrayP("archive-path", "a", nil,
+		"additional directory on the destination side to scan for copy sources\n"+
+			"(can be specified multiple times; files are copied from archive, never moved;\n"+
+			"implies --copy-duplicates)")
+	flags.archivePaths = func() []string {
+		return *archivePathsPtr
+	}
+}
+
 func setupFlags() {
 	setupHelpOpt()
 	setupExclusionsOpt()
@@ -219,6 +295,14 @@ func setupFlags() {
 	setupGetListFilesDir()
 	setupShowVersion()
 	setupDryRunOpt()
+	setupSSHKeyOpt()
+	setupSidekickPathOpt()
+	setupSFTPOpt()
+	setupAgentOpt()
+	setupSyncDirTimestampsOpt()
+	setupCopyDuplicatesOpt()
+	setupReflinkOpt()
+	setupArchivePathOpt()
 	setupUsage()
 }
 
@@ -226,6 +310,16 @@ func main() {
 	defer handlePanic()
 	setupFlags()
 	flag.Parse()
+
+	// Agent mode: run as remote agent (reads from stdin, writes to stdout)
+	if flags.isAgent() {
+		if err := remote.RunAgent(); err != nil {
+			fmte.PrintfErr("agent error: %+v\n", err)
+			os.Exit(exitCodeSyncError)
+		}
+		os.Exit(exitCodeSuccess)
+	}
+
 	if flag.NArg() == 0 && flag.NFlag() == 0 {
 		fmte.Printf("error: no input directories passed\n")
 		flag.Usage()
@@ -243,19 +337,96 @@ func main() {
 		flag.Usage()
 		os.Exit(exitCodeInvalidNumArgs)
 	}
-	sourcePath, destinationPath := readSourceAndDestination()
-	// List
-	listFilesDir := flags.getListFilesDir()
-	if listFilesDir {
-		excludedFiles := flags.getExcludedFiles()
-		err := service.FindDirectoryResultToCsv(sourcePath, excludedFiles, os.Stdout)
-		if err == nil {
-			os.Exit(exitCodeSuccess)
-		} else {
-			fmte.PrintfErr("error while creating list: %+v", err)
-			os.Exit(exitCodeListFilesDirError)
-		}
+
+	// Parse locations (local or remote)
+	sourceLoc, srcErr := remote.ParseLocation(flag.Arg(0))
+	if srcErr != nil {
+		fmte.PrintfErr("error: invalid source: %+v\n", srcErr)
+		os.Exit(exitCodeSourceDirError)
 	}
+	destLoc, dstErr := remote.ParseLocation(flag.Arg(1))
+	if dstErr != nil {
+		fmte.PrintfErr("error: invalid destination: %+v\n", dstErr)
+		os.Exit(exitCodeDestinationDirError)
+	}
+	if sourceLoc.IsRemote && destLoc.IsRemote {
+		fmte.PrintfErr("error: only one of source or destination can be remote\n")
+		os.Exit(exitCodeInvalidNumArgs)
+	}
+
+	// If both are local, use the original flow
+	if !sourceLoc.IsRemote && !destLoc.IsRemote {
+		sourcePath, destinationPath := readSourceAndDestination()
+
+		// List
+		listFilesDir := flags.getListFilesDir()
+		if listFilesDir {
+			excludedFiles := flags.getExcludedFiles()
+			err := service.FindDirectoryResultToCsv(sourcePath, excludedFiles, os.Stdout)
+			if err == nil {
+				os.Exit(exitCodeSuccess)
+			} else {
+				fmte.PrintfErr("error while creating list: %+v", err)
+				os.Exit(exitCodeListFilesDirError)
+			}
+		}
+		if flags.isShellScriptMode() && flags.scriptOutputPath() != "" {
+			fmte.PrintfErr("error: flags --%s and --%s are both specified (you can only specify one of them)", shellScript, shellScriptAtPath)
+			os.Exit(exitCodeScriptPathError)
+		}
+
+		runID := time.Now().Format("060102_150405")
+
+		var scriptOutputPath string
+		if flags.isShellScriptMode() {
+			scriptOutputPath = fmt.Sprintf("./sync_actions_%s.sh", runID)
+		} else if flags.scriptOutputPath() != "" {
+			scriptOutputPath = flags.scriptOutputPath()
+		}
+
+		copyDup := flags.copyDuplicates() || len(flags.archivePaths()) > 0
+		syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath, scriptOutputPath,
+			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
+			copyDup, flags.useReflink(), flags.archivePaths())
+		if syncErr != nil {
+			fmte.PrintfErr("error while syncing: %+v\n", syncErr)
+			os.Exit(exitCodeSyncError)
+		}
+		return
+	}
+
+	// Remote mode
+	remoteLoc := sourceLoc
+	if destLoc.IsRemote {
+		remoteLoc = destLoc
+	}
+
+	fmte.Printf("Connecting to %s...\n", remoteLoc.SSHSpec())
+
+	// Determine mode: remote-execution or SFTP
+	agentClient, setupErr := remote.SetupRemote(remoteLoc, flags.sshKeyPath(), flags.sidekickPath(), flags.isSFTP())
+	if setupErr != nil {
+		fmte.PrintfErr("error: %+v\n", setupErr)
+		os.Exit(exitCodeSSHError)
+	}
+	if agentClient != nil {
+		defer agentClient.Close()
+	}
+
+	// Validate local side
+	localPath := sourceLoc.Path
+	if sourceLoc.IsRemote {
+		localPath = destLoc.Path
+	}
+	absLocalPath, absErr := filepath.Abs(localPath)
+	if absErr != nil || !lib.IsReadableDirectory(absLocalPath) {
+		fmte.PrintfErr("error: local path \"%s\" is not a readable directory\n", localPath)
+		if sourceLoc.IsRemote {
+			os.Exit(exitCodeDestinationDirError)
+		}
+		os.Exit(exitCodeSourceDirError)
+	}
+
 	if flags.isShellScriptMode() && flags.scriptOutputPath() != "" {
 		fmte.PrintfErr("error: flags --%s and --%s are both specified (you can only specify one of them)", shellScript, shellScriptAtPath)
 		os.Exit(exitCodeScriptPathError)
@@ -270,8 +441,19 @@ func main() {
 		scriptOutputPath = flags.scriptOutputPath()
 	}
 
-	syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath, scriptOutputPath,
-		flags.isVerbose(), flags.isDryRun(), flags.progressFrequency())
+	copyDup := flags.copyDuplicates() || len(flags.archivePaths()) > 0
+	var syncErr error
+	if sourceLoc.IsRemote {
+		syncErr = rsyncSidekickRemote(runID, remoteLoc, absLocalPath, true,
+			flags.sshKeyPath(), agentClient, flags.getExcludedFiles(), scriptOutputPath,
+			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
+			copyDup, flags.useReflink(), flags.archivePaths())
+	} else {
+		syncErr = rsyncSidekickRemote(runID, remoteLoc, absLocalPath, false,
+			flags.sshKeyPath(), agentClient, flags.getExcludedFiles(), scriptOutputPath,
+			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
+			copyDup, flags.useReflink(), flags.archivePaths())
+	}
 	if syncErr != nil {
 		fmte.PrintfErr("error while syncing: %+v\n", syncErr)
 		os.Exit(exitCodeSyncError)
