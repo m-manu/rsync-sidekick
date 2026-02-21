@@ -13,12 +13,12 @@ const numFilesGuess = 10_000
 
 // FindFilesFromDirectory finds all regular files in a given directory
 // (Very similar to `find` command on unix-like operating systems)
-func FindFilesFromDirectory(dirPath string, excludedFiles set.Set[string]) (
+func FindFilesFromDirectory(dirPath string, excludedFiles set.Set[string], counter *int32) (
 	files map[string]entity.FileMeta,
 	totalSizeOfFiles int64,
 	findFilesErr error,
 ) {
-	return FindFilesFromDirectoryWithFS(rsfs.NewLocalFS(), dirPath, excludedFiles, nil)
+	return FindFilesFromDirectoryWithFS(rsfs.NewLocalFS(), dirPath, excludedFiles, counter)
 }
 
 // FindFilesFromDirectoryWithFS is like FindFilesFromDirectory but uses the given FileSystem.

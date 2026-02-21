@@ -54,7 +54,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		if sourceFS != nil {
 			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectoryWithFS(sourceFS, sourceDirPath, exclusions, &scanSourceCounter)
 		} else {
-			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions)
+			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions, &scanSourceCounter)
 		}
 	}()
 	go func() {
@@ -62,7 +62,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		if destFS != nil {
 			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectoryWithFS(destFS, destinationDirPath, exclusions, &scanDestCounter)
 		} else {
-			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectory(destinationDirPath, exclusions)
+			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectory(destinationDirPath, exclusions, &scanDestCounter)
 		}
 	}()
 	scanDone := make(chan struct{})
@@ -358,6 +358,7 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 	var sourceDirs, destDirs map[string]int64
 	var sourceSize, destinationSize int64
 	var sourceFilesErr, destinationFilesErr error
+	var localScanCounter int32
 	var wgDirScan sync.WaitGroup
 	wgDirScan.Add(2)
 
@@ -366,7 +367,7 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 		if sourceIsRemote {
 			sourceFiles, sourceDirs, sourceSize, sourceFilesErr = agentClient.Walk(sourceDirPath, excludedNames)
 		} else {
-			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions)
+			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions, &localScanCounter)
 			if sourceFilesErr == nil && syncDirTimestamps {
 				sourceDirs, sourceFilesErr = service.FindDirsFromDirectory(sourceDirPath, exclusions)
 			}
@@ -375,7 +376,7 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 	go func() {
 		defer wgDirScan.Done()
 		if sourceIsRemote {
-			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectory(destDirPath, exclusions)
+			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectory(destDirPath, exclusions, &localScanCounter)
 			if destinationFilesErr == nil && syncDirTimestamps {
 				destDirs, destinationFilesErr = service.FindDirsFromDirectory(destDirPath, exclusions)
 			}
@@ -383,7 +384,23 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 			destinationFiles, destDirs, destinationSize, destinationFilesErr = agentClient.Walk(destDirPath, excludedNames)
 		}
 	}()
+	scanDone := make(chan struct{})
+	if progressFrequency > 0 {
+		go func() {
+			ticker := time.NewTicker(progressFrequency)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-scanDone:
+					return
+				case <-ticker.C:
+					fmte.Printf("Scanning: %d files locally (remote: progress not yet implemented)...\n", atomic.LoadInt32(&localScanCounter))
+				}
+			}
+		}()
+	}
 	wgDirScan.Wait()
+	close(scanDone)
 	end = time.Now()
 
 	if sourceFilesErr != nil {

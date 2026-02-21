@@ -73,7 +73,7 @@ func handleWalk(w io.Writer, payload []byte) {
 		excluded.Add(name)
 	}
 
-	files, totalSize, err := service.FindFilesFromDirectory(req.DirPath, excluded)
+	files, totalSize, err := service.FindFilesFromDirectory(req.DirPath, excluded, nil)
 	if err != nil {
 		writeError(w, fmt.Sprintf("walk failed: %v", err))
 		return

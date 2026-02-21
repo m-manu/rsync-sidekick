@@ -337,7 +337,7 @@ func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[
 		if destFS != nil {
 			archiveFiles, _, err = FindFilesFromDirectoryWithFS(destFS, archivePath, exclusions, nil)
 		} else {
-			archiveFiles, _, err = FindFilesFromDirectory(archivePath, exclusions)
+			archiveFiles, _, err = FindFilesFromDirectory(archivePath, exclusions, nil)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("error scanning archive %s: %w", archivePath, err)
@@ -405,7 +405,7 @@ func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[
 }
 
 func FindDirectoryResultToCsv(dirPath string, excludedFiles set.Set[string], file *os.File) error {
-	files, _, fErr := FindFilesFromDirectory(dirPath, excludedFiles)
+	files, _, fErr := FindFilesFromDirectory(dirPath, excludedFiles, nil)
 	if fErr != nil {
 		return fErr
 	}
