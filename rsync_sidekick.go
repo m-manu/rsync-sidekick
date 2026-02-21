@@ -414,6 +414,15 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 			// Hash remote files via agent, local files locally
 			var remoteDigests, localDigests map[string]entity.FileDigest
 			var remoteDigestErr, localDigestErr error
+			var localCounter, remoteCounter int32
+			var localTotal, remoteTotal int32
+			if sourceIsRemote {
+				remoteTotal = int32(len(remoteOrphans))
+				localTotal = int32(len(localCandidates))
+			} else {
+				localTotal = int32(len(localOrphans))
+				remoteTotal = int32(len(remoteCandiates))
+			}
 			var wgDigest sync.WaitGroup
 			wgDigest.Add(2)
 
@@ -424,15 +433,29 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 				} else if !sourceIsRemote && len(remoteCandiates) > 0 {
 					remoteDigests, remoteDigestErr = agentClient.BatchDigest(destDirPath, remoteCandiates)
 				}
+				atomic.StoreInt32(&remoteCounter, remoteTotal)
 			}()
 			go func() {
 				defer wgDigest.Done()
 				if sourceIsRemote && len(localCandidates) > 0 {
-					localDigests, localDigestErr = batchDigestLocal(destDirPath, localCandidates)
+					localDigests, localDigestErr = batchDigestLocal(destDirPath, localCandidates, &localCounter)
 				} else if !sourceIsRemote && len(localOrphans) > 0 {
-					localDigests, localDigestErr = batchDigestLocal(sourceDirPath, localOrphans)
+					localDigests, localDigestErr = batchDigestLocal(sourceDirPath, localOrphans, &localCounter)
 				}
 			}()
+			if localTotal > 0 && remoteTotal > 0 {
+				wgDigest.Add(1)
+				go func() {
+					defer wgDigest.Done()
+					if sourceIsRemote {
+						// remote = orphans (source), local = candidates (destination)
+						reportProgress(&remoteCounter, remoteTotal, &localCounter, localTotal, progressFrequency)
+					} else {
+						// local = orphans (source), remote = candidates (destination)
+						reportProgress(&localCounter, localTotal, &remoteCounter, remoteTotal, progressFrequency)
+					}
+				}()
+			}
 			wgDigest.Wait()
 
 			if remoteDigestErr != nil {
@@ -528,7 +551,7 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 			if sourceIsRemote {
 				unmatchedDigests, digestErr = agentClient.BatchDigest(sourceDirPath, unmatchedOrphans)
 			} else {
-				unmatchedDigests, digestErr = batchDigestLocal(sourceDirPath, unmatchedOrphans)
+				unmatchedDigests, digestErr = batchDigestLocal(sourceDirPath, unmatchedOrphans, nil)
 			}
 			if digestErr != nil {
 				return fmt.Errorf("error computing orphan digests for archive scan: %+v", digestErr)
@@ -583,11 +606,14 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 	return performActions(actions, destDirPath, dryRun)
 }
 
-func batchDigestLocal(basePath string, files []string) (map[string]entity.FileDigest, error) {
+func batchDigestLocal(basePath string, files []string, counter *int32) (map[string]entity.FileDigest, error) {
 	digests := make(map[string]entity.FileDigest, len(files))
 	for _, relPath := range files {
 		absPath := fmt.Sprintf("%s/%s", basePath, relPath)
 		digest, err := service.GetDigest(absPath)
+		if counter != nil {
+			atomic.AddInt32(counter, 1)
+		}
 		if err != nil {
 			continue
 		}
