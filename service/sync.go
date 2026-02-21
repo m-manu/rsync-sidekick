@@ -175,6 +175,7 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 					DestinationBaseDirPath:      destinationDirPath,
 					SourceFileRelativePath:      orphanAtSource,
 					DestinationFileRelativePath: candidateAtDestination,
+					SourceModTime:               time.Unix(sourceFiles[orphanAtSource].ModifiedTimestamp, 0),
 					FS:                          destFS,
 				}
 				if !uniqueness.Contains(timestampAction.Uniqueness()) {
