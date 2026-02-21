@@ -6,6 +6,7 @@ import "github.com/m-manu/rsync-sidekick/entity"
 
 const (
 	MsgWalkRequest     = "walk_request"
+	MsgWalkProgress    = "walk_progress"
 	MsgWalkResponse    = "walk_response"
 	MsgDigestRequest   = "digest_request"
 	MsgDigestProgress  = "digest_progress"
@@ -25,8 +26,14 @@ type Envelope struct {
 
 // WalkRequest asks the agent to scan a directory.
 type WalkRequest struct {
-	DirPath       string   `json:"dir_path"`
-	ExcludedNames []string `json:"excluded_names"`
+	DirPath            string   `json:"dir_path"`
+	ExcludedNames      []string `json:"excluded_names"`
+	ProgressIntervalMs int64    `json:"progress_interval_ms,omitempty"`
+}
+
+// WalkProgress is sent by the agent periodically during a directory scan.
+type WalkProgress struct {
+	FilesFound int `json:"files_found"`
 }
 
 // FileMeta mirrors entity.FileMeta for JSON transport.

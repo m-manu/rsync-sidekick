@@ -358,14 +358,15 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 	var sourceDirs, destDirs map[string]int64
 	var sourceSize, destinationSize int64
 	var sourceFilesErr, destinationFilesErr error
-	var localScanCounter int32
+	var localScanCounter, remoteScanCounter int32
+	intervalMs := progressFrequency.Milliseconds()
 	var wgDirScan sync.WaitGroup
 	wgDirScan.Add(2)
 
 	go func() {
 		defer wgDirScan.Done()
 		if sourceIsRemote {
-			sourceFiles, sourceDirs, sourceSize, sourceFilesErr = agentClient.Walk(sourceDirPath, excludedNames)
+			sourceFiles, sourceDirs, sourceSize, sourceFilesErr = agentClient.Walk(sourceDirPath, excludedNames, &remoteScanCounter, intervalMs)
 		} else {
 			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions, &localScanCounter)
 			if sourceFilesErr == nil && syncDirTimestamps {
@@ -381,7 +382,7 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 				destDirs, destinationFilesErr = service.FindDirsFromDirectory(destDirPath, exclusions)
 			}
 		} else {
-			destinationFiles, destDirs, destinationSize, destinationFilesErr = agentClient.Walk(destDirPath, excludedNames)
+			destinationFiles, destDirs, destinationSize, destinationFilesErr = agentClient.Walk(destDirPath, excludedNames, &remoteScanCounter, intervalMs)
 		}
 	}()
 	scanDone := make(chan struct{})
@@ -394,7 +395,13 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 				case <-scanDone:
 					return
 				case <-ticker.C:
-					fmte.Printf("Scanning: %d files locally (remote: progress not yet implemented)...\n", atomic.LoadInt32(&localScanCounter))
+					lc := atomic.LoadInt32(&localScanCounter)
+					rc := atomic.LoadInt32(&remoteScanCounter)
+					if sourceIsRemote {
+						fmte.Printf("Scanning: found files: %d at source (remote), %d at destination (local)...\n", rc, lc)
+					} else {
+						fmte.Printf("Scanning: found files: %d at source (local), %d at destination (remote)...\n", lc, rc)
+					}
 				}
 			}
 		}()
@@ -680,7 +687,7 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 
 	for _, archivePath := range archivePaths {
 		// Walk archive via agent
-		archiveFiles, _, _, walkErr := agentClient.Walk(archivePath, excludedNames)
+		archiveFiles, _, _, walkErr := agentClient.Walk(archivePath, excludedNames, nil, 0)
 		if walkErr != nil {
 			return nil, fmt.Errorf("error scanning archive %s via agent: %w", archivePath, walkErr)
 		}

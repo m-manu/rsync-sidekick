@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	set "github.com/deckarep/golang-set/v2"
@@ -73,7 +75,34 @@ func handleWalk(w io.Writer, payload []byte) {
 		excluded.Add(name)
 	}
 
-	files, totalSize, err := service.FindFilesFromDirectory(req.DirPath, excluded, nil)
+	var counter int32
+	var done chan struct{}
+	var wg sync.WaitGroup
+	if req.ProgressIntervalMs > 0 {
+		done = make(chan struct{})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(time.Duration(req.ProgressIntervalMs) * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					writeResponse(w, MsgWalkProgress, WalkProgress{FilesFound: int(atomic.LoadInt32(&counter))})
+				}
+			}
+		}()
+	}
+
+	files, totalSize, err := service.FindFilesFromDirectory(req.DirPath, excluded, &counter)
+
+	if done != nil {
+		close(done)
+		wg.Wait()
+	}
+
 	if err != nil {
 		writeError(w, fmt.Sprintf("walk failed: %v", err))
 		return
