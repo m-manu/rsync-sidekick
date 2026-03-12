@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -60,7 +61,7 @@ func buildIndex(baseDirPath string, filesToScan []string, counter *int32,
 // do not require actual file transfer. This is the core function of this tool.
 func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.FileMeta, orphansAtSource []string,
 	destinationDirPath string, destinationFiles map[string]entity.FileMeta, candidatesAtDestination []string,
-	sourceCounter *int32, destinationCounter *int32,
+	sourceCounter *int32, destinationCounter *int32, matchDuplicates bool,
 ) (actions []action.SyncAction, savings int64, err error) {
 	orphanFilesToDigests := lib.NewSafeMap[string, entity.FileDigest]()
 	candidateFilesToDigests := lib.NewSafeMap[string, entity.FileDigest]()
@@ -108,8 +109,10 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 	actions = make([]action.SyncAction, 0, orphanFilesToDigests.Len())
 	uniqueness := set.NewSetWithSize[string](orphanFilesToDigests.Len())
 	for orphanAtSource, orphanDigest := range orphanFilesToDigests.ForEach() {
-		if len(orphanDigestsToFiles.Get(orphanDigest)) > 1 {
-			// many orphans at source have the same digest
+		orphans := orphanDigestsToFiles.Get(orphanDigest)
+		if len(orphans) > 1 && !matchDuplicates {
+			// default behaviour when many orphans at source have the same digest
+			fmte.PrintfV("Multiple orphans found (%d): skip matching for %s\n", len(orphans), orphanAtSource)
 			continue
 		}
 		if !candidateDigestsToFiles.Exists(orphanDigest) {
@@ -118,15 +121,51 @@ func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.File
 		}
 		matchesAtDestination := candidateDigestsToFiles.Get(orphanDigest)
 		var candidateAtDestination string
-		if len(matchesAtDestination) == 1 {
-			candidateAtDestination = matchesAtDestination[0]
+		// Default conservative behavior (skipping duplicates)
+		if !matchDuplicates {
+			if len(matchesAtDestination) == 1 {
+				candidateAtDestination = matchesAtDestination[0]
+			} else {
+				// If multiple files with same digest exist at destination,
+				// choose a random one that does *not* exist at source
+				for _, destinationPath := range matchesAtDestination {
+					if _, existsAtSource := sourceFiles[destinationPath]; !existsAtSource {
+						candidateAtDestination = destinationPath
+						break
+					}
+				}
+			}
+		// Progressive approach: match duplicates as well (especially for media archives)
 		} else {
-			// If multiple files with same digest exist at destination,
-			// choose a random one that does *not* exist at source
-			for _, destinationPath := range matchesAtDestination {
-				if _, existsAtSource := sourceFiles[destinationPath]; !existsAtSource {
-					candidateAtDestination = destinationPath
-					break
+			baseName := filepath.Base(orphanAtSource)
+			srcMeta := sourceFiles[orphanAtSource]
+			// Filename grouping for high accuracy
+			candidates := []string{}
+			for _, dst := range matchesAtDestination {
+				if filepath.Base(dst) == baseName {
+ 					candidates = append(candidates, dst)
+				}
+			}
+			// fallback if filename not unique
+			if len(candidates) == 0 {
+				candidates = matchesAtDestination
+			}
+			filtered := filterByTimestamp(candidates, srcMeta, destinationFiles)
+			if len(filtered) == 1 {
+				candidateAtDestination = filtered[0]
+			} else if len(filtered) > 1 {
+				bestScore := -1
+				for _, c := range filtered {
+					s := calculateSimilarityScore(orphanAtSource, c)
+					// Note: similarity scoring is only used when files share the same digest.
+					// Therefore any candidate selected represents identical file content.
+					// Worst-case a wrong match may cause an unnecessary move operation,
+					// but rsync will still produce the correct final state.
+					if s > bestScore {
+						bestScore = s
+						candidateAtDestination = c
+						fmte.PrintfV("Duplicate match: %s -> %s\n", orphanAtSource, candidateAtDestination)
+					}
 				}
 			}
 		}
@@ -203,4 +242,86 @@ func FindDirectoryResultToCsv(dirPath string, excludedFiles set.Set[string], fil
 	}
 	cw.Flush()
 	return nil
+}
+
+// Ranks how similar two file paths are, in order to detect renamed folders
+//
+// Use case:     multiple destination files share the same digest,
+//               we must choose the most likely candidate to move
+// Precondition: both files have identical digests (guaranteed identical content)
+//
+// Example: the highest score is found for "Summer" and "Summer Season 2019"
+//   source:      Summer/2019/FILE0001.MOV
+//   candidates:  Summer Season 2018/FILE0001.MOV
+//                Summer Season 2019/FILE0001.MOV
+//                Winter Season 2019/FILE0001.MOV
+//
+// The algorithm is heuristic but deterministic and uses 4 signals:
+// 1. Filename equality: +50
+//   Camera/media filenames are typically unique within an archive.
+//   Matching filenames therefore strongly indicates the correct file.
+// 2. Directory equality: +5
+//   Shared folder structure indicate a strong signal.
+// 3. Substring directory match: +3
+//   Handles common changes to folder names.
+// 4. Word overlap between directories: +1
+//   Weak signal when folders share common words.
+//
+// What matters is the ratio: the exact numeric values are not critical. 
+// Weights are intentionally hierarchical and must ensure following ordering:
+//   filename match (50)  >> directory match (5)
+//   directory match (5)  > substring match (3)
+//   substring match (3)  > word overlap (1)
+//
+// This ensures filename equality dominates the decision while directory
+// similarity resolves ambiguities when multiple candidates exist.
+//
+func calculateSimilarityScore(a, b string) int {
+	score := 0
+	// MATCH: identical filename
+	if strings.ToLower(filepath.Base(a)) == strings.ToLower(filepath.Base(b)) {
+		score += 50
+	}
+	// Compare directory segments (ignore filename)
+	aParts := strings.Split(filepath.ToSlash(a), "/")
+	bParts := strings.Split(filepath.ToSlash(b), "/")
+	aDir := aParts[:len(aParts)-1]
+	bDir := bParts[:len(bParts)-1]
+	for _, ap := range aDir {
+		ap = strings.ToLower(ap)
+		for _, bp := range bDir {
+			bp = strings.ToLower(bp)
+			// MATCH: identical folder name
+			if ap == bp {
+				score += 5
+				continue
+			}
+			// MATCH: full folder name (as substring of the other name)
+			if strings.Contains(ap, bp) || strings.Contains(bp, ap) {
+				score += 3
+				continue
+			}
+			// MATCH: partial folder name (word-level overlap)
+			aWords := strings.Fields(ap)
+			bWords := strings.Fields(bp)
+			for _, aw := range aWords {
+				for _, bw := range bWords {
+					if aw == bw {
+						score++
+					}
+				}
+			}
+		}
+	}
+	return score
+}
+
+func filterByTimestamp(paths []string, sourceMeta entity.FileMeta, destinationFiles map[string]entity.FileMeta) []string {
+	result := []string{}
+	for _, p := range paths {
+		if destinationFiles[p].ModifiedTimestamp == sourceMeta.ModifiedTimestamp {
+			result = append(result, p)
+		}
+	}
+	return result
 }

@@ -21,7 +21,7 @@ import (
 const unixCommandLengthGuess = 200
 
 func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions set.Set[string],
-	destinationDirPath string, verbose bool, progressFrequency time.Duration) ([]action.SyncAction, error) {
+	destinationDirPath string, verbose bool, progressFrequency time.Duration, matchDuplicates bool) ([]action.SyncAction, error) {
 	if verbose {
 		fmte.VerboseOn()
 	}
@@ -87,7 +87,7 @@ func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions s
 	go func() {
 		defer wg.Done()
 		actions, savings, syncErr = service.ComputeSyncActions(sourceDirPath, sourceFiles, orphansAtSource,
-			destinationDirPath, destinationFiles, candidatesAtDestination, &sourceCounter, &destinationCounter)
+			destinationDirPath, destinationFiles, candidatesAtDestination, &sourceCounter, &destinationCounter, matchDuplicates)
 	}()
 	go func() {
 		defer wg.Done()
@@ -112,8 +112,8 @@ func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions s
 }
 
 func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string], destinationDirPath string,
-	outputScriptPath string, verbose bool, dryRun bool, progressFrequency time.Duration) error {
-	actions, err := getSyncActionsWithProgress(runID, sourceDirPath, exclusions, destinationDirPath, verbose, progressFrequency)
+	outputScriptPath string, verbose bool, dryRun bool, progressFrequency time.Duration, matchDuplicates bool) error {
+	actions, err := getSyncActionsWithProgress(runID, sourceDirPath, exclusions, destinationDirPath, verbose, progressFrequency, matchDuplicates)
 	if err != nil {
 		return err // no extra info needed
 	}

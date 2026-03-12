@@ -52,6 +52,7 @@ var flags struct {
 	showVersion       func() bool
 	isDryRun          func() bool
 	progressFrequency func() time.Duration
+	matchDuplicates   func() bool
 }
 
 func setupExclusionsOpt() {
@@ -176,6 +177,15 @@ func setupProgressFrequencyOpt() {
 	}
 }
 
+func setupMatchDuplicatesOpt() {
+	matchDuplicatesPtr := flag.BoolP("match-duplicates", "d", false,
+		"enable duplicate-aware matching to resolve identical files (safe heuristics using filename, timestamp and directory similarity)",
+	)
+	flags.matchDuplicates = func() bool {
+		return *matchDuplicatesPtr
+	}
+}
+
 func setupGetListFilesDir() {
 	listFilesDirPtr := flag.Bool("list", false, "list files along their metadata for given directory")
 	flags.getListFilesDir = func() bool {
@@ -216,6 +226,7 @@ func setupFlags() {
 	setupShellScriptWithNameOpt()
 	setupVerboseOpt()
 	setupProgressFrequencyOpt()
+	setupMatchDuplicatesOpt()
 	setupGetListFilesDir()
 	setupShowVersion()
 	setupDryRunOpt()
@@ -271,7 +282,7 @@ func main() {
 	}
 
 	syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath, scriptOutputPath,
-		flags.isVerbose(), flags.isDryRun(), flags.progressFrequency())
+		flags.isVerbose(), flags.isDryRun(), flags.progressFrequency(), flags.matchDuplicates())
 	if syncErr != nil {
 		fmte.PrintfErr("error while syncing: %+v\n", syncErr)
 		os.Exit(exitCodeSyncError)
