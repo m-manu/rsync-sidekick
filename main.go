@@ -11,6 +11,7 @@ import (
 
 	set "github.com/deckarep/golang-set/v2"
 	"github.com/m-manu/rsync-sidekick/fmte"
+	rsfs "github.com/m-manu/rsync-sidekick/fs"
 	"github.com/m-manu/rsync-sidekick/lib"
 	"github.com/m-manu/rsync-sidekick/remote"
 	"github.com/m-manu/rsync-sidekick/service"
@@ -62,6 +63,8 @@ var flags struct {
 	copyDuplicates    func() bool
 	useReflink        func() bool
 	archivePaths      func() []string
+	oneFileSystem        func() bool
+	archiveOneFileSystem func() bool
 }
 
 func setupExclusionsOpt() {
@@ -285,6 +288,20 @@ func setupArchivePathOpt() {
 	}
 }
 
+func setupOneFileSystemOpt() {
+	oneFileSystemPtr := flag.Bool("one-file-system", false,
+		"don't cross filesystem boundaries when scanning source and destination (like rsync -x)")
+	flags.oneFileSystem = func() bool {
+		return *oneFileSystemPtr
+	}
+	archiveOneFileSystemPtr := flag.Bool("archive-one-file-system", false,
+		"don't cross filesystem boundaries when scanning archive paths\n"+
+			"(by default archives DO cross boundaries, e.g. into btrfs snapshot subvols)")
+	flags.archiveOneFileSystem = func() bool {
+		return *archiveOneFileSystemPtr
+	}
+}
+
 func setupFlags() {
 	setupHelpOpt()
 	setupExclusionsOpt()
@@ -303,6 +320,7 @@ func setupFlags() {
 	setupCopyDuplicatesOpt()
 	setupReflinkOpt()
 	setupArchivePathOpt()
+	setupOneFileSystemOpt()
 	setupUsage()
 }
 
@@ -352,6 +370,14 @@ func main() {
 	if sourceLoc.IsRemote && destLoc.IsRemote {
 		fmte.PrintfErr("error: only one of source or destination can be remote\n")
 		os.Exit(exitCodeInvalidNumArgs)
+	}
+
+	// Set --one-file-system defaults for LocalFS instances
+	if flags.oneFileSystem() {
+		rsfs.DefaultOneFileSystem = true
+	}
+	if flags.archiveOneFileSystem() {
+		rsfs.DefaultArchiveOneFileSystem = true
 	}
 
 	// If both are local, use the original flow
@@ -411,6 +437,11 @@ func main() {
 	}
 	if agentClient != nil {
 		defer agentClient.Close()
+	}
+
+	// Warn if --one-file-system is used with SFTP (forced or fallback)
+	if flags.oneFileSystem() && agentClient == nil {
+		fmte.PrintfErr("warning: --one-file-system has no effect on SFTP paths\n")
 	}
 
 	// Validate local side

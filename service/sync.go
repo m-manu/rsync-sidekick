@@ -335,7 +335,7 @@ func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[
 		if destFS != nil {
 			archiveFiles, _, err = FindFilesFromDirectoryWithFS(destFS, archivePath, exclusions, nil)
 		} else {
-			archiveFiles, _, err = FindFilesFromDirectory(archivePath, exclusions, nil)
+			archiveFiles, _, err = FindFilesFromDirectoryWithFS(rsfs.NewLocalFSForArchive(), archivePath, exclusions, nil)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("error scanning archive %s: %w", archivePath, err)
