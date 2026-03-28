@@ -29,6 +29,7 @@ type WalkRequest struct {
 	DirPath            string   `json:"dir_path"`
 	ExcludedNames      []string `json:"excluded_names"`
 	ProgressIntervalMs int64    `json:"progress_interval_ms,omitempty"`
+	OneFileSystem      bool     `json:"one_file_system,omitempty"`
 }
 
 // WalkProgress is sent by the agent periodically during a directory scan.

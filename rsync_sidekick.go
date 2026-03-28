@@ -380,7 +380,7 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 	go func() {
 		defer wgDirScan.Done()
 		if sourceIsRemote {
-			sourceFiles, sourceDirs, sourceSize, sourceFilesErr = agentClient.Walk(sourceDirPath, excludedNames, &remoteScanCounter, intervalMs)
+			sourceFiles, sourceDirs, sourceSize, sourceFilesErr = agentClient.Walk(sourceDirPath, excludedNames, &remoteScanCounter, intervalMs, rsfs.DefaultOneFileSystem)
 			atomic.StoreInt32(&remoteScanDone, 1)
 		} else {
 			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions, &localScanCounter)
@@ -399,7 +399,7 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 			}
 			atomic.StoreInt32(&localScanDone, 1)
 		} else {
-			destinationFiles, destDirs, destinationSize, destinationFilesErr = agentClient.Walk(destDirPath, excludedNames, &remoteScanCounter, intervalMs)
+			destinationFiles, destDirs, destinationSize, destinationFilesErr = agentClient.Walk(destDirPath, excludedNames, &remoteScanCounter, intervalMs, rsfs.DefaultOneFileSystem)
 			atomic.StoreInt32(&remoteScanDone, 1)
 		}
 	}()
@@ -715,7 +715,7 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 
 	for _, archivePath := range archivePaths {
 		// Walk archive via agent
-		archiveFiles, _, _, walkErr := agentClient.Walk(archivePath, excludedNames, nil, 0)
+		archiveFiles, _, _, walkErr := agentClient.Walk(archivePath, excludedNames, nil, 0, rsfs.DefaultArchiveOneFileSystem)
 		if walkErr != nil {
 			return nil, fmt.Errorf("error scanning archive %s via agent: %w", archivePath, walkErr)
 		}

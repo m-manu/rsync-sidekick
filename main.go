@@ -290,13 +290,15 @@ func setupArchivePathOpt() {
 
 func setupOneFileSystemOpt() {
 	oneFileSystemPtr := flag.Bool("one-file-system", false,
-		"don't cross filesystem boundaries when scanning source and destination (like rsync -x)")
+		"don't cross filesystem boundaries when scanning source and destination (like rsync -x)\n"+
+			"(works locally and with remote-exec, not with SFTP)")
 	flags.oneFileSystem = func() bool {
 		return *oneFileSystemPtr
 	}
 	archiveOneFileSystemPtr := flag.Bool("archive-one-file-system", false,
 		"don't cross filesystem boundaries when scanning archive paths\n"+
-			"(by default archives DO cross boundaries, e.g. into btrfs snapshot subvols)")
+			"(by default archives DO cross boundaries, e.g. into btrfs snapshot subvols)\n"+
+			"(works locally and with remote-exec, not with SFTP)")
 	flags.archiveOneFileSystem = func() bool {
 		return *archiveOneFileSystemPtr
 	}

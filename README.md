@@ -102,8 +102,10 @@ flags: (all optional)
       --reflink                       use cp --reflink=auto for copy actions (instant on CoW filesystems like btrfs/XFS)
                                       (only effective when copies are performed via --copy-duplicates or --archive-path)
       --one-file-system               don't cross filesystem boundaries when scanning source and destination (like rsync -x)
+                                      (works locally and with remote-exec, not with SFTP)
       --archive-one-file-system       don't cross filesystem boundaries when scanning archive paths
                                       (by default archives DO cross boundaries, e.g. into btrfs snapshot subvols)
+                                      (works locally and with remote-exec, not with SFTP)
       --sftp                          force SFTP mode (don't try remote-execution)
   -s, --shellscript                   instead of applying changes directly, generate a shell script
                                       (this flag is useful if you want to run the shell script as a different user)
@@ -196,6 +198,9 @@ keeps the scan within a single subvolume.
 A separate `--archive-one-file-system` flag controls the same behavior for archive paths. By default,
 archives **do** cross filesystem boundaries, since you typically point `-a` at a parent directory
 containing multiple btrfs snapshot subvolumes.
+
+Both flags work locally and with remote-exec mode. They have **no effect in SFTP mode**, since SFTP
+does not expose filesystem/device boundaries.
 
 ```bash
 # Scan only within the @ subvolume, don't descend into nested subvols:

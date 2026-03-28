@@ -54,9 +54,10 @@ func NewAgentClient(loc Location, explicitKeyPath string, sidekickPath string) (
 // Walk asks the remote agent to scan a directory.
 // counter, if non-nil, is updated atomically as the agent reports progress.
 // progressIntervalMs controls how often the agent sends progress updates (0 = disabled).
+// oneFileSystem prevents crossing filesystem boundaries during the scan.
 // Returns files, dirs (relPath→modtime), totalSize, error.
-func (c *AgentClient) Walk(dirPath string, excludedNames []string, counter *int32, progressIntervalMs int64) (map[string]entity.FileMeta, map[string]int64, int64, error) {
-	req := WalkRequest{DirPath: dirPath, ExcludedNames: excludedNames, ProgressIntervalMs: progressIntervalMs}
+func (c *AgentClient) Walk(dirPath string, excludedNames []string, counter *int32, progressIntervalMs int64, oneFileSystem bool) (map[string]entity.FileMeta, map[string]int64, int64, error) {
+	req := WalkRequest{DirPath: dirPath, ExcludedNames: excludedNames, ProgressIntervalMs: progressIntervalMs, OneFileSystem: oneFileSystem}
 	if err := c.send(MsgWalkRequest, req); err != nil {
 		return nil, nil, 0, err
 	}

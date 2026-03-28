@@ -14,6 +14,7 @@ import (
 	"time"
 
 	set "github.com/deckarep/golang-set/v2"
+	rsfs "github.com/m-manu/rsync-sidekick/fs"
 	"github.com/m-manu/rsync-sidekick/service"
 )
 
@@ -69,6 +70,9 @@ func handleWalk(w io.Writer, payload []byte) {
 		writeError(w, fmt.Sprintf("bad walk request: %v", err))
 		return
 	}
+
+	// Apply one-file-system setting from the client
+	rsfs.DefaultOneFileSystem = req.OneFileSystem
 
 	excluded := set.NewThreadUnsafeSetWithSize[string](len(req.ExcludedNames))
 	for _, name := range req.ExcludedNames {
