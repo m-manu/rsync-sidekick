@@ -20,8 +20,8 @@ import (
 
 const (
 	applicationMajorVersion = 1
-	applicationMinorVersion = 10
-	applicationPatchVersion = 16
+	applicationMinorVersion = 11
+	applicationPatchVersion = 0
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",

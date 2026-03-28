@@ -101,6 +101,9 @@ flags: (all optional)
   -f, --progress-frequency duration   frequency of progress reporting e.g. '5s', '1m' (default 2s)
       --reflink                       use cp --reflink=auto for copy actions (instant on CoW filesystems like btrfs/XFS)
                                       (only effective when copies are performed via --copy-duplicates or --archive-path)
+      --one-file-system               don't cross filesystem boundaries when scanning source and destination (like rsync -x)
+      --archive-one-file-system       don't cross filesystem boundaries when scanning archive paths
+                                      (by default archives DO cross boundaries, e.g. into btrfs snapshot subvols)
       --sftp                          force SFTP mode (don't try remote-execution)
   -s, --shellscript                   instead of applying changes directly, generate a shell script
                                       (this flag is useful if you want to run the shell script as a different user)
@@ -181,6 +184,25 @@ it falls back to a regular copy automatically. This flag only has an effect when
 ```bash
 # Instant zero-cost copies on btrfs:
 rsync-sidekick -c --reflink /Users/manu/Photos/ /mnt/btrfs-backup/Photos/
+```
+
+## Staying on one filesystem (`--one-file-system`)
+
+On btrfs or other setups with nested mount points / subvolumes, `--one-file-system` prevents
+`rsync-sidekick` from crossing filesystem boundaries when scanning source and destination directories
+(similar to `rsync -x`). Each subvolume on btrfs has a different device ID, so this effectively
+keeps the scan within a single subvolume.
+
+A separate `--archive-one-file-system` flag controls the same behavior for archive paths. By default,
+archives **do** cross filesystem boundaries, since you typically point `-a` at a parent directory
+containing multiple btrfs snapshot subvolumes.
+
+```bash
+# Scan only within the @ subvolume, don't descend into nested subvols:
+rsync-sidekick --one-file-system -c --reflink /mnt/data/@ /mnt/backup/@
+
+# Archives cross into snapshots by default (no extra flag needed):
+rsync-sidekick --one-file-system -c --reflink -a /mnt/backup/.snapshots/@/ /mnt/data/@ /mnt/backup/@
 ```
 
 ## Running this from a Docker container
