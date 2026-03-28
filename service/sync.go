@@ -155,39 +155,43 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 	}
 	actions = make([]action.SyncAction, 0, orphanFilesToDigests.Len())
 	uniqueness := set.NewSetWithSize[string](orphanFilesToDigests.Len())
-	usedCandidates := set.NewSet[string]()
+	movedCandidates := set.NewSet[string]() // prevents double-moves; copies still allowed
 	for orphanAtSource, orphanDigest := range orphanFilesToDigests.ForEach() {
 		if !candidateDigestsToFiles.Exists(orphanDigest) {
 			// let rsync handle this
 			continue
 		}
 		matchesAtDestination := candidateDigestsToFiles.Get(orphanDigest)
-		candidateAtDestination := PickBestCandidate(matchesAtDestination, orphanAtSource, sourceFiles, usedCandidates)
+		candidateAtDestination := PickBestCandidate(matchesAtDestination, orphanAtSource, sourceFiles, movedCandidates)
 		if candidateAtDestination == "" {
 			continue
 		}
 		_, candidateExistsAtSource := sourceFiles[candidateAtDestination]
-		if destinationFiles[candidateAtDestination].ModifiedTimestamp != sourceFiles[orphanAtSource].ModifiedTimestamp {
-			// Avoid propagating timestamp to a destination file that already matches its counterpart at source
-			if srcMetaForCandidate, existsAtSourceForCandidate := sourceFiles[candidateAtDestination]; !(existsAtSourceForCandidate && srcMetaForCandidate == destinationFiles[candidateAtDestination]) {
-				timestampAction := action.PropagateTimestampAction{
-					SourceBaseDirPath:           sourceDirPath,
-					DestinationBaseDirPath:      destinationDirPath,
-					SourceFileRelativePath:      orphanAtSource,
-					DestinationFileRelativePath: candidateAtDestination,
-					SourceModTime:               time.Unix(sourceFiles[orphanAtSource].ModifiedTimestamp, 0),
-					FS:                          destFS,
-				}
-				if !uniqueness.Contains(timestampAction.Uniqueness()) {
-					actions = append(actions, timestampAction)
-					uniqueness.Add(timestampAction.Uniqueness())
-					savings += sourceFiles[orphanAtSource].Size
+		// Timestamp propagation — skip for already-moved candidates (file no longer at original path)
+		if !movedCandidates.Contains(candidateAtDestination) {
+			if destinationFiles[candidateAtDestination].ModifiedTimestamp != sourceFiles[orphanAtSource].ModifiedTimestamp {
+				// Avoid propagating timestamp to a destination file that already matches its counterpart at source
+				if srcMetaForCandidate, existsAtSourceForCandidate := sourceFiles[candidateAtDestination]; !(existsAtSourceForCandidate && srcMetaForCandidate == destinationFiles[candidateAtDestination]) {
+					timestampAction := action.PropagateTimestampAction{
+						SourceBaseDirPath:           sourceDirPath,
+						DestinationBaseDirPath:      destinationDirPath,
+						SourceFileRelativePath:      orphanAtSource,
+						DestinationFileRelativePath: candidateAtDestination,
+						SourceModTime:               time.Unix(sourceFiles[orphanAtSource].ModifiedTimestamp, 0),
+						FS:                          destFS,
+					}
+					if !uniqueness.Contains(timestampAction.Uniqueness()) {
+						actions = append(actions, timestampAction)
+						uniqueness.Add(timestampAction.Uniqueness())
+						savings += sourceFiles[orphanAtSource].Size
+					}
 				}
 			}
 		}
-		if !candidateExistsAtSource && candidateAtDestination != orphanAtSource {
-			// Move: candidate doesn't exist at source, safe to move
-			usedCandidates.Add(candidateAtDestination)
+		shouldMove := !candidateExistsAtSource && !movedCandidates.Contains(candidateAtDestination) && candidateAtDestination != orphanAtSource
+		if shouldMove {
+			// Move: candidate doesn't exist at source and hasn't been moved yet
+			movedCandidates.Add(candidateAtDestination)
 			parentDir := filepath.Dir(filepath.Join(destinationDirPath, orphanAtSource))
 			isReadable := false
 			if destFS != nil {
@@ -216,8 +220,9 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 				uniqueness.Add(moveFileAction.Uniqueness())
 				savings += sourceFiles[orphanAtSource].Size
 			}
-		} else if copyDuplicates && candidateExistsAtSource && candidateAtDestination != orphanAtSource {
-			// Copy: candidate exists at source too, so we can't move it — copy instead
+		} else if copyDuplicates && candidateAtDestination != orphanAtSource {
+			// Copy: candidate exists at source (can't move) or was already moved.
+			// Uses original candidate path; performActions redirect handles ordering.
 			absSource := filepath.Join(destinationDirPath, candidateAtDestination)
 			absDest := filepath.Join(destinationDirPath, orphanAtSource)
 			parentDir := filepath.Dir(absDest)
@@ -254,26 +259,19 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 }
 
 // PickBestCandidate selects the best candidate from a list of destination paths.
-// It skips already-used candidates, prefers candidates with the same basename as
-// the orphan, and avoids candidates that already exist at source (unless only one
-// candidate remains).
-func PickBestCandidate(candidates []string, orphanPath string, sourceFiles map[string]entity.FileMeta, usedCandidates set.Set[string]) string {
-	// Filter out already-used candidates
-	available := make([]string, 0, len(candidates))
-	for _, c := range candidates {
-		if !usedCandidates.Contains(c) {
-			available = append(available, c)
-		}
-	}
-	if len(available) == 0 {
+// It prefers candidates with the same basename as the orphan, and prefers candidates
+// that don't exist at source (better move targets). Already-moved candidates are NOT
+// filtered out — the caller decides whether to move or copy based on movedCandidates.
+func PickBestCandidate(candidates []string, orphanPath string, sourceFiles map[string]entity.FileMeta, movedCandidates set.Set[string]) string {
+	if len(candidates) == 0 {
 		return ""
 	}
-	if len(available) == 1 {
-		return available[0]
+	if len(candidates) == 1 {
+		return candidates[0]
 	}
-	// Multiple available: prefer one with same basename that doesn't exist at source
+	// Multiple candidates: prefer one with same basename that doesn't exist at source
 	orphanBase := filepath.Base(orphanPath)
-	for _, c := range available {
+	for _, c := range candidates {
 		if filepath.Base(c) == orphanBase {
 			if _, existsAtSource := sourceFiles[c]; !existsAtSource {
 				return c
@@ -281,14 +279,14 @@ func PickBestCandidate(candidates []string, orphanPath string, sourceFiles map[s
 		}
 	}
 	// Fall back: any that doesn't exist at source
-	for _, c := range available {
+	for _, c := range candidates {
 		if _, existsAtSource := sourceFiles[c]; !existsAtSource {
 			return c
 		}
 	}
 	// All candidates exist at source too — return one anyway; caller decides
 	// whether to copy (--copy-duplicates) or skip.
-	return available[0]
+	return candidates[0]
 }
 
 func getParallelism(n int) (int, int) {

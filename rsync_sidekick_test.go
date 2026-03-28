@@ -344,6 +344,126 @@ func TestTimestampPropagationBug(t *testing.T) {
 	assert.False(t, foundIncorrectAction, "Bug detected: rsync-sidekick incorrectly propagates timestamp from source/file-2 to destination/file-1")
 }
 
+// TestCandidateReusedForCopies verifies that a single candidate can serve one MOVE
+// and multiple COPYs when --copy-duplicates is enabled.
+//
+// Scenario:
+//   - Source has file X at 3 locations: A/x, B/x, C/x (same content)
+//   - Destination has file X only at wrong location: wrong/x
+//   - With --copy-duplicates: expect 1 move + 2 copies (all 3 files present)
+//   - Without --copy-duplicates: expect 1 move only (2 files left for rsync)
+func TestCandidateReusedForCopies(t *testing.T) {
+	fileContent := []byte("shared content for candidate reuse test")
+	ts := time.Now().Add(-1 * time.Hour)
+
+	t.Run("WithCopyDuplicates", func(t *testing.T) {
+		testDir, err := filepath.Abs("./test_candidate_reuse_copy_" + runID)
+		stopIfError(t, err)
+		createDirectory(testDir)
+		defer func() { _ = os.RemoveAll(testDir) }()
+
+		srcDir := filepath.Join(testDir, "source")
+		dstDir := filepath.Join(testDir, "destination")
+
+		// Source: file at 3 locations
+		for _, sub := range []string{"A", "B", "C"} {
+			dir := filepath.Join(srcDir, sub)
+			createDirectory(dir)
+			err = os.WriteFile(filepath.Join(dir, "x"), fileContent, 0644)
+			stopIfError(t, err)
+			err = os.Chtimes(filepath.Join(dir, "x"), ts, ts)
+			stopIfError(t, err)
+		}
+
+		// Destination: file at wrong location only
+		createDirectory(filepath.Join(dstDir, "wrong"))
+		err = os.WriteFile(filepath.Join(dstDir, "wrong", "x"), fileContent, 0644)
+		stopIfError(t, err)
+		err = os.Chtimes(filepath.Join(dstDir, "wrong", "x"), ts, ts)
+		stopIfError(t, err)
+
+		fmte.Off()
+		exclusions := set.NewSet[string]()
+
+		// Get actions with copyDuplicates=true
+		actions, syncErr := getSyncActionsWithProgress(runID, srcDir, exclusions, dstDir, false, 0, true, false, nil)
+		stopIfError(t, syncErr)
+
+		// Count moves and copies
+		moveCount := 0
+		copyCount := 0
+		for _, a := range actions {
+			switch a.(type) {
+			case action.MoveFileAction:
+				moveCount++
+			case action.CopyFileAction:
+				copyCount++
+			}
+		}
+
+		assert.Equal(t, 1, moveCount, "expected exactly 1 move action")
+		assert.Equal(t, 2, copyCount, "expected 2 copy actions (candidate reused)")
+
+		// Execute and verify all 3 files end up in destination
+		err = performActions(actions, dstDir, false)
+		stopIfError(t, err)
+
+		assert.FileExists(t, filepath.Join(dstDir, "A", "x"))
+		assert.FileExists(t, filepath.Join(dstDir, "B", "x"))
+		assert.FileExists(t, filepath.Join(dstDir, "C", "x"))
+		assert.NoFileExists(t, filepath.Join(dstDir, "wrong", "x"))
+	})
+
+	t.Run("WithoutCopyDuplicates", func(t *testing.T) {
+		testDir, err := filepath.Abs("./test_candidate_reuse_nocopy_" + runID)
+		stopIfError(t, err)
+		createDirectory(testDir)
+		defer func() { _ = os.RemoveAll(testDir) }()
+
+		srcDir := filepath.Join(testDir, "source")
+		dstDir := filepath.Join(testDir, "destination")
+
+		// Source: file at 3 locations
+		for _, sub := range []string{"A", "B", "C"} {
+			dir := filepath.Join(srcDir, sub)
+			createDirectory(dir)
+			err = os.WriteFile(filepath.Join(dir, "x"), fileContent, 0644)
+			stopIfError(t, err)
+			err = os.Chtimes(filepath.Join(dir, "x"), ts, ts)
+			stopIfError(t, err)
+		}
+
+		// Destination: file at wrong location only
+		createDirectory(filepath.Join(dstDir, "wrong"))
+		err = os.WriteFile(filepath.Join(dstDir, "wrong", "x"), fileContent, 0644)
+		stopIfError(t, err)
+		err = os.Chtimes(filepath.Join(dstDir, "wrong", "x"), ts, ts)
+		stopIfError(t, err)
+
+		fmte.Off()
+		exclusions := set.NewSet[string]()
+
+		// Get actions with copyDuplicates=false
+		actions, syncErr := getSyncActionsWithProgress(runID, srcDir, exclusions, dstDir, false, 0, false, false, nil)
+		stopIfError(t, syncErr)
+
+		// Should only have 1 move, no copies
+		moveCount := 0
+		copyCount := 0
+		for _, a := range actions {
+			switch a.(type) {
+			case action.MoveFileAction:
+				moveCount++
+			case action.CopyFileAction:
+				copyCount++
+			}
+		}
+
+		assert.Equal(t, 1, moveCount, "expected exactly 1 move action")
+		assert.Equal(t, 0, copyCount, "expected 0 copy actions without --copy-duplicates")
+	})
+}
+
 // TestMoveRedirectForCopyActions verifies that when a file is moved and a later
 // CopyFileAction references the old path (e.g. from an archive scan that ran before
 // execution), performActions redirects the copy source to the new location.
