@@ -343,3 +343,116 @@ func TestTimestampPropagationBug(t *testing.T) {
 	// This assertion should fail when the bug is present
 	assert.False(t, foundIncorrectAction, "Bug detected: rsync-sidekick incorrectly propagates timestamp from source/file-2 to destination/file-1")
 }
+
+// TestMoveRedirectForCopyActions verifies that when a file is moved and a later
+// CopyFileAction references the old path (e.g. from an archive scan that ran before
+// execution), performActions redirects the copy source to the new location.
+//
+// Two sub-tests cover both execution orders:
+//   - MoveFirst: move C/x → A/x, then copy from (stale) C/x → B/x
+//   - CopyFirst: copy from C/x → B/x (still exists), then move C/x → A/x
+func TestMoveRedirectForCopyActions(t *testing.T) {
+	t.Run("MoveFirst", func(t *testing.T) {
+		testDir, err := filepath.Abs("./test_move_redirect_mv_" + runID)
+		stopIfError(t, err)
+		createDirectory(testDir)
+		defer func() {
+			_ = os.RemoveAll(testDir)
+		}()
+
+		dstDir := filepath.Join(testDir, "destination")
+		createDirectory(filepath.Join(dstDir, "A"))
+		createDirectory(filepath.Join(dstDir, "B"))
+		createDirectory(filepath.Join(dstDir, "C"))
+
+		fileContent := []byte("identical content for dedup test")
+		wrongPath := filepath.Join(dstDir, "C", "x")
+		err = os.WriteFile(wrongPath, fileContent, 0644)
+		stopIfError(t, err)
+		ts := time.Now().Add(-1 * time.Hour)
+		err = os.Chtimes(wrongPath, ts, ts)
+		stopIfError(t, err)
+
+		// Move executes first, copy references stale path → needs redirect
+		actions := []action.SyncAction{
+			action.MoveFileAction{
+				BasePath:         dstDir,
+				RelativeFromPath: "C/x",
+				RelativeToPath:   "A/x",
+			},
+			action.CopyFileAction{
+				AbsSourcePath: filepath.Join(dstDir, "C", "x"), // stale!
+				AbsDestPath:   filepath.Join(dstDir, "B", "x"),
+				SourceModTime: ts,
+				UseReflink:    false,
+			},
+		}
+
+		fmte.Off()
+		err = performActions(actions, dstDir, false)
+		stopIfError(t, err)
+
+		assert.FileExists(t, filepath.Join(dstDir, "A", "x"))
+		assert.FileExists(t, filepath.Join(dstDir, "B", "x"))
+		assert.NoFileExists(t, filepath.Join(dstDir, "C", "x"))
+
+		contentA, err := os.ReadFile(filepath.Join(dstDir, "A", "x"))
+		stopIfError(t, err)
+		contentB, err := os.ReadFile(filepath.Join(dstDir, "B", "x"))
+		stopIfError(t, err)
+		assert.Equal(t, fileContent, contentA)
+		assert.Equal(t, fileContent, contentB)
+	})
+
+	t.Run("CopyFirst", func(t *testing.T) {
+		testDir, err := filepath.Abs("./test_move_redirect_cp_" + runID)
+		stopIfError(t, err)
+		createDirectory(testDir)
+		defer func() {
+			_ = os.RemoveAll(testDir)
+		}()
+
+		dstDir := filepath.Join(testDir, "destination")
+		createDirectory(filepath.Join(dstDir, "A"))
+		createDirectory(filepath.Join(dstDir, "B"))
+		createDirectory(filepath.Join(dstDir, "C"))
+
+		fileContent := []byte("identical content for dedup test")
+		wrongPath := filepath.Join(dstDir, "C", "x")
+		err = os.WriteFile(wrongPath, fileContent, 0644)
+		stopIfError(t, err)
+		ts := time.Now().Add(-1 * time.Hour)
+		err = os.Chtimes(wrongPath, ts, ts)
+		stopIfError(t, err)
+
+		// Copy executes first (C/x still exists), then move happens — no redirect needed
+		actions := []action.SyncAction{
+			action.CopyFileAction{
+				AbsSourcePath: filepath.Join(dstDir, "C", "x"), // still valid at this point
+				AbsDestPath:   filepath.Join(dstDir, "B", "x"),
+				SourceModTime: ts,
+				UseReflink:    false,
+			},
+			action.MoveFileAction{
+				BasePath:         dstDir,
+				RelativeFromPath: "C/x",
+				RelativeToPath:   "A/x",
+			},
+		}
+
+		fmte.Off()
+		err = performActions(actions, dstDir, false)
+		stopIfError(t, err)
+
+		assert.FileExists(t, filepath.Join(dstDir, "A", "x"))
+		assert.FileExists(t, filepath.Join(dstDir, "B", "x"))
+		assert.NoFileExists(t, filepath.Join(dstDir, "C", "x"))
+
+		contentA, err := os.ReadFile(filepath.Join(dstDir, "A", "x"))
+		stopIfError(t, err)
+		contentB, err := os.ReadFile(filepath.Join(dstDir, "B", "x"))
+		stopIfError(t, err)
+		assert.Equal(t, fileContent, contentA)
+		assert.Equal(t, fileContent, contentB)
+	})
+}

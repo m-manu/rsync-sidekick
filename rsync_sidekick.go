@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -1027,8 +1028,16 @@ func performActions(actions []action.SyncAction, destinationDirPath string, dryR
 		fmte.Printf("Applying sync actions at destination...\n")
 	}
 	successCount := 0
+	movedPaths := make(map[string]string) // tracks old abs path → new abs path for moved files
 	start = time.Now()
 	for i, syncAction := range actions {
+		// If this is a CopyFileAction whose source was moved, redirect to the new path
+		if copyAct, ok := syncAction.(action.CopyFileAction); ok {
+			if newPath, wasMoved := movedPaths[copyAct.AbsSourcePath]; wasMoved {
+				copyAct.AbsSourcePath = newPath
+				syncAction = copyAct
+			}
+		}
 		fmte.Print(strings.Replace(
 			fmt.Sprintf("%4d/%d %s: ", i+1, len(actions), syncAction),
 			destinationDirPath+"/", "", -1,
@@ -1041,6 +1050,12 @@ func performActions(actions []action.SyncAction, destinationDirPath string, dryR
 			if aErr == nil {
 				fmte.Printf("done\n")
 				successCount++
+				// Track moves so later copy actions can find the file at its new location
+				if moveAct, ok := syncAction.(action.MoveFileAction); ok {
+					oldAbs := filepath.Join(moveAct.BasePath, moveAct.RelativeFromPath)
+					newAbs := filepath.Join(moveAct.BasePath, moveAct.RelativeToPath)
+					movedPaths[oldAbs] = newAbs
+				}
 			} else {
 				fmte.Printf("failed due to: %+v\n", aErr)
 			}
