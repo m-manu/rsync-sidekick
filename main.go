@@ -46,23 +46,23 @@ const (
 var defaultExclusionsStr string
 
 var flags struct {
-	isHelp            func() bool
-	getExcludedFiles  func() set.Set[string]
-	isShellScriptMode func() bool
-	scriptOutputPath  func() string
-	getListFilesDir   func() bool
-	isVerbose         func() bool
-	showVersion       func() bool
-	isDryRun          func() bool
-	progressFrequency func() time.Duration
-	sshKeyPath        func() string
-	sidekickPath      func() string
-	isSFTP            func() bool
-	isAgent           func() bool
-	syncDirTimestamps func() bool
-	copyDuplicates    func() bool
-	useReflink        func() bool
-	archivePaths      func() []string
+	isHelp               func() bool
+	getExcludedFiles     func() set.Set[string]
+	isShellScriptMode    func() bool
+	scriptOutputPath     func() string
+	getListFilesDir      func() bool
+	isVerbose            func() bool
+	showVersion          func() bool
+	isDryRun             func() bool
+	progressFrequency    func() time.Duration
+	sshKeyPath           func() string
+	sidekickPath         func() string
+	isSFTP               func() bool
+	isAgent              func() bool
+	syncDirTimestamps    func() bool
+	copyDuplicates       func() bool
+	useReflink           func() bool
+	archivePaths         func() []string
 	oneFileSystem        func() bool
 	archiveOneFileSystem func() bool
 }

@@ -52,9 +52,9 @@ func TestParseLocation_Remote(t *testing.T) {
 func TestParseLocation_Errors(t *testing.T) {
 	tests := []string{
 		"",
-		":path",  // empty host
-		"@:/p",   // empty host after @
-		"host:",  // empty path
+		":path", // empty host
+		"@:/p",  // empty host after @
+		"host:", // empty path
 	}
 	for _, input := range tests {
 		_, err := ParseLocation(input)

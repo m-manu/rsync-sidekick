@@ -957,8 +957,8 @@ func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.Sy
 		switch act := a.(type) {
 		case action.MoveFileAction:
 			specs = append(specs, remote.ActionSpec{
-				Type:     "move",
-				BasePath: act.BasePath,
+				Type:        "move",
+				BasePath:    act.BasePath,
 				FromRelPath: act.RelativeFromPath,
 				ToRelPath:   act.RelativeToPath,
 			})
@@ -967,7 +967,7 @@ func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.Sy
 				Type:         "timestamp",
 				DestBasePath: act.DestinationBaseDirPath,
 				DestRelPath:  act.DestinationFileRelativePath,
-				ModTimestamp:  act.SourceModTime.Unix(),
+				ModTimestamp: act.SourceModTime.Unix(),
 			})
 		case action.MakeDirectoryAction:
 			specs = append(specs, remote.ActionSpec{
@@ -979,7 +979,7 @@ func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.Sy
 				Type:         "copy",
 				FromAbsPath:  act.AbsSourcePath,
 				ToAbsPath:    act.AbsDestPath,
-				ModTimestamp:  act.SourceModTime.Unix(),
+				ModTimestamp: act.SourceModTime.Unix(),
 				UseReflink:   act.UseReflink,
 			})
 		}
