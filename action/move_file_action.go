@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	rsfs "github.com/m-manu/rsync-sidekick/fs"
 )
 
 // MoveFileAction is a SyncAction for moving or renaming a file
@@ -12,6 +14,7 @@ type MoveFileAction struct {
 	BasePath         string
 	RelativeFromPath string
 	RelativeToPath   string
+	FS               rsfs.FileSystem // optional; if nil, uses os.* directly
 }
 
 func (a MoveFileAction) sourcePath() string {
@@ -29,6 +32,13 @@ func (a MoveFileAction) UnixCommand() string {
 
 // Perform 'file move/rename' action
 func (a MoveFileAction) Perform() error {
+	if a.FS != nil {
+		_, err := a.FS.Stat(a.destinationPath())
+		if err == nil {
+			return fmt.Errorf(`error: file "%s" already exists`, a.destinationPath())
+		}
+		return a.FS.Rename(a.sourcePath(), a.destinationPath())
+	}
 	if _, err := os.Stat(a.destinationPath()); err == nil {
 		return fmt.Errorf(`error: file "%s" already exists`, a.destinationPath())
 	} else if errors.Is(err, os.ErrNotExist) {

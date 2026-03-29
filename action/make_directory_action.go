@@ -3,11 +3,14 @@ package action
 import (
 	"fmt"
 	"os"
+
+	rsfs "github.com/m-manu/rsync-sidekick/fs"
 )
 
 // MakeDirectoryAction is a SyncAction for creating a directory
 type MakeDirectoryAction struct {
 	AbsoluteDirPath string
+	FS              rsfs.FileSystem // optional; if nil, uses os.* directly
 }
 
 func (a MakeDirectoryAction) sourcePath() string {
@@ -25,6 +28,9 @@ func (a MakeDirectoryAction) UnixCommand() string {
 
 // Perform the 'create directory' action
 func (a MakeDirectoryAction) Perform() error {
+	if a.FS != nil {
+		return a.FS.MkdirAll(a.destinationPath())
+	}
 	return os.MkdirAll(a.destinationPath(), os.ModeDir|os.ModePerm)
 }
 
