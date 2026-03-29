@@ -78,13 +78,13 @@ type DigestResponse struct {
 type ActionSpec struct {
 	Type string `json:"type"` // "move", "timestamp", "mkdir", "copy"
 	// For move:
-	BasePath     string `json:"base_path,omitempty"`
-	FromRelPath  string `json:"from_rel_path,omitempty"`
-	ToRelPath    string `json:"to_rel_path,omitempty"`
+	BasePath    string `json:"base_path,omitempty"`
+	FromRelPath string `json:"from_rel_path,omitempty"`
+	ToRelPath   string `json:"to_rel_path,omitempty"`
 	// For timestamp:
-	DestBasePath   string `json:"dest_base_path,omitempty"`
-	DestRelPath    string `json:"dest_rel_path,omitempty"`
-	ModTimestamp   int64  `json:"mod_timestamp,omitempty"` // unix epoch seconds
+	DestBasePath string `json:"dest_base_path,omitempty"`
+	DestRelPath  string `json:"dest_rel_path,omitempty"`
+	ModTimestamp int64  `json:"mod_timestamp,omitempty"` // unix epoch seconds
 	// For mkdir:
 	DirPath string `json:"dir_path,omitempty"`
 	// For copy:

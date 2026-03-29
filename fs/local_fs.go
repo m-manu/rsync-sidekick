@@ -162,7 +162,7 @@ func (l *LocalFS) getDevice(path string) (uint64, bool) {
 	if err := syscall.Stat(path, &st); err != nil {
 		return 0, false
 	}
-	return st.Dev, true
+	return uint64(st.Dev), true
 }
 
 func fileInfoFromOS(info os.FileInfo) FileInfo {

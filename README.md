@@ -23,7 +23,8 @@ photos, etc.) _that are reorganized frequently_.
 5. Local copying of duplicate-content files at the destination (with `-c` flag)
 6. Copying from archive/backup directories on the destination side (with `-a` flag)
 
-It works with **local directories**, **remote hosts via SSH** (using a remote agent or SFTP fallback), and inside **Docker containers**.
+It works with **local directories**, **remote hosts via SSH** (using a remote agent or SFTP fallback), and inside *
+*Docker containers**.
 
 Note:
 
@@ -88,6 +89,9 @@ where,
 	[destination]   Destination directory (local path or user@host:/path)
 
 flags: (all optional)
+      --archive-one-file-system       don't cross filesystem boundaries when scanning archive paths
+                                      (by default archives DO cross boundaries, e.g. into btrfs snapshot subvols)
+                                      (works locally and with remote-exec, not with SFTP)
   -a, --archive-path stringArray      additional directory on the destination side to scan for copy sources
                                       (can be specified multiple times; files are copied from archive, never moved;
                                       implies --copy-duplicates)
@@ -98,14 +102,11 @@ flags: (all optional)
                                       (even if this is not set, files/directories such these will still be ignored: $RECYCLE.BIN, desktop.ini, Thumbs.db etc.)
   -h, --help                          display help
       --list                          list files along their metadata for given directory
+      --one-file-system               don't cross filesystem boundaries when scanning source and destination (like rsync -x)
+                                      (works locally and with remote-exec, not with SFTP)
   -f, --progress-frequency duration   frequency of progress reporting e.g. '5s', '1m' (default 2s)
       --reflink                       use cp --reflink=auto for copy actions (instant on CoW filesystems like btrfs/XFS)
                                       (only effective when copies are performed via --copy-duplicates or --archive-path)
-      --one-file-system               don't cross filesystem boundaries when scanning source and destination (like rsync -x)
-                                      (works locally and with remote-exec, not with SFTP)
-      --archive-one-file-system       don't cross filesystem boundaries when scanning archive paths
-                                      (by default archives DO cross boundaries, e.g. into btrfs snapshot subvols)
-                                      (works locally and with remote-exec, not with SFTP)
       --sftp                          force SFTP mode (don't try remote-execution)
   -s, --shellscript                   instead of applying changes directly, generate a shell script
                                       (this flag is useful if you want to run the shell script as a different user)
@@ -115,7 +116,7 @@ flags: (all optional)
   -i, --ssh-key string                path to SSH private key for remote connections
   -d, --sync-dir-timestamps           also propagate directory timestamps from source to destination
   -v, --verbose                       generates extra information, even a file dump (caution: makes it slow!)
-      --version                       show application version and exit
+      --version                       show application version (v1.11.0) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```

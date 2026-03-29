@@ -91,11 +91,11 @@ func TestWalkOneFileSystem_SameDeviceUnaffected(t *testing.T) {
 	// All on same device — OneFileSystem should not filter anything
 	fsOn := &LocalFS{
 		OneFileSystem: true,
-		deviceForPath:    func(path string) (uint64, bool) { return 1, true },
+		deviceForPath: func(path string) (uint64, bool) { return 1, true },
 	}
 	fsOff := &LocalFS{
 		OneFileSystem: false,
-		deviceForPath:    func(path string) (uint64, bool) { return 1, true },
+		deviceForPath: func(path string) (uint64, bool) { return 1, true },
 	}
 
 	entriesOn, err := fsOn.Walk(dir, map[string]struct{}{}, nil)
