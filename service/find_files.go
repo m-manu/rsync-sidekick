@@ -9,8 +9,6 @@ import (
 	"github.com/m-manu/rsync-sidekick/entity"
 )
 
-const numFilesGuess = 10_000
-
 // FindFilesFromDirectory finds all regular files in a given directory
 // (Very similar to `find` command on unix-like operating systems)
 func FindFilesFromDirectory(dirPath string, excludedFiles set.Set[string], counter *int32) (
@@ -18,7 +16,9 @@ func FindFilesFromDirectory(dirPath string, excludedFiles set.Set[string], count
 	totalSizeOfFiles int64,
 	findFilesErr error,
 ) {
-	return FindFilesFromDirectoryWithFS(rsfs.NewLocalFS(), dirPath, excludedFiles, counter)
+	fsys := rsfs.NewLocalFS()
+	defer fsys.Close()
+	return FindFilesFromDirectoryWithFS(fsys, dirPath, excludedFiles, counter)
 }
 
 // FindFilesFromDirectoryWithFS is like FindFilesFromDirectory but uses the given FileSystem.
@@ -49,7 +49,9 @@ func FindFilesFromDirectoryWithFS(fsys rsfs.FileSystem, dirPath string, excluded
 // FindDirsFromDirectory returns a map of relative directory paths to their
 // modification timestamps for the given directory tree.
 func FindDirsFromDirectory(dirPath string, excludedFiles set.Set[string]) (map[string]int64, error) {
-	return FindDirsFromDirectoryWithFS(rsfs.NewLocalFS(), dirPath, excludedFiles)
+	fsys := rsfs.NewLocalFS()
+	defer fsys.Close()
+	return FindDirsFromDirectoryWithFS(fsys, dirPath, excludedFiles)
 }
 
 // FindDirsFromDirectoryWithFS is like FindDirsFromDirectory but uses the given FileSystem.

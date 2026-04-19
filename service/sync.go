@@ -80,18 +80,6 @@ func buildIndexWithFS(fsys rsfs.FileSystem, baseDirPath string, filesToScan []st
 	return nil
 }
 
-// ComputeSyncActions identifies the diff between source and destination directories that
-// do not require actual file transfer. This is the core function of this tool.
-func ComputeSyncActions(sourceDirPath string, sourceFiles map[string]entity.FileMeta, orphansAtSource []string,
-	destinationDirPath string, destinationFiles map[string]entity.FileMeta, candidatesAtDestination []string,
-	sourceCounter *int32, destinationCounter *int32,
-	copyDuplicates bool, useReflink bool,
-) (actions []action.SyncAction, savings int64, err error) {
-	return ComputeSyncActionsWithFS(nil, nil, sourceDirPath, sourceFiles, orphansAtSource,
-		destinationDirPath, destinationFiles, candidatesAtDestination,
-		sourceCounter, destinationCounter, copyDuplicates, useReflink)
-}
-
 // ComputeSyncActionsWithFS is like ComputeSyncActions but uses the given FileSystems.
 // If sourceFS or destFS is nil, local OS calls are used for the respective side.
 func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
@@ -162,7 +150,7 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 			continue
 		}
 		matchesAtDestination := candidateDigestsToFiles.Get(orphanDigest)
-		candidateAtDestination := PickBestCandidate(matchesAtDestination, orphanAtSource, sourceFiles, movedCandidates)
+		candidateAtDestination := PickBestCandidate(matchesAtDestination, orphanAtSource, sourceFiles)
 		if candidateAtDestination == "" {
 			continue
 		}
@@ -262,7 +250,7 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 // It prefers candidates with the same basename as the orphan, and prefers candidates
 // that don't exist at source (better move targets). Already-moved candidates are NOT
 // filtered out — the caller decides whether to move or copy based on movedCandidates.
-func PickBestCandidate(candidates []string, orphanPath string, sourceFiles map[string]entity.FileMeta, movedCandidates set.Set[string]) string {
+func PickBestCandidate(candidates []string, orphanPath string, sourceFiles map[string]entity.FileMeta) string {
 	if len(candidates) == 0 {
 		return ""
 	}
@@ -335,7 +323,9 @@ func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[
 		if destFS != nil {
 			archiveFiles, _, err = FindFilesFromDirectoryWithFS(destFS, archivePath, exclusions, nil)
 		} else {
-			archiveFiles, _, err = FindFilesFromDirectoryWithFS(rsfs.NewLocalFSForArchive(), archivePath, exclusions, nil)
+			fsys := rsfs.NewLocalFSForArchive()
+			archiveFiles, _, err = FindFilesFromDirectoryWithFS(fsys, archivePath, exclusions, nil)
+			fsys.Close()
 		}
 		if err != nil {
 			return nil, fmt.Errorf("error scanning archive %s: %w", archivePath, err)

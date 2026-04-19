@@ -152,7 +152,7 @@ func (c *AgentClient) Perform(actions []ActionSpec, dryRun bool) ([]ActionResult
 // Close sends a quit message and waits for the ssh process to exit.
 func (c *AgentClient) Close() error {
 	// Best-effort quit
-	c.send(MsgQuit, nil)
+	_ = c.send(MsgQuit, nil)
 	c.stdin.Close()
 	return c.cmd.Wait()
 }
