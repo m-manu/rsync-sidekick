@@ -5,41 +5,44 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/m-manu/rsync-sidekick.svg)](https://pkg.go.dev/github.com/m-manu/rsync-sidekick)
 [![License](https://img.shields.io/badge/License-Apache%202-blue.svg)](./LICENSE)
 
-## Introduction
+## Why?
 
 `rsync` is a fantastic tool. Yet, by itself, it's a pain to use for repeated backing up of media files (videos, music,
 photos, etc.) _that are reorganized frequently_.
 
 `rsync-sidekick` is a safe and simple tool that is designed to run **before** `rsync` is run.
 
-## What does this do?
+## What?
 
 `rsync-sidekick` propagates following changes (or any combination) from _source directory_ to _destination directory_:
 
 1. Change in file modification timestamp
 2. Rename of file/directory
 3. Moving a file from one directory to another
-4. Directory timestamp synchronization (with `-d` flag)
-5. Local copying of duplicate-content files at the destination (with `-c` flag)
-6. Copying from archive/backup directories on the destination side (with `-a` flag)
 
-It works with **local directories**, **remote hosts via SSH** (using a remote agent or SFTP fallback), and inside *
-*Docker containers**.
+Additionally, it does the following things:
+
+1. Directory timestamp synchronization (with `-d` flag)
+2. Local copying of duplicate-content files at the destination (with `-c` flag)
+3. Copying from archive/backup directories on the destination side (with `-a` flag)
+
+It works with **local directories**, **remote hosts via SSH** (using a remote agent or SFTP fallback) and even inside
+**Docker containers**! 🙂
 
 Note:
 
-* This tool **does not delete** any files or folders (under any circumstances) -- that's why it's safe to use 😌
+* This tool **does not delete** any files or folders (under any circumstances) — that's why it's safe to use 😌
     * Your files are just _moved around_
     * Now, if you're uncomfortable with this tool even moving your files around, consider using the `--dry-run` option
-* This tool **does not** actually **transfer** files -- that's for `rsync` to do 🙂
+* This tool **does not** actually **transfer** files — that's for `rsync` to do 🙂
 * Since you'd run `rsync` after this tool is run, any changes that this tool couldn't propagate would just be propagated
   by `rsync`
-    * So the most that you might lose is some time with `rsync` doing more work than it could have -- Which is likely
+    * So the most that you might lose is some time with `rsync` doing more work than it could have — Which is likely
       still much less than not using this tool at all 😄
 
 ## How to install?
 
-1. Install Go version at least **1.24**
+1. Install Go version at least **1.25**
     * On Ubuntu: `snap install go`
     * On Mac: `brew install go`
     * For anything else: [Go downloads page](https://go.dev/dl/)
@@ -116,14 +119,16 @@ flags: (all optional)
   -i, --ssh-key string                path to SSH private key for remote connections
   -d, --sync-dir-timestamps           also propagate directory timestamps from source to destination
   -v, --verbose                       generates extra information, even a file dump (caution: makes it slow!)
-      --version                       show application version (v1.11.0) and exit
+      --version                       show application version (v2.0.0) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```
 
-## Remote usage (SSH)
+## Advanced options
 
-`rsync-sidekick` supports syncing to/from remote hosts via SSH. Either the source or the destination (not both) can be
+### Syncing remote paths (via SSH)
+
+`rsync-sidekick` supports syncing to/from remote hosts via SSH. Either the source or the destination (not both!) can be
 a remote path in the form `user@host:/path`.
 
 **Remote-execution mode** (default): If `rsync-sidekick` is installed on the remote host, it will be used as an agent
@@ -143,7 +148,7 @@ rsync-sidekick --sidekick-path /usr/local/bin/rsync-sidekick /local/path/ user@s
 rsync-sidekick --sidekick-path "sudo rsync-sidekick" /local/path/ user@server:/remote/path/
 ```
 
-## Copying duplicate-content files (`--copy-duplicates`)
+### Copying duplicate-content files (`--copy-duplicates`)
 
 By default, `rsync-sidekick` only **moves** files at the destination. If the same content exists at multiple paths at
 source but only one of those paths exists at the destination, the extra copies are left for `rsync` to transfer.
@@ -158,7 +163,7 @@ network transfer time:
 rsync-sidekick -c /Users/manu/Photos/ /Volumes/Portable/Photos/
 ```
 
-## Using archive directories (`--archive-path`)
+### Using archive directories (`--archive-path`)
 
 The `--archive-path` (or `-a`) flag lets you specify additional directories **on the destination side** that are scanned
 for content matches. Files are only **copied** from archives, never moved. This is useful when you have an old
@@ -177,7 +182,7 @@ rsync-sidekick -a /archive1/ -a /archive2/ /source/ /destination/
 rsync-sidekick -a /remote/archive/ /local/source/ user@server:/remote/dest/
 ```
 
-## Reflink copies (`--reflink`)
+### Reflink copies (`--reflink`)
 
 On CoW (copy-on-write) filesystems like **btrfs** or **XFS**, the `--reflink` flag makes copy actions use
 `cp --reflink=auto`, which is instant and uses no additional disk space. On filesystems that don't support reflinks,
@@ -189,7 +194,7 @@ it falls back to a regular copy automatically. This flag only has an effect when
 rsync-sidekick -c --reflink /Users/manu/Photos/ /mnt/btrfs-backup/Photos/
 ```
 
-## Staying on one filesystem (`--one-file-system`)
+### Staying on one filesystem (`--one-file-system`)
 
 On btrfs or other setups with nested mount points / subvolumes, `--one-file-system` prevents
 `rsync-sidekick` from crossing filesystem boundaries when scanning source and destination directories
@@ -211,9 +216,9 @@ rsync-sidekick --one-file-system -c --reflink /mnt/data/@ /mnt/backup/@
 rsync-sidekick --one-file-system -c --reflink -a /mnt/backup/.snapshots/@/ /mnt/data/@ /mnt/backup/@
 ```
 
-## Running this from a Docker container
+### Running this from a Docker container
 
-Below is a simple example:
+Not everyone needs this. But if you do, below is a simple example:
 
 ```shell
 # Run rsync-sidekick:
@@ -225,10 +230,10 @@ docker run --rm -v /Users/manu:/mnt/homedir manumk/rsync-sidekick rsync /mnt/hom
 
 ## FAQs
 
-### Why was this tool created?
+### Why was this tool created? Doesn't `rsync` provide flags for doing what this tool does? 🤔
 
 `rsync` options such as `--detect-renamed`, `--detect-renamed-lax`, `--detect-moved` and `--fuzzy` don't work reliably
-and sometimes are dangerous! `rsync-sidekick` is reliable alternative to all these options and much more.
+and sometimes are dangerous! `rsync-sidekick` is reliable alternative to all these options and much more!
 
 ### How will I benefit from using this tool?
 
