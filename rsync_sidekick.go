@@ -259,10 +259,7 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 	remotePath := remoteLoc.Path
 
 	if agentClient != nil {
-		return rsyncSidekickRemoteExec(runID, remoteLoc, remotePath, localPath,
-			sourceIsRemote, agentClient, exclusions, outputScriptPath,
-			verbose, dryRun, syncDirTimestamps, progressFrequency,
-			copyDuplicates, useReflink, archivePaths)
+		return rsyncSidekickRemoteExec(remoteLoc, remotePath, localPath, sourceIsRemote, agentClient, exclusions, outputScriptPath, verbose, dryRun, syncDirTimestamps, progressFrequency, copyDuplicates, useReflink, archivePaths)
 	}
 
 	// SFTP mode: launch ssh with -s sftp subsystem and pipe through sftp client
@@ -283,17 +280,18 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 
 	sftpClient, err := sftp.NewClientPipe(sshStdout, sshStdin)
 	if err != nil {
-		sshCmd.Process.Kill()
-		sshCmd.Wait()
+		_ = sshCmd.Process.Kill()
+		_ = sshCmd.Wait()
 		return fmt.Errorf("SFTP connection failed: %w", err)
 	}
 	defer func() {
 		sftpClient.Close()
 		sshStdin.Close()
-		sshCmd.Wait()
+		_ = sshCmd.Wait()
 	}()
 
 	sftpFS := rsfs.NewSFTPFS(sftpClient)
+	defer sftpFS.Close()
 
 	var sourceFS, destFS rsfs.FileSystem
 	var sourceDirPath, destDirPath string
@@ -336,13 +334,7 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 
 // rsyncSidekickRemoteExec handles the remote-execution mode where the agent
 // runs on the remote side.
-func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
-	remotePath, localPath string, sourceIsRemote bool,
-	agentClient *remote.AgentClient, exclusions set.Set[string],
-	outputScriptPath string, verbose bool, dryRun bool,
-	syncDirTimestamps bool, progressFrequency time.Duration,
-	copyDuplicates bool, useReflink bool, archivePaths []string,
-) error {
+func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath string, sourceIsRemote bool, agentClient *remote.AgentClient, exclusions set.Set[string], outputScriptPath string, verbose, dryRun, syncDirTimestamps bool, progressFrequency time.Duration, copyDuplicates, useReflink bool, archivePaths []string) error {
 	if verbose {
 		fmte.VerboseOn()
 	}
@@ -535,8 +527,7 @@ func rsyncSidekickRemoteExec(runID string, remoteLoc remote.Location,
 			}
 
 			// Build the orphan and candidate digest maps
-			orphanDigests := make(map[string]entity.FileDigest)
-			candidateDigests := make(map[string]entity.FileDigest)
+			var orphanDigests, candidateDigests map[string]entity.FileDigest
 			if sourceIsRemote {
 				orphanDigests = remoteDigests
 				candidateDigests = localDigests
@@ -811,7 +802,7 @@ func matchAndBuildActions(
 		if !hasCandidates {
 			continue
 		}
-		candidateAtDestination := service.PickBestCandidate(candidates, orphanAtSource, sourceFiles, usedCandidates)
+		candidateAtDestination := service.PickBestCandidate(candidates, orphanAtSource, sourceFiles)
 		if candidateAtDestination == "" {
 			continue
 		}

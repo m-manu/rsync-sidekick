@@ -249,7 +249,7 @@ func writeResponse(w io.Writer, msgType string, payload interface{}) {
 	env := Envelope{Type: msgType, Payload: data}
 	line, _ := json.Marshal(env)
 	line = append(line, '\n')
-	w.Write(line)
+	_, _ = w.Write(line)
 }
 
 func writeError(w io.Writer, msg string) {

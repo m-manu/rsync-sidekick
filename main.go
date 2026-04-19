@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	applicationMajorVersion = 1
-	applicationMinorVersion = 11
+	applicationMajorVersion = 2
+	applicationMinorVersion = 0
 	applicationPatchVersion = 0
 )
 
@@ -224,7 +224,7 @@ func setupAgentOpt() {
 	flags.isAgent = func() bool {
 		return *agentPtr
 	}
-	flag.CommandLine.MarkHidden("agent")
+	_ = flag.CommandLine.MarkHidden("agent")
 }
 
 func setupSyncDirTimestampsOpt() {
