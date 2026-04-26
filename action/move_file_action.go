@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	rsfs "github.com/m-manu/rsync-sidekick/fs"
+	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
 )
 
 // MoveFileAction is a SyncAction for moving or renaming a file

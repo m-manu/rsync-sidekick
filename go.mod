@@ -1,4 +1,4 @@
-module github.com/m-manu/rsync-sidekick
+module github.com/m-manu/rsync-sidekick/v2
 
 go 1.25.0
 

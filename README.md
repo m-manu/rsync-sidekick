@@ -1,8 +1,8 @@
 # rsync-sidekick
 
 [![build-and-test](https://github.com/m-manu/rsync-sidekick/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/m-manu/rsync-sidekick/actions/workflows/build-and-test.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/m-manu/rsync-sidekick)](https://goreportcard.com/report/github.com/m-manu/rsync-sidekick)
-[![Go Reference](https://pkg.go.dev/badge/github.com/m-manu/rsync-sidekick.svg)](https://pkg.go.dev/github.com/m-manu/rsync-sidekick)
+[![Go Report Card](https://goreportcard.com/badge/github.com/m-manu/rsync-sidekick/v2)](https://goreportcard.com/report/github.com/m-manu/rsync-sidekick/v2)
+[![Go Reference](https://pkg.go.dev/badge/github.com/m-manu/rsync-sidekick/v2.svg)](https://pkg.go.dev/github.com/m-manu/rsync-sidekick/v2)
 [![License](https://img.shields.io/badge/License-Apache%202-blue.svg)](./LICENSE)
 
 ## Why?
@@ -48,7 +48,7 @@ Note:
     * For anything else: [Go downloads page](https://go.dev/dl/)
 2. Run command:
    ```bash
-   go install github.com/m-manu/rsync-sidekick@latest
+   go install github.com/m-manu/rsync-sidekick/v2@latest
    ```
 3. Add following line in your `.bashrc`/`.zshrc` file:
    ```bash

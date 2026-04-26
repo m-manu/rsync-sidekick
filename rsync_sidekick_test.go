@@ -10,8 +10,8 @@ import (
 	"time"
 
 	set "github.com/deckarep/golang-set/v2"
-	"github.com/m-manu/rsync-sidekick/action"
-	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/m-manu/rsync-sidekick/v2/action"
+	"github.com/m-manu/rsync-sidekick/v2/fmte"
 	"github.com/stretchr/testify/assert"
 )
 

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	rsfs "github.com/m-manu/rsync-sidekick/fs"
+	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
 )
 
 // MakeDirectoryAction is a SyncAction for creating a directory

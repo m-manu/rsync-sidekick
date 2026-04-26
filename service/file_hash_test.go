@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/m-manu/rsync-sidekick/bytesutil"
+	"github.com/m-manu/rsync-sidekick/v2/bytesutil"
 	"github.com/stretchr/testify/assert"
 )
 

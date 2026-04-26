@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/m-manu/rsync-sidekick/v2/fmte"
 )
 
 // LocalFS implements FileSystem using standard os.* calls.

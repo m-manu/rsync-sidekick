@@ -4,9 +4,9 @@ import (
 	"fmt"
 
 	set "github.com/deckarep/golang-set/v2"
-	rsfs "github.com/m-manu/rsync-sidekick/fs"
+	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
 
-	"github.com/m-manu/rsync-sidekick/entity"
+	"github.com/m-manu/rsync-sidekick/v2/entity"
 )
 
 // FindFilesFromDirectory finds all regular files in a given directory

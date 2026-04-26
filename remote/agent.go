@@ -14,8 +14,8 @@ import (
 	"time"
 
 	set "github.com/deckarep/golang-set/v2"
-	rsfs "github.com/m-manu/rsync-sidekick/fs"
-	"github.com/m-manu/rsync-sidekick/service"
+	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
+	"github.com/m-manu/rsync-sidekick/v2/service"
 )
 
 // RunAgent reads JSON-line requests from stdin, executes them locally,
