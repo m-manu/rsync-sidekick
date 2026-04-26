@@ -1,6 +1,6 @@
 package remote
 
-import "github.com/m-manu/rsync-sidekick/entity"
+import "github.com/m-manu/rsync-sidekick/v2/entity"
 
 // Message types for the agent protocol (JSON-lines over SSH stdin/stdout).
 

@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/m-manu/rsync-sidekick/v2/fmte"
 	"github.com/pkg/sftp"
 )
 

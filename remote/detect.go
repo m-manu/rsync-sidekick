@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/m-manu/rsync-sidekick/fmte"
+	"github.com/m-manu/rsync-sidekick/v2/fmte"
 )
 
 // minAgentVersion is the minimum remote rsync-sidekick version required for agent mode.

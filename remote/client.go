@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/m-manu/rsync-sidekick/entity"
+	"github.com/m-manu/rsync-sidekick/v2/entity"
 )
 
 // AgentClient communicates with a remote rsync-sidekick agent over SSH

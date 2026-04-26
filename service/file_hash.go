@@ -6,10 +6,10 @@ import (
 	"hash/crc32"
 	"os"
 
-	"github.com/m-manu/rsync-sidekick/bytesutil"
-	"github.com/m-manu/rsync-sidekick/entity"
-	rsfs "github.com/m-manu/rsync-sidekick/fs"
-	"github.com/m-manu/rsync-sidekick/lib"
+	"github.com/m-manu/rsync-sidekick/v2/bytesutil"
+	"github.com/m-manu/rsync-sidekick/v2/entity"
+	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
+	"github.com/m-manu/rsync-sidekick/v2/lib"
 )
 
 const (

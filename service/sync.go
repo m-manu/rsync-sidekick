@@ -12,11 +12,11 @@ import (
 	"time"
 
 	set "github.com/deckarep/golang-set/v2"
-	"github.com/m-manu/rsync-sidekick/action"
-	"github.com/m-manu/rsync-sidekick/entity"
-	"github.com/m-manu/rsync-sidekick/fmte"
-	rsfs "github.com/m-manu/rsync-sidekick/fs"
-	"github.com/m-manu/rsync-sidekick/lib"
+	"github.com/m-manu/rsync-sidekick/v2/action"
+	"github.com/m-manu/rsync-sidekick/v2/entity"
+	"github.com/m-manu/rsync-sidekick/v2/fmte"
+	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
+	"github.com/m-manu/rsync-sidekick/v2/lib"
 )
 
 const (

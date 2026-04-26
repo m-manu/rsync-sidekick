@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	rsfs "github.com/m-manu/rsync-sidekick/fs"
+	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
 )
 
 // PropagateTimestampAction is a SyncAction for propagating 'file modification timestamp' from one file to another

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	rsfs "github.com/m-manu/rsync-sidekick/fs"
+	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
 	"github.com/stretchr/testify/assert"
 )
 

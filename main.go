@@ -10,11 +10,11 @@ import (
 	"time"
 
 	set "github.com/deckarep/golang-set/v2"
-	"github.com/m-manu/rsync-sidekick/fmte"
-	rsfs "github.com/m-manu/rsync-sidekick/fs"
-	"github.com/m-manu/rsync-sidekick/lib"
-	"github.com/m-manu/rsync-sidekick/remote"
-	"github.com/m-manu/rsync-sidekick/service"
+	"github.com/m-manu/rsync-sidekick/v2/fmte"
+	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
+	"github.com/m-manu/rsync-sidekick/v2/lib"
+	"github.com/m-manu/rsync-sidekick/v2/remote"
+	"github.com/m-manu/rsync-sidekick/v2/service"
 	flag "github.com/spf13/pflag"
 )
 
