@@ -29,7 +29,7 @@ Additionally, it does the following things:
 It works with **local directories**, **remote hosts via SSH** (using a remote agent or SFTP fallback) and even inside
 **Docker containers**! 🙂
 
-Note:
+## What this isn't
 
 * This tool **does not delete** any files or folders (under any circumstances) — that's why it's safe to use 😌
     * Your files are just _moved around_
@@ -43,8 +43,8 @@ Note:
 ## How to install?
 
 1. Install Go version at least **1.25**
-    * On Ubuntu: `snap install go`
     * On Mac: `brew install go`
+    * On Ubuntu: `snap install go`
     * For anything else: [Go downloads page](https://go.dev/dl/)
 2. Run command:
    ```bash
@@ -56,6 +56,8 @@ Note:
    ```
 
 ## How to use?
+
+Just two simple steps:
 
 **Step 1**: Run this tool
 
@@ -230,13 +232,38 @@ docker run --rm -v /Users/manu:/mnt/homedir manumk/rsync-sidekick rsync /mnt/hom
 
 ## FAQs
 
-### Why was this tool created? Doesn't `rsync` provide flags for doing what this tool does? 🤔
+#### Why was this tool created? Doesn't `rsync` provide flags for doing what this tool does? 🤔
 
-`rsync` options such as `--detect-renamed`, `--detect-renamed-lax`, `--detect-moved` and `--fuzzy` don't work reliably
-and sometimes are dangerous! `rsync-sidekick` is reliable alternative to all these options and much more!
+`rsync` provides some flags - But it's complicated!
 
-### How will I benefit from using this tool?
+`--fuzzy` requires match of file size (same as rsync-sidekick). However, it also requires:
+
+1. modification time match (How do you speed up rsync when timestamps of pics and videos are updated by photo organizing
+   tools, exiftool etc.?)
+2. files to be "similarly named" (This doesn't handle a ton of use-cases like reorganizing files across folders, change
+   of extensions etc.)
+
+As for flags `--detect-renamed`, `--detect-moved` and `—detect-renamed-lax`, they're patches on standard `rsync`. We
+don't know which regression cases these flags break. In fact, the patch author mentions _"Use this option only if you
+accept the risk and disk I/O is a bottleneck."_ in their code comment.
+
+#### How about I use `rsync` with hard links instead? I read a blog somewhere.
+
+Approaches using hard links require you to maintain a 'source shadow'. They're also quite 'stateful', with hidden
+directories that we aren't supposed to touch!
+
+Anyway, choose what works best for you. 👍
+
+#### How will I benefit from using this tool?
 
 Using `rsync-sidekick` before `rsrync` makes your backup process significantly faster than using only `rsync`. Sometimes
-this performance benefit can even be 100x😲, if the only changes at your _source directory_ are the 3 types mentioned
+this performance benefit can even be 100x😲, if the only changes at your _source directory_ are the types mentioned
 earlier in this article.
+
+#### How do I build this?
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for instructions.
+
+#### I want to contribute to this tool. How do I?
+
+Great! See [CONTRIBUTING.md](./CONTRIBUTING.md).
