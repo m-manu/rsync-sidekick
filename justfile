@@ -14,16 +14,30 @@ test: build
     go test -v ./...
     @echo "Completed running test cases"
 
-# Runs clean build and tests, including race
-clean-build-and-test:
+# Runs clean build, lint, tests (including race) etc.
+ci:
+    @echo "Checking formatting"
+    @test -z $(gofmt -l .) || (echo "Some files need formatting. Run 'go fmt ./...'" && exit 1)
+    @echo "Formatting check complete"
+    @echo "Library check"
+    go mod tidy
+    go mod verify
+    git diff --exit-code go.mod go.sum
+    @echo "Library check completed"
     @echo "Building executable (cache disabled):"
     go build -a
     @echo "Build complete"
+    @echo "Run lint:"
+    go vet ./...
+    @echo "Lint complete"
     @echo "Now running tests:"
-    go test -race -v ./...
+    go test -count=1 -race -v ./...
     @echo "Testing complete"
 
-alias cbt := clean-build-and-test
+# Run tests and capture coverage
+test-coverage:
+    go test -count=1 -race -coverprofile=coverage.out -covermode=atomic ./...
+    go tool cover -func=coverage.out
 
 # Run build, tests and install
 install: test

@@ -8,9 +8,11 @@
 ## Why?
 
 `rsync` is a fantastic tool. Yet, by itself, it's a pain to use for repeated backing up of media files (videos, music,
-photos, etc.) _that are reorganized frequently_.
+photos, etc.) _that are reorganized frequently_. Why? Because, reorganized files get retransferred by `rsync`, wasting a
+lot of time and infra costs.
 
-`rsync-sidekick` is a safe and simple tool that is designed to run **before** `rsync` is run.
+`rsync-sidekick` is a safe and simple tool that is designed to run **before** `rsync` is run. `rsync-sidekick` is *not*
+a replacement for `rsync` doesn't intend to be one.
 
 ## What?
 
@@ -121,7 +123,7 @@ flags: (all optional)
   -i, --ssh-key string                path to SSH private key for remote connections
   -d, --sync-dir-timestamps           also propagate directory timestamps from source to destination
   -v, --verbose                       generates extra information, even a file dump (caution: makes it slow!)
-      --version                       show application version (v2.0.1) and exit
+      --version                       show application version (v2.0.2) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```
