@@ -77,7 +77,7 @@ func (a CopyFileAction) Uniqueness() string {
 }
 
 func (a CopyFileAction) String() string {
-	return fmt.Sprintf(`copy file "%s" to "%s"`, a.AbsSourcePath, a.AbsDestPath)
+	return fmt.Sprintf(`copy file "%s" to "%s"`, sanitizePath(a.AbsSourcePath), sanitizePath(a.AbsDestPath))
 }
 
 func regularCopy(src, dst string) error {

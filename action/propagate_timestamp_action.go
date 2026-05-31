@@ -62,5 +62,5 @@ func (a PropagateTimestampAction) Uniqueness() string {
 }
 
 func (a PropagateTimestampAction) String() string {
-	return fmt.Sprintf(`propagate timestamp of "%s" to "%s"`, a.sourcePath(), a.destinationPath())
+	return fmt.Sprintf(`propagate timestamp of "%s" to "%s"`, sanitizePath(a.sourcePath()), sanitizePath(a.destinationPath()))
 }
