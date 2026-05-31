@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"time"
 )
 
@@ -27,14 +28,18 @@ func (a CopyFileAction) destinationPath() string {
 
 // UnixCommand generates the shell command for this copy action.
 func (a CopyFileAction) UnixCommand() string {
+	timestamp := a.SourceModTime.Format("200601021504.05")
+	touchCmd := fmt.Sprintf(`touch -m -a -t "%s" "%s"`, timestamp, escape(a.AbsDestPath))
+
 	if a.UseReflink {
-		return fmt.Sprintf(`cp -pv --reflink=auto "%s" "%s" && touch -d @%d "%s"`,
+		return fmt.Sprintf(`if [ "$(uname)" = "Darwin" ]; then cp -pv -c "%s" "%s"; else cp -pv --reflink=auto "%s" "%s"; fi && %s`,
 			escape(a.AbsSourcePath), escape(a.AbsDestPath),
-			a.SourceModTime.Unix(), escape(a.AbsDestPath))
+			escape(a.AbsSourcePath), escape(a.AbsDestPath),
+			touchCmd)
 	}
-	return fmt.Sprintf(`cp -pv "%s" "%s" && touch -d @%d "%s"`,
+	return fmt.Sprintf(`cp -pv "%s" "%s" && %s`,
 		escape(a.AbsSourcePath), escape(a.AbsDestPath),
-		a.SourceModTime.Unix(), escape(a.AbsDestPath))
+		touchCmd)
 }
 
 // Perform executes the copy action.
@@ -45,7 +50,12 @@ func (a CopyFileAction) Perform() error {
 	}
 
 	if a.UseReflink {
-		cmd := exec.Command("cp", "--reflink=auto", "-p", a.AbsSourcePath, a.AbsDestPath)
+		var cmd *exec.Cmd
+		if runtime.GOOS == "darwin" {
+			cmd = exec.Command("cp", "-c", "-p", a.AbsSourcePath, a.AbsDestPath)
+		} else {
+			cmd = exec.Command("cp", "--reflink=auto", "-p", a.AbsSourcePath, a.AbsDestPath)
+		}
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("reflink copy failed: %w: %s", err, string(out))
 		}
@@ -77,14 +87,25 @@ func regularCopy(src, dst string) error {
 	}
 	defer in.Close()
 
-	out, err := os.Create(dst)
+	tmpDst := dst + ".tmp"
+	out, err := os.Create(tmpDst)
 	if err != nil {
-		return fmt.Errorf("cannot create destination %q: %w", dst, err)
+		return fmt.Errorf("cannot create destination %q: %w", tmpDst, err)
 	}
-	defer out.Close()
 
 	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmpDst)
 		return fmt.Errorf("copy failed from %q to %q: %w", src, dst, err)
 	}
-	return out.Close()
+	if err := out.Close(); err != nil {
+		os.Remove(tmpDst)
+		return fmt.Errorf("failed to close destination %q: %w", tmpDst, err)
+	}
+
+	if err := os.Rename(tmpDst, dst); err != nil {
+		os.Remove(tmpDst)
+		return fmt.Errorf("failed to rename %q to %q: %w", tmpDst, dst, err)
+	}
+	return nil
 }
