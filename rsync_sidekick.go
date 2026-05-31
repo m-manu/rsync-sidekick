@@ -188,7 +188,24 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 			fmte.Printf("Scanning %d archive path(s) for %d unmatched orphans...\n",
 				len(archivePaths), len(unmatchedOrphans))
 			// Compute digests for unmatched orphans at source
+			var orphanDigestCounter int32
 			orphanDigests := make(map[string]entity.FileDigest)
+			orphanDigestDone := make(chan struct{})
+			if progressFrequency > 0 {
+				go func() {
+					ticker := time.NewTicker(progressFrequency)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-orphanDigestDone:
+							return
+						case <-ticker.C:
+							fmte.Printf("Computing orphan digests: %d / %d...\n",
+								atomic.LoadInt32(&orphanDigestCounter), len(unmatchedOrphans))
+						}
+					}
+				}()
+			}
 			for _, o := range unmatchedOrphans {
 				absPath := sourceDirPath + "/" + o
 				var digest entity.FileDigest
@@ -201,10 +218,32 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 				if err == nil {
 					orphanDigests[o] = digest
 				}
+				atomic.AddInt32(&orphanDigestCounter, 1)
+			}
+			close(orphanDigestDone)
+			var archiveScanCounter, archiveMatchCounter int32
+			archiveScanDone := make(chan struct{})
+			if progressFrequency > 0 {
+				go func() {
+					ticker := time.NewTicker(progressFrequency)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-archiveScanDone:
+							return
+						case <-ticker.C:
+							fmte.Printf("Scanning archive files: %d scanned, %d matched...\n",
+								atomic.LoadInt32(&archiveScanCounter),
+								atomic.LoadInt32(&archiveMatchCounter))
+						}
+					}
+				}()
 			}
 			archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
 				archivePaths, exclusions, unmatchedOrphans, orphanDigests,
-				sourceFiles, destinationDirPath, useReflink, destFS)
+				sourceFiles, destinationDirPath, useReflink, destFS,
+				&archiveScanCounter, &archiveMatchCounter)
+			close(archiveScanDone)
 			if archiveErr != nil {
 				return nil, fmt.Errorf("error scanning archives: %+v", archiveErr)
 			}
@@ -618,9 +657,29 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			}
 			if sourceIsRemote {
 				// Dest is local: scan archives locally
+				var archiveScanCounter, archiveMatchCounter int32
+				archiveScanDone := make(chan struct{})
+				if progressFrequency > 0 {
+					go func() {
+						ticker := time.NewTicker(progressFrequency)
+						defer ticker.Stop()
+						for {
+							select {
+							case <-archiveScanDone:
+								return
+							case <-ticker.C:
+								fmte.Printf("Scanning archive files: %d scanned, %d matched...\n",
+									atomic.LoadInt32(&archiveScanCounter),
+									atomic.LoadInt32(&archiveMatchCounter))
+							}
+						}
+					}()
+				}
 				archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
 					archivePaths, exclusions, unmatchedOrphans, unmatchedDigests,
-					sourceFiles, destDirPath, useReflink, nil)
+					sourceFiles, destDirPath, useReflink, nil,
+					&archiveScanCounter, &archiveMatchCounter)
+				close(archiveScanDone)
 				if archiveErr != nil {
 					return fmt.Errorf("error scanning archives: %+v", archiveErr)
 				}
