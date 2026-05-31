@@ -68,6 +68,15 @@ func PrintfErr(format string, a ...any) {
 	mx.Unlock()
 }
 
+// PrintfErrV is goroutine-safe fmt.Printf to StdErr for English (Verbose Mode)
+func PrintfErrV(format string, a ...any) {
+	if normalPrint && verbosePrint {
+		mx.Lock()
+		_, _ = p.Fprintf(os.Stderr, format, a...)
+		mx.Unlock()
+	}
+}
+
 // Errors combines multiple errors into one
 func Errors(message string, errs []error) error {
 	var sb strings.Builder

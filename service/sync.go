@@ -47,7 +47,7 @@ func buildIndex(baseDirPath string, filesToScan []string, counter *int32,
 		digest, err := getDigest(path)
 		if err != nil {
 			errCount++
-			fmte.PrintfErr("couldn't index file \"%s\" (skipping): %+v\n", path, err)
+			fmte.PrintfErrV("couldn't index file \"%s\" (skipping): %+v\n", path, err)
 		}
 		if errCount > indexBuildErrorCountTolerance {
 			return fmt.Errorf("too many errors while building index")
@@ -93,6 +93,7 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 	orphanDigestsToFiles := lib.NewMultiMap[entity.FileDigest, string]()
 	candidateDigestsToFiles := lib.NewMultiMap[entity.FileDigest, string]()
 	var sourceIndexErrs, destinationIndexErrs []error
+	var sourceIndexErrsMutex, destinationIndexErrsMutex sync.Mutex
 	parallelismForSource, parallelismForDestination := getParallelism(runtime.NumCPU())
 	var wg sync.WaitGroup
 	wg.Add(parallelismForSource + parallelismForDestination)
@@ -110,7 +111,9 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 					orphanFilesToDigests, orphanDigestsToFiles)
 			}
 			if sourceIndexErr != nil {
+				sourceIndexErrsMutex.Lock()
 				sourceIndexErrs = append(sourceIndexErrs, sourceIndexErr)
+				sourceIndexErrsMutex.Unlock()
 			}
 		}(i)
 	}
@@ -128,7 +131,9 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 					candidateFilesToDigests, candidateDigestsToFiles)
 			}
 			if destinationIndexErr != nil {
+				destinationIndexErrsMutex.Lock()
 				destinationIndexErrs = append(destinationIndexErrs, destinationIndexErr)
+				destinationIndexErrsMutex.Unlock()
 			}
 		}(i)
 	}

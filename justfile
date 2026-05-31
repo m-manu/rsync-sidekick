@@ -11,13 +11,19 @@ build:
 # Run test cases
 test: build
     @echo "Running test cases:"
-    go test -race -v ./...
+    go test -v ./...
     @echo "Completed running test cases"
 
-# Runs build and tests
-build-and-test: build test
+# Runs clean build and tests, including race
+clean-build-and-test:
+    @echo "Building executable (cache disabled):"
+    go build -a
+    @echo "Build complete"
+    @echo "Now running tests:"
+    go test -race -v ./...
+    @echo "Testing complete"
 
-alias bat := build-and-test
+alias cbt := clean-build-and-test
 
 # Run build, tests and install
 install: test
