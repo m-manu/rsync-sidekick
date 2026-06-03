@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-var mx sync.Mutex // Shared mutex across stdout and stderr to ensure ordering across
+var mx sync.Mutex
 
 var normalPrint = true
 
@@ -53,14 +53,14 @@ func Print(a ...any) {
 	mx.Unlock()
 }
 
-// PrintfErr is goroutine-safe fmt.Printf to StdErr for English
+// PrintfErr writes directly to stderr
 func PrintfErr(format string, a ...any) {
 	mx.Lock()
 	_, _ = fmt.Fprintf(os.Stderr, format, a...)
 	mx.Unlock()
 }
 
-// PrintfErrV is goroutine-safe fmt.Printf to StdErr for English (Verbose Mode)
+// PrintfErrV is PrintfErr for verbose mode
 func PrintfErrV(format string, a ...any) {
 	if normalPrint && verbosePrint {
 		mx.Lock()

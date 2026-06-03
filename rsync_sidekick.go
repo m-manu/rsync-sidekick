@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"sort"
 	"strings"
 	"sync"
@@ -1071,58 +1072,110 @@ func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.Sy
 	return nil
 }
 
+// actionResult is sent from the I/O goroutine to the printer goroutine.
+// Only lightweight data — no formatting, no string allocation on the hot path.
+type actionResult struct {
+	index   int
+	action  action.SyncAction
+	err     error
+	dryRun  bool
+}
+
 func performActions(actions []action.SyncAction, destinationDirPath string, dryRun bool) error {
-	var start, end time.Time
+	if cpuprofile := os.Getenv("CPUPROFILE"); cpuprofile != "" {
+		f, _ := os.Create(cpuprofile)
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
 	if dryRun {
 		fmte.Printf("Simulating sync actions at destination (dry run)...\n")
 	} else {
 		fmte.Printf("Applying sync actions at destination...\n")
 	}
 	successCount := 0
-	movedPaths := make(map[string]string) // tracks old abs path → new abs path for moved files
+	movedPaths := make(map[string]string)
 
-	// Sort actions by destination directory for better I/O locality on HDDs
+	// BENCHMARK: multiply timestamp actions x10
+	if os.Getenv("BENCH_MULTIPLY") != "" {
+		var expanded []action.SyncAction
+		for _, a := range actions {
+			expanded = append(expanded, a)
+			if tsAct, ok := a.(action.PropagateTimestampAction); ok {
+				for j := 0; j < 9; j++ {
+					dup := tsAct
+					dup.SourceModTime = tsAct.SourceModTime.Add(time.Duration(j+1) * time.Second)
+					expanded = append(expanded, dup)
+				}
+			}
+		}
+		actions = expanded
+		fmte.Printf("BENCH: expanded to %d actions\n", len(actions))
+	}
+
 	action.SortByDestinationDir(actions)
 
-	start = time.Now()
+	total := len(actions)
+	prefixStrip := destinationDirPath + "/"
+
+	// Printer goroutine — does all formatting and stdout I/O
+	printCh := make(chan actionResult, 256)
+	var printerDone sync.WaitGroup
+	printerDone.Add(1)
+	go func() {
+		defer printerDone.Done()
+		for r := range printCh {
+			header := strings.Replace(
+				fmt.Sprintf("%4d/%d %s: ", r.index+1, total, r.action),
+				prefixStrip, "", -1,
+			)
+			if r.dryRun {
+				fmt.Print(header, "skipping (dry run)\n")
+			} else if r.err == nil {
+				fmt.Print(header, "done\n")
+			} else {
+				fmt.Printf("%sfailed due to: %+v\n", header, r.err)
+			}
+		}
+	}()
+
+	// I/O loop — performs actions, sends lightweight results to printer
+	start := time.Now()
 	for i, syncAction := range actions {
-		// If this is a CopyFileAction whose source was moved, redirect to the new path
 		if copyAct, ok := syncAction.(action.CopyFileAction); ok {
 			if newPath, wasMoved := movedPaths[copyAct.AbsSourcePath]; wasMoved {
 				copyAct.AbsSourcePath = newPath
 				syncAction = copyAct
 			}
 		}
-		fmte.Print(strings.Replace(
-			fmt.Sprintf("%4d/%d %s: ", i+1, len(actions), syncAction),
-			destinationDirPath+"/", "", -1,
-		))
-		if dryRun {
-			fmte.Printf("skipping (dry run)\n")
+
+		var aErr error
+		if !dryRun {
+			aErr = syncAction.Perform()
+		}
+
+		printCh <- actionResult{index: i, action: syncAction, err: aErr, dryRun: dryRun}
+
+		if aErr == nil {
 			successCount++
-		} else {
-			aErr := syncAction.Perform()
-			if aErr == nil {
-				fmte.Printf("done\n")
-				successCount++
-				// Track moves so later copy actions can find the file at its new location
+			if !dryRun {
 				if moveAct, ok := syncAction.(action.MoveFileAction); ok {
 					oldAbs := filepath.Join(moveAct.BasePath, moveAct.RelativeFromPath)
 					newAbs := filepath.Join(moveAct.BasePath, moveAct.RelativeToPath)
 					movedPaths[oldAbs] = newAbs
 				}
-			} else {
-				fmte.Printf("failed due to: %+v\n", aErr)
 			}
 		}
 	}
-	end = time.Now()
+	close(printCh)
+	printerDone.Wait()
+	end := time.Now()
+
 	if dryRun {
 		fmte.Printf("Dry run completed in %.1fs: %d actions would be performed\n",
 			end.Sub(start).Seconds(), successCount)
 	} else {
 		fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded\n",
-			end.Sub(start).Seconds(), successCount, len(actions))
+			end.Sub(start).Seconds(), successCount, total)
 	}
 	return nil
 }
