@@ -8,9 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
-	"unsafe"
 
 	set "github.com/deckarep/golang-set/v2"
 	"github.com/m-manu/rsync-sidekick/v2/action"
@@ -24,26 +22,6 @@ import (
 	"github.com/pkg/sftp"
 )
 
-// utimensatErr calls utimensat(2) with a directory fd and relative filename,
-// avoiding full path resolution through the B-tree for each call.
-func utimensatErr(dirfd int, name string, ts []syscall.Timespec) error {
-	nameBytes, err := syscall.BytePtrFromString(name)
-	if err != nil {
-		return err
-	}
-	_, _, errno := syscall.Syscall6(
-		syscall.SYS_UTIMENSAT,
-		uintptr(dirfd),
-		uintptr(unsafe.Pointer(nameBytes)),
-		uintptr(unsafe.Pointer(&ts[0])),
-		0, // flags: 0 = follow symlinks
-		0, 0,
-	)
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
 
 const unixCommandLengthGuess = 200
 
@@ -1103,32 +1081,8 @@ func performActions(actions []action.SyncAction, destinationDirPath string, dryR
 	successCount := 0
 	movedPaths := make(map[string]string) // tracks old abs path → new abs path for moved files
 
-	// Directory FD cache: keep parent dir open across actions in the same directory
-	var cachedDir string
-	var cachedDirFD int = -1
-	closeCachedDir := func() {
-		if cachedDirFD >= 0 {
-			syscall.Close(cachedDirFD)
-			cachedDirFD = -1
-			cachedDir = ""
-		}
-	}
-	defer closeCachedDir()
-	getDirFD := func(path string) (int, string) {
-		dir := filepath.Dir(path)
-		base := filepath.Base(path)
-		if dir == cachedDir && cachedDirFD >= 0 {
-			return cachedDirFD, base
-		}
-		closeCachedDir()
-		fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
-		if err == nil {
-			cachedDirFD = fd
-			cachedDir = dir
-			return fd, base
-		}
-		return -1, ""
-	}
+	// Sort actions by destination directory for better I/O locality on HDDs
+	action.SortByDestinationDir(actions)
 
 	start = time.Now()
 	for i, syncAction := range actions {
@@ -1147,23 +1101,7 @@ func performActions(actions []action.SyncAction, destinationDirPath string, dryR
 			fmte.Printf("skipping (dry run)\n")
 			successCount++
 		} else {
-			// Fast path: use cached directory FD for timestamp propagation
-			var aErr error
-			if tsAct, ok := syncAction.(action.PropagateTimestampAction); ok && !tsAct.SourceModTime.IsZero() && tsAct.FS == nil {
-				destPath := tsAct.DestinationPath()
-				dirFD, base := getDirFD(destPath)
-				if dirFD >= 0 {
-					ts := []syscall.Timespec{
-						{Sec: tsAct.SourceModTime.Unix()},
-						{Sec: tsAct.SourceModTime.Unix()},
-					}
-					aErr = utimensatErr(dirFD, base, ts)
-				} else {
-					aErr = syncAction.Perform()
-				}
-			} else {
-				aErr = syncAction.Perform()
-			}
+			aErr := syncAction.Perform()
 			if aErr == nil {
 				fmte.Printf("done\n")
 				successCount++

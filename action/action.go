@@ -2,6 +2,8 @@ package action
 
 import (
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -18,6 +20,18 @@ type SyncAction interface {
 	Perform() error
 	// Uniqueness should define a string that's unique with an action
 	Uniqueness() string
+}
+
+// SortByDestinationDir sorts actions by destination directory path,
+// grouping files in the same directory together for better cache locality.
+func SortByDestinationDir(actions []SyncAction) {
+	keys := make([]string, len(actions))
+	for i, a := range actions {
+		keys[i] = filepath.Dir(a.destinationPath())
+	}
+	sort.SliceStable(actions, func(i, j int) bool {
+		return keys[i] < keys[j]
+	})
 }
 
 const cmdSeparator = "\u0001"
