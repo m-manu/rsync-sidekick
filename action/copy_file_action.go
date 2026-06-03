@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"syscall"
 	"time"
 )
 
@@ -50,14 +51,16 @@ func (a CopyFileAction) Perform() error {
 	}
 
 	if a.UseReflink {
-		var cmd *exec.Cmd
-		if runtime.GOOS == "darwin" {
-			cmd = exec.Command("cp", "-c", "-p", a.AbsSourcePath, a.AbsDestPath)
+		if runtime.GOOS == "linux" {
+			if err := reflinkCopy(a.AbsSourcePath, a.AbsDestPath, srcInfo.Mode()); err != nil {
+				return err
+			}
 		} else {
-			cmd = exec.Command("cp", "--reflink=auto", "-p", a.AbsSourcePath, a.AbsDestPath)
-		}
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("reflink copy failed: %w: %s", err, string(out))
+			// macOS: use cp -c (no FICLONE ioctl available)
+			cmd := exec.Command("cp", "-c", "-p", a.AbsSourcePath, a.AbsDestPath)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("reflink copy failed: %w: %s", err, string(out))
+			}
 		}
 	} else {
 		if err := regularCopy(a.AbsSourcePath, a.AbsDestPath); err != nil {
@@ -78,6 +81,36 @@ func (a CopyFileAction) Uniqueness() string {
 
 func (a CopyFileAction) String() string {
 	return fmt.Sprintf(`copy file "%s" to "%s"`, a.AbsSourcePath, a.AbsDestPath)
+}
+
+// reflinkCopy creates a reflink copy using FICLONE ioctl directly, avoiding fork+exec of cp.
+// Falls back to regular copy if the filesystem does not support reflinks.
+func reflinkCopy(src, dst string, mode os.FileMode) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("cannot open source %q: %w", src, err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("cannot create destination %q: %w", dst, err)
+	}
+
+	// FICLONE = _IOW(0x94, 9, int) = 0x40049409
+	const ficlone = 0x40049409
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, dstFile.Fd(), ficlone, srcFile.Fd())
+	if errno != 0 {
+		// Reflink not supported, fall back to regular copy
+		dstFile.Close()
+		os.Remove(dst)
+		if err := regularCopy(src, dst); err != nil {
+			return err
+		}
+		return os.Chmod(dst, mode)
+	}
+
+	return dstFile.Close()
 }
 
 func regularCopy(src, dst string) error {
