@@ -43,7 +43,7 @@ func TestComputeSyncActions_RaceOnErrorCollection(t *testing.T) {
 	var dstCounter int32
 
 	// paths don't exist -> buildIndex will generate errors
-	ComputeSyncActionsWithFS(
+	_, _, _ = ComputeSyncActionsWithFS(
 		nil,
 		nil,
 		"/nonexistent/source",
