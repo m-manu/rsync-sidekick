@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime/pprof"
 	"sort"
 	"strings"
 	"sync"
@@ -1082,11 +1081,6 @@ type actionResult struct {
 }
 
 func performActions(actions []action.SyncAction, destinationDirPath string, dryRun bool) error {
-	if cpuprofile := os.Getenv("CPUPROFILE"); cpuprofile != "" {
-		f, _ := os.Create(cpuprofile)
-		pprof.StartCPUProfile(f)
-		defer pprof.StopCPUProfile()
-	}
 	if dryRun {
 		fmte.Printf("Simulating sync actions at destination (dry run)...\n")
 	} else {
@@ -1094,23 +1088,6 @@ func performActions(actions []action.SyncAction, destinationDirPath string, dryR
 	}
 	successCount := 0
 	movedPaths := make(map[string]string)
-
-	// BENCHMARK: multiply timestamp actions x10
-	if os.Getenv("BENCH_MULTIPLY") != "" {
-		var expanded []action.SyncAction
-		for _, a := range actions {
-			expanded = append(expanded, a)
-			if tsAct, ok := a.(action.PropagateTimestampAction); ok {
-				for j := 0; j < 9; j++ {
-					dup := tsAct
-					dup.SourceModTime = tsAct.SourceModTime.Add(time.Duration(j+1) * time.Second)
-					expanded = append(expanded, dup)
-				}
-			}
-		}
-		actions = expanded
-		fmte.Printf("BENCH: expanded to %d actions\n", len(actions))
-	}
 
 	action.SortByDestinationDir(actions)
 
