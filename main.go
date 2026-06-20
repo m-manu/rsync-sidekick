@@ -21,7 +21,7 @@ import (
 const (
 	applicationMajorVersion = 2
 	applicationMinorVersion = 0
-	applicationPatchVersion = 2
+	applicationPatchVersion = 5
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -183,7 +183,7 @@ func setupVerboseOpt() {
 }
 
 func setupProgressFrequencyOpt() {
-	progressFrequencyPtr := flag.DurationP("progress-frequency", "f", 2*time.Second, "frequency of progress reporting e.g. '5s', '1m'")
+	progressFrequencyPtr := flag.DurationP("progress-frequency", "f", 5*time.Second, "frequency of progress reporting e.g. '5s', '1m'")
 	flags.progressFrequency = func() time.Duration {
 		return *progressFrequencyPtr
 	}

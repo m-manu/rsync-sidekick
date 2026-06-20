@@ -40,5 +40,5 @@ func (a MakeDirectoryAction) Uniqueness() string {
 }
 
 func (a MakeDirectoryAction) String() string {
-	return fmt.Sprintf(`create directory "%s"`, a.destinationPath())
+	return fmt.Sprintf(`create directory "%s"`, sanitizePath(a.destinationPath()))
 }

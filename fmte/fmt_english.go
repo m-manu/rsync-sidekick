@@ -2,25 +2,17 @@ package fmte
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
-
-	"golang.org/x/text/language"
-	"golang.org/x/text/message"
 )
 
-var p *message.Printer
-
-var mx sync.Mutex // Shared mutex across stdout and stderr to ensure ordering across
+var mx sync.Mutex
 
 var normalPrint = true
 
 var verbosePrint = false
-
-func init() {
-	p = message.NewPrinter(language.English)
-}
 
 // Off function turns off print functions within fmte package
 func Off() {
@@ -38,7 +30,7 @@ func Printf(format string, a ...any) {
 		return
 	}
 	mx.Lock()
-	_, _ = p.Printf(format, a...)
+	_, _ = fmt.Printf(format, a...)
 	mx.Unlock()
 }
 
@@ -46,7 +38,7 @@ func Printf(format string, a ...any) {
 func PrintfV(format string, a ...any) {
 	if normalPrint && verbosePrint {
 		mx.Lock()
-		_, _ = p.Printf(format, a...)
+		_, _ = fmt.Printf(format, a...)
 		mx.Unlock()
 	}
 }
@@ -57,22 +49,22 @@ func Print(a ...any) {
 		return
 	}
 	mx.Lock()
-	_, _ = p.Print(a...)
+	_, _ = fmt.Print(a...)
 	mx.Unlock()
 }
 
-// PrintfErr is goroutine-safe fmt.Printf to StdErr for English
+// PrintfErr writes directly to stderr
 func PrintfErr(format string, a ...any) {
 	mx.Lock()
-	_, _ = p.Fprintf(os.Stderr, format, a...)
+	_, _ = fmt.Fprintf(os.Stderr, format, a...)
 	mx.Unlock()
 }
 
-// PrintfErrV is goroutine-safe fmt.Printf to StdErr for English (Verbose Mode)
+// PrintfErrV is PrintfErr for verbose mode
 func PrintfErrV(format string, a ...any) {
 	if normalPrint && verbosePrint {
 		mx.Lock()
-		_, _ = p.Fprintf(os.Stderr, format, a...)
+		_, _ = fmt.Fprintf(os.Stderr, format, a...)
 		mx.Unlock()
 	}
 }

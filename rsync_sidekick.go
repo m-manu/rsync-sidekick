@@ -22,6 +22,7 @@ import (
 	"github.com/pkg/sftp"
 )
 
+
 const unixCommandLengthGuess = 200
 
 func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions set.Set[string],
@@ -188,7 +189,24 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 			fmte.Printf("Scanning %d archive path(s) for %d unmatched orphans...\n",
 				len(archivePaths), len(unmatchedOrphans))
 			// Compute digests for unmatched orphans at source
+			var orphanDigestCounter int32
 			orphanDigests := make(map[string]entity.FileDigest)
+			orphanDigestDone := make(chan struct{})
+			if progressFrequency > 0 {
+				go func() {
+					ticker := time.NewTicker(progressFrequency)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-orphanDigestDone:
+							return
+						case <-ticker.C:
+							fmte.Printf("Computing orphan digests: %d / %d...\n",
+								atomic.LoadInt32(&orphanDigestCounter), len(unmatchedOrphans))
+						}
+					}
+				}()
+			}
 			for _, o := range unmatchedOrphans {
 				absPath := sourceDirPath + "/" + o
 				var digest entity.FileDigest
@@ -201,10 +219,32 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 				if err == nil {
 					orphanDigests[o] = digest
 				}
+				atomic.AddInt32(&orphanDigestCounter, 1)
+			}
+			close(orphanDigestDone)
+			var archiveScanCounter, archiveMatchCounter int32
+			archiveScanDone := make(chan struct{})
+			if progressFrequency > 0 {
+				go func() {
+					ticker := time.NewTicker(progressFrequency)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-archiveScanDone:
+							return
+						case <-ticker.C:
+							fmte.Printf("Scanning archive files: %d scanned, %d matched...\n",
+								atomic.LoadInt32(&archiveScanCounter),
+								atomic.LoadInt32(&archiveMatchCounter))
+						}
+					}
+				}()
 			}
 			archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
 				archivePaths, exclusions, unmatchedOrphans, orphanDigests,
-				sourceFiles, destinationDirPath, useReflink, destFS)
+				sourceFiles, destinationDirPath, useReflink, destFS,
+				&archiveScanCounter, &archiveMatchCounter)
+			close(archiveScanDone)
 			if archiveErr != nil {
 				return nil, fmt.Errorf("error scanning archives: %+v", archiveErr)
 			}
@@ -618,9 +658,29 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			}
 			if sourceIsRemote {
 				// Dest is local: scan archives locally
+				var archiveScanCounter, archiveMatchCounter int32
+				archiveScanDone := make(chan struct{})
+				if progressFrequency > 0 {
+					go func() {
+						ticker := time.NewTicker(progressFrequency)
+						defer ticker.Stop()
+						for {
+							select {
+							case <-archiveScanDone:
+								return
+							case <-ticker.C:
+								fmte.Printf("Scanning archive files: %d scanned, %d matched...\n",
+									atomic.LoadInt32(&archiveScanCounter),
+									atomic.LoadInt32(&archiveMatchCounter))
+							}
+						}
+					}()
+				}
 				archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
 					archivePaths, exclusions, unmatchedOrphans, unmatchedDigests,
-					sourceFiles, destDirPath, useReflink, nil)
+					sourceFiles, destDirPath, useReflink, nil,
+					&archiveScanCounter, &archiveMatchCounter)
+				close(archiveScanDone)
 				if archiveErr != nil {
 					return fmt.Errorf("error scanning archives: %+v", archiveErr)
 				}
@@ -1011,54 +1071,88 @@ func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.Sy
 	return nil
 }
 
+// actionResult is sent from the I/O goroutine to the printer goroutine.
+// Only lightweight data — no formatting, no string allocation on the hot path.
+type actionResult struct {
+	index   int
+	action  action.SyncAction
+	err     error
+	dryRun  bool
+}
+
 func performActions(actions []action.SyncAction, destinationDirPath string, dryRun bool) error {
-	var start, end time.Time
 	if dryRun {
 		fmte.Printf("Simulating sync actions at destination (dry run)...\n")
 	} else {
 		fmte.Printf("Applying sync actions at destination...\n")
 	}
 	successCount := 0
-	movedPaths := make(map[string]string) // tracks old abs path → new abs path for moved files
-	start = time.Now()
+	movedPaths := make(map[string]string)
+
+	action.SortByDestinationDir(actions)
+
+	total := len(actions)
+	prefixStrip := destinationDirPath + "/"
+
+	// Printer goroutine — does all formatting and stdout I/O
+	printCh := make(chan actionResult, 256)
+	var printerDone sync.WaitGroup
+	printerDone.Add(1)
+	go func() {
+		defer printerDone.Done()
+		for r := range printCh {
+			header := strings.Replace(
+				fmt.Sprintf("%4d/%d %s: ", r.index+1, total, r.action),
+				prefixStrip, "", -1,
+			)
+			if r.dryRun {
+				fmt.Print(header, "skipping (dry run)\n")
+			} else if r.err == nil {
+				fmt.Print(header, "done\n")
+			} else {
+				fmt.Printf("%sfailed due to: %+v\n", header, r.err)
+			}
+		}
+	}()
+
+	// I/O loop — performs actions, sends lightweight results to printer
+	start := time.Now()
 	for i, syncAction := range actions {
-		// If this is a CopyFileAction whose source was moved, redirect to the new path
 		if copyAct, ok := syncAction.(action.CopyFileAction); ok {
 			if newPath, wasMoved := movedPaths[copyAct.AbsSourcePath]; wasMoved {
 				copyAct.AbsSourcePath = newPath
 				syncAction = copyAct
 			}
 		}
-		fmte.Print(strings.Replace(
-			fmt.Sprintf("%4d/%d %s: ", i+1, len(actions), syncAction),
-			destinationDirPath+"/", "", -1,
-		))
-		if dryRun {
-			fmte.Printf("skipping (dry run)\n")
+
+		var aErr error
+		if !dryRun {
+			aErr = syncAction.Perform()
+		}
+
+		printCh <- actionResult{index: i, action: syncAction, err: aErr, dryRun: dryRun}
+
+		if aErr == nil {
 			successCount++
-		} else {
-			aErr := syncAction.Perform()
-			if aErr == nil {
-				fmte.Printf("done\n")
-				successCount++
-				// Track moves so later copy actions can find the file at its new location
+			if !dryRun {
 				if moveAct, ok := syncAction.(action.MoveFileAction); ok {
 					oldAbs := filepath.Join(moveAct.BasePath, moveAct.RelativeFromPath)
 					newAbs := filepath.Join(moveAct.BasePath, moveAct.RelativeToPath)
 					movedPaths[oldAbs] = newAbs
 				}
-			} else {
-				fmte.Printf("failed due to: %+v\n", aErr)
 			}
 		}
 	}
-	end = time.Now()
+	close(printCh)
+	printerDone.Wait()
+	end := time.Now()
+
 	if dryRun {
 		fmte.Printf("Dry run completed in %.1fs: %d actions would be performed\n",
 			end.Sub(start).Seconds(), successCount)
 	} else {
 		fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded\n",
-			end.Sub(start).Seconds(), successCount, len(actions))
+			end.Sub(start).Seconds(), successCount, total)
 	}
 	return nil
 }

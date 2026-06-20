@@ -27,7 +27,7 @@ func getDigest(path string) (entity.FileDigest, error) {
 	if statErr != nil {
 		return entity.FileDigest{}, statErr
 	}
-	hash, hashErr := fileHash(path)
+	hash, hashErr := fileHash(path, info.Size())
 	if hashErr != nil {
 		return entity.FileDigest{}, hashErr
 	}
@@ -38,23 +38,16 @@ func getDigest(path string) (entity.FileDigest, error) {
 	}, nil
 }
 
-func fileHash(path string) (string, error) {
-	fileInfo, statErr := os.Lstat(path)
-	if statErr != nil {
-		return "", fmt.Errorf("couldn't stat: %+v", statErr)
-	}
-	if !fileInfo.Mode().IsRegular() {
-		return "", fmt.Errorf("can't compute hash of non-regular file")
-	}
+func fileHash(path string, fileSize int64) (string, error) {
 	var prefix string
 	var bytes []byte
 	var fileReadErr error
-	if fileInfo.Size() <= thresholdFileSize {
+	if fileSize <= thresholdFileSize {
 		prefix = "f"
 		bytes, fileReadErr = os.ReadFile(path)
 	} else {
 		prefix = "s"
-		bytes, fileReadErr = readCrucialBytes(path, fileInfo.Size())
+		bytes, fileReadErr = readCrucialBytes(path, fileSize)
 	}
 	if fileReadErr != nil {
 		return "", fmt.Errorf("couldn't calculate hash: %+v", fileReadErr)
@@ -103,7 +96,7 @@ func getDigestWithFS(fsys rsfs.FileSystem, path string) (entity.FileDigest, erro
 	if statErr != nil {
 		return entity.FileDigest{}, statErr
 	}
-	hash, hashErr := fileHashWithFS(fsys, path)
+	hash, hashErr := fileHashWithFS(fsys, path, info.Size)
 	if hashErr != nil {
 		return entity.FileDigest{}, hashErr
 	}
@@ -114,23 +107,16 @@ func getDigestWithFS(fsys rsfs.FileSystem, path string) (entity.FileDigest, erro
 	}, nil
 }
 
-func fileHashWithFS(fsys rsfs.FileSystem, path string) (string, error) {
-	fileInfo, statErr := fsys.Lstat(path)
-	if statErr != nil {
-		return "", fmt.Errorf("couldn't stat: %+v", statErr)
-	}
-	if !fileInfo.Mode.IsRegular() {
-		return "", fmt.Errorf("can't compute hash of non-regular file")
-	}
+func fileHashWithFS(fsys rsfs.FileSystem, path string, fileSize int64) (string, error) {
 	var prefix string
 	var bytes []byte
 	var fileReadErr error
-	if fileInfo.Size <= thresholdFileSize {
+	if fileSize <= thresholdFileSize {
 		prefix = "f"
 		bytes, fileReadErr = fsys.ReadFile(path)
 	} else {
 		prefix = "s"
-		bytes, fileReadErr = readCrucialBytesWithFS(fsys, path, fileInfo.Size)
+		bytes, fileReadErr = readCrucialBytesWithFS(fsys, path, fileSize)
 	}
 	if fileReadErr != nil {
 		return "", fmt.Errorf("couldn't calculate hash: %+v", fileReadErr)

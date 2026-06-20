@@ -54,5 +54,5 @@ func (a MoveFileAction) Uniqueness() string {
 }
 
 func (a MoveFileAction) String() string {
-	return fmt.Sprintf(`rename/move file from "%s" to "%s"`, a.sourcePath(), a.destinationPath())
+	return fmt.Sprintf(`rename/move file from "%s" to "%s"`, sanitizePath(a.sourcePath()), sanitizePath(a.destinationPath()))
 }

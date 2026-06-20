@@ -27,6 +27,11 @@ func (a PropagateTimestampAction) destinationPath() string {
 	return filepath.Join(a.DestinationBaseDirPath, a.DestinationFileRelativePath)
 }
 
+// DestinationPath returns the full destination path (exported for dir-fd optimization)
+func (a PropagateTimestampAction) DestinationPath() string {
+	return a.destinationPath()
+}
+
 // UnixCommand for propagating 'file modification timestamp'
 func (a PropagateTimestampAction) UnixCommand() string {
 	return fmt.Sprintf(`touch -r "%s" "%s"`, escape(a.sourcePath()), escape(a.destinationPath()))
@@ -62,5 +67,5 @@ func (a PropagateTimestampAction) Uniqueness() string {
 }
 
 func (a PropagateTimestampAction) String() string {
-	return fmt.Sprintf(`propagate timestamp of "%s" to "%s"`, a.sourcePath(), a.destinationPath())
+	return fmt.Sprintf(`propagate timestamp of "%s" to "%s"`, sanitizePath(a.sourcePath()), sanitizePath(a.destinationPath()))
 }

@@ -38,6 +38,15 @@ func NewLocalFSForArchive() *LocalFS {
 }
 
 func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}, counter *int32) ([]DirEntry, error) {
+	// Use BTRFS-optimized walk if available (batch ioctl instead of per-file stat)
+	if !l.OneFileSystem && IsBtrfs(dirPath) {
+		entries, err := BtrfsWalk(dirPath, excludedNames, counter)
+		if err == nil {
+			return entries, nil
+		}
+		// Fall back to standard walk on error
+	}
+
 	entries := make([]DirEntry, 0, 10_000)
 	// Get root device ID for --one-file-system check
 	var rootDevice uint64
