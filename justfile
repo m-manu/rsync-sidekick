@@ -2,7 +2,7 @@
 _list:
     @just --list
 
-# Compile sources and build the executable
+# Compile sources and build the executable for local platform
 build:
     @echo "Building executable:"
     go build
@@ -24,8 +24,12 @@ ci:
     go mod verify
     git diff --exit-code go.mod go.sum
     @echo "Library check completed"
-    @echo "Building executable (cache disabled):"
-    go build -a
+    @echo "Building executable (cache disabled) for multiple platforms:"
+    GOOS=linux GOARCH=amd64 go build -a
+    GOOS=freebsd GOARCH=amd64 go build -a
+    GOOS=windows GOARCH=amd64 go build -a
+    GOOS=android GOARCH=arm64 go build -a
+    GOOS=darwin GOARCH=arm64 go build -a
     @echo "Build complete"
     @echo "Run lint:"
     go vet ./...

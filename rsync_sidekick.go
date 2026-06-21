@@ -22,7 +22,6 @@ import (
 	"github.com/pkg/sftp"
 )
 
-
 const unixCommandLengthGuess = 200
 
 func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions set.Set[string],
@@ -1074,10 +1073,10 @@ func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.Sy
 // actionResult is sent from the I/O goroutine to the printer goroutine.
 // Only lightweight data — no formatting, no string allocation on the hot path.
 type actionResult struct {
-	index   int
-	action  action.SyncAction
-	err     error
-	dryRun  bool
+	index  int
+	action action.SyncAction
+	err    error
+	dryRun bool
 }
 
 func performActions(actions []action.SyncAction, destinationDirPath string, dryRun bool) error {

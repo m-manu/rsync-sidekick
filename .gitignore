@@ -3,6 +3,11 @@
 *.sh
 *.txt
 *.out
+*.exe
 /test_cases_*
 .DS_Store
-openssf-scorecard.md
+*.md
+!CONTRIBUTING.md
+!SECURITY.md
+!README.md
+!.agent.md

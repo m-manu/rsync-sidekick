@@ -10,13 +10,13 @@ Just follow these principles and you're good.
 
 1. No destructive operations!
     - No deletes of any kind
-   - Just stick to 'move' and 'copy' operations
+    - Just stick to 'move' and 'copy' operations
 2. No changes at source
     - Source directory should be treated as read-only
 3. Agnostic of operating systems
-   - Except for `--shellscript` option
-   - Agnostic of shells (`zsh`, `bash` etc.)
-   - However, in non Unix-like environments (e.g. Windows), some features might be unavailable.
+    - Except for `--shellscript` option
+    - Agnostic of shells (`zsh`, `bash` etc.)
+    - However, in non Unix-like environments (e.g. Windows), some features might be unavailable.
 4. Do not touch `rsync` in any way
 5. Do not reimplement anything that `rsync` already does.
     - Definitely don't transfer files!
@@ -25,8 +25,8 @@ Just follow these principles and you're good.
 7. Be "abort safe"
 8. Don't maintain any persistent state (hard links, soft links, dot files etc.) in source directory or target directory
    or anywhere else to achieve the core logic.
-   - Temporary states and files may be created
-   - Debug/verbose options may create files (not core logic)
+    - Temporary states and files may be created
+    - Debug/verbose options may create files (not core logic)
 
 ## Contribution guidelines
 
