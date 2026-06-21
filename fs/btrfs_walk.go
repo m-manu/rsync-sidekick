@@ -1,3 +1,5 @@
+//go:build linux
+
 package fs
 
 import (
@@ -59,8 +61,8 @@ type btrfsDirEntry struct {
 
 // btrfsInodeInfo holds the fields we need from a btrfs_inode_item.
 type btrfsInodeInfo struct {
-	Size    int64
-	Mode    uint32
+	Size     int64
+	Mode     uint32
 	MTimeSec int64
 }
 
