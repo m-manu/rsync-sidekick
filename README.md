@@ -111,7 +111,7 @@ flags: (all optional)
       --list                          list files along their metadata for given directory
       --one-file-system               don't cross filesystem boundaries when scanning source and destination (like rsync -x)
                                       (works locally and with remote-exec, not with SFTP)
-  -f, --progress-frequency duration   frequency of progress reporting e.g. '5s', '1m' (default 2s)
+  -f, --progress-frequency duration   frequency of progress reporting e.g. '5s', '1m' (default 5s)
       --reflink                       use cp --reflink=auto for copy actions (instant on CoW filesystems like btrfs/XFS)
                                       (only effective when copies are performed via --copy-duplicates or --archive-path)
       --sftp                          force SFTP mode (don't try remote-execution)
@@ -123,7 +123,7 @@ flags: (all optional)
   -i, --ssh-key string                path to SSH private key for remote connections
   -d, --sync-dir-timestamps           also propagate directory timestamps from source to destination
   -v, --verbose                       generates extra information, even a file dump (caution: makes it slow!)
-      --version                       show application version (v2.0.2) and exit
+      --version                       show application version (v2.1.0) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```
