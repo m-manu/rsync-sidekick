@@ -301,7 +301,7 @@ func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[
 	unmatchedOrphans []string, orphanDigests map[string]entity.FileDigest,
 	sourceFiles map[string]entity.FileMeta,
 	destDirPath string, useReflink bool, destFS rsfs.FileSystem,
-	archiveScanCounter *int32, archiveMatchCounter *int32,
+	archiveWalkCounter *int32, archiveScanCounter *int32, archiveMatchCounter *int32,
 ) ([]action.SyncAction, error) {
 	if len(unmatchedOrphans) == 0 || len(archivePaths) == 0 {
 		return nil, nil
@@ -327,10 +327,10 @@ func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[
 		var archiveFiles map[string]entity.FileMeta
 		var err error
 		if destFS != nil {
-			archiveFiles, _, err = FindFilesFromDirectoryWithFS(destFS, archivePath, exclusions, nil)
+			archiveFiles, _, err = FindFilesFromDirectoryWithFS(destFS, archivePath, exclusions, archiveWalkCounter)
 		} else {
 			fsys := rsfs.NewLocalFSForArchive()
-			archiveFiles, _, err = FindFilesFromDirectoryWithFS(fsys, archivePath, exclusions, nil)
+			archiveFiles, _, err = FindFilesFromDirectoryWithFS(fsys, archivePath, exclusions, archiveWalkCounter)
 			fsys.Close()
 		}
 		if err != nil {
