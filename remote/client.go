@@ -98,6 +98,12 @@ func (c *AgentClient) SetConcurrent(concurrent bool) {
 	c.concurrent = concurrent
 }
 
+// IsConcurrent reports whether this connection may carry several requests at once.
+// Callers use it to decide whether remote work can overlap.
+func (c *AgentClient) IsConcurrent() bool {
+	return c.concurrent
+}
+
 // readLoop owns the connection's output for the client's lifetime.
 func (c *AgentClient) readLoop() {
 	defer close(c.readDone)

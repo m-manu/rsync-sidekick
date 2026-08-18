@@ -469,10 +469,11 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 	// destination scan but not with the source scan: start it as soon as the destination
 	// is done and let it overlap the source scan, which is usually the long one.
 	//
-	// Only done when the destination is local. Were the archives remote, this walk would
-	// go through the agent and could collide with the digest requests of the next phase —
-	// the AgentClient carries one request at a time.
-	prewalkArchives := len(archivePaths) > 0 && sourceIsRemote
+	// With a remote destination the walk goes through the agent and can still be running
+	// when the next phase sends its digest requests. That only works on a connection that
+	// correlates messages by request ID.
+	archivesAreLocal := sourceIsRemote
+	prewalkArchives := len(archivePaths) > 0 && (archivesAreLocal || agentClient.IsConcurrent())
 	var archiveWalks []service.ArchiveWalk
 	var archiveWalkErr error
 	var scanArchiveCounter, archiveScanDone int32
@@ -483,8 +484,13 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			defer wgArchiveWalk.Done()
 			<-destWalkDone
 			if destinationFilesErr == nil {
-				archiveWalks, archiveWalkErr = service.WalkArchives(archivePaths, exclusions, nil,
-					&scanArchiveCounter)
+				if archivesAreLocal {
+					archiveWalks, archiveWalkErr = service.WalkArchives(archivePaths, exclusions, nil,
+						&scanArchiveCounter)
+				} else {
+					archiveWalks, archiveWalkErr = walkArchivesViaAgent(agentClient, archivePaths,
+						excludedNames, &scanArchiveCounter, intervalMs)
+				}
 			}
 			atomic.StoreInt32(&archiveScanDone, 1)
 		}()
@@ -760,8 +766,20 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 					actions = append(actions, archiveActions...)
 				}
 			} else {
-				// Dest is remote: scan archives via agent
-				archiveActions, archiveErr := scanArchivesViaAgent(agentClient, archivePaths, excludedNames,
+				// Dest is remote: scan archives via agent. The walk either already ran
+				// alongside the source scan, or has to happen now.
+				wgArchiveWalk.Wait()
+				if archiveWalkErr != nil {
+					return fmt.Errorf("error scanning archive paths: %+v", archiveWalkErr)
+				}
+				if !prewalkArchives {
+					archiveWalks, archiveWalkErr = walkArchivesViaAgent(agentClient, archivePaths,
+						excludedNames, &scanArchiveCounter, intervalMs)
+					if archiveWalkErr != nil {
+						return fmt.Errorf("error scanning archive paths: %+v", archiveWalkErr)
+					}
+				}
+				archiveActions, archiveErr := scanArchivesViaAgent(agentClient, archiveWalks,
 					unmatchedOrphans, knownOrphanDigests, digestFn, sourceFiles, destDirPath, useReflink,
 					progressFrequency)
 				if archiveErr != nil {
@@ -888,9 +906,36 @@ func batchDigestLocal(basePath string, files []string, counter *int32) (map[stri
 	return service.BatchDigestsParallel(nil, basePath, files, counter), nil
 }
 
+// walkArchivesViaAgent walks archive paths on the remote destination, the counterpart of
+// service.WalkArchives for a remote destination.
+//
+// counter reflects the path currently being walked, since the agent reports each walk's
+// own count — with several archive paths it restarts per path.
+func walkArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string,
+	excludedNames []string, counter *int32, intervalMs int64,
+) ([]service.ArchiveWalk, error) {
+	walks := make([]service.ArchiveWalk, 0, len(archivePaths))
+	for _, archivePath := range archivePaths {
+		files, _, _, err := agentClient.Walk(archivePath, excludedNames, counter, intervalMs,
+			rsfs.DefaultArchiveOneFileSystem)
+		if err != nil {
+			return nil, fmt.Errorf("error scanning archive %s via agent: %w", archivePath, err)
+		}
+		if len(files) == 0 {
+			// Most likely a mistyped or unmounted path on the remote: worth saying out loud
+			// rather than quietly finding no matches.
+			fmte.PrintfErr("warning: archive path \"%s\" on remote holds no files - is the path correct?\n",
+				archivePath)
+			continue
+		}
+		walks = append(walks, service.ArchiveWalk{Path: archivePath, Files: files})
+	}
+	return walks, nil
+}
+
 // scanArchivesViaAgent scans archive paths on the remote destination via the agent,
 // matching archive files against unmatched orphans by digest.
-func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string, excludedNames []string,
+func scanArchivesViaAgent(agentClient *remote.AgentClient, archiveWalks []service.ArchiveWalk,
 	unmatchedOrphans []string, knownOrphanDigests map[string]entity.FileDigest,
 	digestFn service.OrphanDigestFunc,
 	sourceFiles map[string]entity.FileMeta, destDirPath string, useReflink bool,
@@ -943,24 +988,12 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 	}
 	defer close(archiveScanDone)
 
-	// This function only runs when the destination is the remote side, which means
-	// digestFn hashes the local source. That is what makes it safe to run it alongside an
-	// agent request below: the AgentClient is a single SSH connection and must never carry
-	// two requests at once.
+	// This function only runs when the destination is the remote side, so digestFn hashes
+	// the local source and can run alongside the agent requests below.
 
-	for _, archivePath := range archivePaths {
-		// Walk archive via agent
-		archiveFiles, _, _, walkErr := agentClient.Walk(archivePath, excludedNames, &archiveWalkCounter, intervalMs, rsfs.DefaultArchiveOneFileSystem)
-		if walkErr != nil {
-			return nil, fmt.Errorf("error scanning archive %s via agent: %w", archivePath, walkErr)
-		}
-		if len(archiveFiles) == 0 {
-			// Most likely a mistyped or unmounted path on the remote: worth saying out loud
-			// rather than quietly finding no matches.
-			fmte.PrintfErr("warning: archive path \"%s\" on remote holds no files - is the path correct?\n",
-				archivePath)
-			continue
-		}
+	for _, archiveWalk := range archiveWalks {
+		archivePath, archiveFiles := archiveWalk.Path, archiveWalk.Files
+		atomic.StoreInt32(&archiveWalkCounter, int32(len(archiveFiles)))
 
 		// An archive file is only worth hashing if its extension and size match an orphan
 		// that is still unmatched, and only those orphans need a digest.
