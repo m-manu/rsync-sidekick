@@ -779,9 +779,24 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 						return fmt.Errorf("error scanning archive paths: %+v", archiveWalkErr)
 					}
 				}
+				// Matches can be applied while the scan continues, as long as the connection
+				// can carry the perform requests alongside the hashing ones.
+				var appliedArchiveActions int
+				var onArchiveAction service.ArchiveActionFunc
+				flushArchiveActions := func() error { return nil }
+				if outputScriptPath == "" && !dryRun && agentClient.IsConcurrent() {
+					onArchiveAction, flushArchiveActions = newRemoteArchiveActionStreamer(
+						agentClient.Perform, dryRun, &appliedArchiveActions)
+				}
 				archiveActions, archiveErr := scanArchivesViaAgent(agentClient, archiveWalks,
-					unmatchedOrphans, knownOrphanDigests, digestFn, sourceFiles, destDirPath, useReflink,
-					progressFrequency)
+					unmatchedOrphans, knownOrphanDigests, digestFn, onArchiveAction,
+					sourceFiles, destDirPath, useReflink, progressFrequency)
+				if archiveErr == nil {
+					archiveErr = flushArchiveActions()
+				}
+				if appliedArchiveActions > 0 {
+					fmte.Printf("Applied %d actions from archive paths while scanning\n", appliedArchiveActions)
+				}
 				if archiveErr != nil {
 					return fmt.Errorf("error scanning archives via agent: %+v", archiveErr)
 				}
@@ -935,9 +950,21 @@ func walkArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 
 // scanArchivesViaAgent scans archive paths on the remote destination via the agent,
 // matching archive files against unmatched orphans by digest.
+// emitArchiveAction hands an action to onAction, or collects it when there is none.
+// Mirrors what the local archive scan does, so a streamed action is never also returned.
+func emitArchiveAction(a action.SyncAction, onAction service.ArchiveActionFunc,
+	collected *[]action.SyncAction,
+) error {
+	if onAction == nil {
+		*collected = append(*collected, a)
+		return nil
+	}
+	return onAction(a)
+}
+
 func scanArchivesViaAgent(agentClient *remote.AgentClient, archiveWalks []service.ArchiveWalk,
 	unmatchedOrphans []string, knownOrphanDigests map[string]entity.FileDigest,
-	digestFn service.OrphanDigestFunc,
+	digestFn service.OrphanDigestFunc, onAction service.ArchiveActionFunc,
 	sourceFiles map[string]entity.FileMeta, destDirPath string, useReflink bool,
 	progressFrequency time.Duration,
 ) ([]action.SyncAction, error) {
@@ -1083,7 +1110,9 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archiveWalks []servic
 						AbsoluteDirPath: destDirPath + "/" + parentDir,
 					}
 					if !uniqueness.Contains(mkdirAction.Uniqueness()) {
-						actions = append(actions, mkdirAction)
+						if err := emitArchiveAction(mkdirAction, onAction, &actions); err != nil {
+							return nil, err
+						}
 						uniqueness.Add(mkdirAction.Uniqueness())
 					}
 					copyAction := action.CopyFileAction{
@@ -1093,7 +1122,9 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archiveWalks []servic
 						UseReflink:    useReflink,
 					}
 					if !uniqueness.Contains(copyAction.Uniqueness()) {
-						actions = append(actions, copyAction)
+						if err := emitArchiveAction(copyAction, onAction, &actions); err != nil {
+							return nil, err
+						}
 						uniqueness.Add(copyAction.Uniqueness())
 						matchedOrphans.Add(orphan)
 					}
@@ -1267,13 +1298,9 @@ func parentPath(relPath string) string {
 	return "."
 }
 
-func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.SyncAction, destDirPath string, dryRun bool) error {
-	if dryRun {
-		fmte.Printf("Simulating sync actions at destination (dry run)...\n")
-	} else {
-		fmte.Printf("Applying sync actions at destination via remote agent...\n")
-	}
-
+// actionSpecs translates actions into what the agent protocol carries. Order is kept:
+// the agent performs them in this order, and a copy may depend on a directory before it.
+func actionSpecs(actions []action.SyncAction) []remote.ActionSpec {
 	specs := make([]remote.ActionSpec, 0, len(actions))
 	for _, a := range actions {
 		switch act := a.(type) {
@@ -1306,6 +1333,62 @@ func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.Sy
 			})
 		}
 	}
+	return specs
+}
+
+// performRemoteFunc executes a batch of actions on the remote side, in the given order.
+type performRemoteFunc func(specs []remote.ActionSpec, dryRun bool) ([]remote.ActionResult, error)
+
+// newRemoteArchiveActionStreamer applies archive matches on a remote destination while the
+// scan is still running, so an interrupted run keeps what it already copied.
+//
+// Unlike the local streamer this batches: every action on its own would be a round-trip
+// over the ssh connection. A batch is sent once it reaches remoteActionBatchSize, and the
+// returned flush sends the remainder. Needs a connection that correlates by request ID,
+// since the hashing requests are in flight at the same time.
+func newRemoteArchiveActionStreamer(perform performRemoteFunc, dryRun bool,
+	applied *int,
+) (onAction service.ArchiveActionFunc, flush func() error) {
+	const remoteActionBatchSize = 64
+	var batch []action.SyncAction
+
+	send := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		results, err := perform(actionSpecs(batch), dryRun)
+		if err != nil {
+			return fmt.Errorf("remote perform failed: %w", err)
+		}
+		for i, result := range results {
+			if !result.Success {
+				return fmt.Errorf("error performing \"%s\": %s", batch[i].UnixCommand(), result.Error)
+			}
+		}
+		*applied += len(batch)
+		batch = batch[:0]
+		return nil
+	}
+
+	return func(a action.SyncAction) error {
+			batch = append(batch, a)
+			if len(batch) < remoteActionBatchSize {
+				return nil
+			}
+			return send()
+		}, func() error {
+			return send()
+		}
+}
+
+func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.SyncAction, destDirPath string, dryRun bool) error {
+	if dryRun {
+		fmte.Printf("Simulating sync actions at destination (dry run)...\n")
+	} else {
+		fmte.Printf("Applying sync actions at destination via remote agent...\n")
+	}
+
+	specs := actionSpecs(actions)
 
 	start := time.Now()
 	results, err := agentClient.Perform(specs, dryRun)
