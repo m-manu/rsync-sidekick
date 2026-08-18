@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cmp"
 	"encoding/csv"
 	"fmt"
 	"os"
@@ -293,6 +294,37 @@ func PickBestCandidate(candidates []string, orphanPath string, sourceFiles map[s
 	return candidates[0]
 }
 
+// ArchiveScanProgress carries the counters an archive scan advances while it runs.
+// Callers read them atomically to print progress; a nil *ArchiveScanProgress is fine.
+type ArchiveScanProgress struct {
+	FilesFound   int32 // archive files seen while walking
+	FilesChecked int32 // archive files compared against the orphan index
+	FilesHashed  int32 // archive files that turned out to be candidates and were hashed
+	Matches      int32 // orphans matched to an archive file
+}
+
+// sortForLocality orders relPaths so hashing reads the disk in one direction: by inode
+// where that is available, by path otherwise. Both beat the caller's starting point,
+// since iterating a Go map yields a random order — the worst case for a spinning disk.
+// fsys non-nil means the files are remote, where inodes aren't worth the round-trips.
+func sortForLocality(basePath string, relPaths []string, fsys rsfs.FileSystem) {
+	slices.Sort(relPaths)
+	if fsys != nil {
+		return
+	}
+	inodes := make(map[string]uint64, len(relPaths))
+	for _, relPath := range relPaths {
+		inode, ok := fileInode(filepath.Join(basePath, relPath))
+		if !ok {
+			return // keep the path order already applied
+		}
+		inodes[relPath] = inode
+	}
+	slices.SortFunc(relPaths, func(a, b string) int {
+		return cmp.Compare(inodes[a], inodes[b])
+	})
+}
+
 // OrphanDigestFunc computes digests for the given orphan relative paths on demand.
 // ScanArchivesForCopiesWithDigests calls it only for orphans that an archive path can
 // actually match, so callers must not assume it is invoked for every orphan.
@@ -364,15 +396,21 @@ func getParallelism(n int) (int, int) {
 // therefore obtained lazily — knownOrphanDigests is consulted first, and digestFn is
 // called only for the orphans an archive path can actually match. Hashing every orphan
 // up front is what made this phase dominate the runtime on large trees.
+//
+// Per archive path the two sides are hashed concurrently: the archive candidates and the
+// orphan digests still missing don't depend on each other.
 func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[string],
 	unmatchedOrphans []string, knownOrphanDigests map[string]entity.FileDigest,
 	digestFn OrphanDigestFunc,
 	sourceFiles map[string]entity.FileMeta,
 	destDirPath string, useReflink bool, destFS rsfs.FileSystem,
-	archiveWalkCounter *int32, archiveScanCounter *int32, archiveMatchCounter *int32,
+	progress *ArchiveScanProgress,
 ) ([]action.SyncAction, error) {
 	if len(unmatchedOrphans) == 0 || len(archivePaths) == 0 {
 		return nil, nil
+	}
+	if progress == nil {
+		progress = &ArchiveScanProgress{}
 	}
 
 	// Local copy: the caller's map must not be mutated, and lazily computed digests are
@@ -404,68 +442,95 @@ func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[
 		var archiveFiles map[string]entity.FileMeta
 		var err error
 		if destFS != nil {
-			archiveFiles, _, err = FindFilesFromDirectoryWithFS(destFS, archivePath, exclusions, archiveWalkCounter)
+			archiveFiles, _, err = FindFilesFromDirectoryWithFS(destFS, archivePath, exclusions, &progress.FilesFound)
 		} else {
 			fsys := rsfs.NewLocalFSForArchive()
-			archiveFiles, _, err = FindFilesFromDirectoryWithFS(fsys, archivePath, exclusions, archiveWalkCounter)
+			archiveFiles, _, err = FindFilesFromDirectoryWithFS(fsys, archivePath, exclusions, &progress.FilesFound)
 			fsys.Close()
 		}
 		if err != nil {
 			return nil, fmt.Errorf("error scanning archive %s: %w", archivePath, err)
 		}
 
-		// Hash only the orphans this archive path can possibly match.
-		if digestFn != nil {
-			var needed []string
-			for archiveRelPath, archiveMeta := range archiveFiles {
-				k := orphanKey{ext: lib.GetFileExt(archiveRelPath), size: archiveMeta.Size}
-				for _, orphan := range orphansByKey[k] {
-					if matchedOrphans.Contains(orphan) || requestedDigests.Contains(orphan) {
-						continue
-					}
-					if _, known := orphanDigests[orphan]; known {
-						continue
-					}
-					requestedDigests.Add(orphan)
-					needed = append(needed, orphan)
-				}
-			}
-			if len(needed) > 0 {
-				// Sorted for deterministic batches and for locality while hashing.
-				slices.Sort(needed)
-				freshDigests, digestErr := digestFn(needed)
-				if digestErr != nil {
-					return nil, fmt.Errorf("error computing digests of %d orphan candidate(s): %w",
-						len(needed), digestErr)
-				}
-				for orphan, digest := range freshDigests {
-					orphanDigests[orphan] = digest
-				}
-			}
+		// An archive file is worth hashing only if its extension and size match an orphan
+		// that is still unmatched. Everything else never reaches a digest comparison.
+		type archiveCandidate struct {
+			relPath string
+			orphans []string
 		}
-
+		var candidates []archiveCandidate
+		var neededOrphans []string
 		for archiveRelPath, archiveMeta := range archiveFiles {
-			if archiveScanCounter != nil {
-				atomic.AddInt32(archiveScanCounter, 1)
-			}
+			atomic.AddInt32(&progress.FilesChecked, 1)
 			k := orphanKey{ext: lib.GetFileExt(archiveRelPath), size: archiveMeta.Size}
 			orphans, ok := orphansByKey[k]
 			if !ok {
 				continue
 			}
-
-			archiveAbsPath := filepath.Join(archivePath, archiveRelPath)
-			var archiveDigest entity.FileDigest
-			if destFS != nil {
-				archiveDigest, err = GetDigestWithFS(destFS, archiveAbsPath)
-			} else {
-				archiveDigest, err = GetDigest(archiveAbsPath)
+			pending := make([]string, 0, len(orphans))
+			for _, orphan := range orphans {
+				if matchedOrphans.Contains(orphan) {
+					continue
+				}
+				pending = append(pending, orphan)
+				if digestFn == nil || requestedDigests.Contains(orphan) {
+					continue
+				}
+				if _, known := orphanDigests[orphan]; known {
+					continue
+				}
+				requestedDigests.Add(orphan)
+				neededOrphans = append(neededOrphans, orphan)
 			}
-			if err != nil {
+			if len(pending) == 0 {
+				// Every orphan of this size and extension is already served.
 				continue
 			}
+			candidates = append(candidates, archiveCandidate{relPath: archiveRelPath, orphans: pending})
+		}
+		if len(candidates) == 0 {
+			continue
+		}
 
-			for _, orphan := range orphans {
+		candidatePaths := make([]string, 0, len(candidates))
+		for _, candidate := range candidates {
+			candidatePaths = append(candidatePaths, candidate.relPath)
+		}
+		sortForLocality(archivePath, candidatePaths, destFS)
+		slices.Sort(neededOrphans) // deterministic batches for digestFn
+
+		// Both sides are independent, so hash them at the same time.
+		var archiveDigests, freshOrphanDigests map[string]entity.FileDigest
+		var orphanDigestErr error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			archiveDigests = BatchDigestsParallel(destFS, archivePath, candidatePaths, &progress.FilesHashed)
+		}()
+		go func() {
+			defer wg.Done()
+			if len(neededOrphans) > 0 {
+				freshOrphanDigests, orphanDigestErr = digestFn(neededOrphans)
+			}
+		}()
+		wg.Wait()
+		if orphanDigestErr != nil {
+			return nil, fmt.Errorf("error computing digests of %d orphan candidate(s): %w",
+				len(neededOrphans), orphanDigestErr)
+		}
+		for orphan, digest := range freshOrphanDigests {
+			orphanDigests[orphan] = digest
+		}
+
+		for _, candidate := range candidates {
+			archiveRelPath := candidate.relPath
+			archiveDigest, hashed := archiveDigests[archiveRelPath]
+			if !hashed {
+				continue
+			}
+			archiveAbsPath := filepath.Join(archivePath, archiveRelPath)
+			for _, orphan := range candidate.orphans {
 				if matchedOrphans.Contains(orphan) {
 					continue
 				}
@@ -499,9 +564,7 @@ func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[
 						actions = append(actions, copyAction)
 						uniqueness.Add(copyAction.Uniqueness())
 						matchedOrphans.Add(orphan)
-						if archiveMatchCounter != nil {
-							atomic.AddInt32(archiveMatchCounter, 1)
-						}
+						atomic.AddInt32(&progress.Matches, 1)
 					}
 				}
 			}

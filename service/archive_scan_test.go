@@ -10,6 +10,7 @@ import (
 	set "github.com/deckarep/golang-set/v2"
 	"github.com/m-manu/rsync-sidekick/v2/action"
 	"github.com/m-manu/rsync-sidekick/v2/entity"
+	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -82,13 +83,13 @@ func copyActions(actions []action.SyncAction) []action.CopyFileAction {
 func TestScanArchives_HashesOnlyOrphansAnArchiveCanMatch(t *testing.T) {
 	f := newArchiveScanFixture(t)
 	var requested []string
-	var walkCounter, scanCounter, matchCounter int32
+	var progress ArchiveScanProgress
 
 	actions, err := ScanArchivesForCopiesWithDigests(
 		[]string{f.archiveDir}, set.NewSet[string](),
 		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested),
 		f.sourceFiles, f.destDir, false, nil,
-		&walkCounter, &scanCounter, &matchCounter,
+		&progress,
 	)
 	require.NoError(t, err)
 
@@ -99,8 +100,58 @@ func TestScanArchives_HashesOnlyOrphansAnArchiveCanMatch(t *testing.T) {
 	require.Len(t, copies, 1, "expected exactly one copy action, got actions: %+v", actions)
 	assert.Equal(t, filepath.Join(f.archiveDir, "copy-of-match.txt"), copies[0].AbsSourcePath)
 	assert.Equal(t, filepath.Join(f.destDir, "match.txt"), copies[0].AbsDestPath)
-	assert.EqualValues(t, 1, matchCounter, "match counter should count the single match")
-	assert.EqualValues(t, 1, walkCounter, "walk counter should count the single archive file")
+	assert.EqualValues(t, 1, progress.Matches, "one orphan was matched")
+	assert.EqualValues(t, 1, progress.FilesFound, "the archive holds a single file")
+	assert.EqualValues(t, 1, progress.FilesChecked, "that file was checked against the orphan index")
+	assert.EqualValues(t, 1, progress.FilesHashed, "and it was a candidate, so it was hashed")
+}
+
+func TestScanArchives_SkipsArchiveFilesWhoseOrphansAreServed(t *testing.T) {
+	f := newArchiveScanFixture(t)
+	// A second archive file with the same extension and size as the first. Once the only
+	// orphan of that size is matched, the second file must not be hashed at all.
+	require.NoError(t, os.WriteFile(filepath.Join(f.archiveDir, "another-copy.txt"),
+		[]byte("hello world"), 0o644))
+
+	var requested []string
+	var progress ArchiveScanProgress
+	actions, err := ScanArchivesForCopiesWithDigests(
+		[]string{f.archiveDir}, set.NewSet[string](),
+		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested),
+		f.sourceFiles, f.destDir, false, nil,
+		&progress,
+	)
+	require.NoError(t, err)
+
+	require.Len(t, copyActions(actions), 1,
+		"one orphan can only be served once, got actions: %+v", actions)
+	assert.EqualValues(t, 2, progress.FilesFound, "both archive files were walked")
+	assert.EqualValues(t, 1, progress.Matches)
+}
+
+func TestScanArchives_SkipsSecondArchivePathOnceOrphansAreServed(t *testing.T) {
+	f := newArchiveScanFixture(t)
+	// A second archive path that could serve the same orphan.
+	secondArchive := filepath.Join(t.TempDir(), "archive2")
+	require.NoError(t, os.MkdirAll(secondArchive, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(secondArchive, "yet-another.txt"),
+		[]byte("hello world"), 0o644))
+
+	var requested []string
+	var progress ArchiveScanProgress
+	actions, err := ScanArchivesForCopiesWithDigests(
+		[]string{f.archiveDir, secondArchive}, set.NewSet[string](),
+		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested),
+		f.sourceFiles, f.destDir, false, nil,
+		&progress,
+	)
+	require.NoError(t, err)
+
+	require.Len(t, copyActions(actions), 1, "got actions: %+v", actions)
+	assert.EqualValues(t, 1, progress.FilesHashed,
+		"the second archive path holds nothing unserved, so nothing more may be hashed")
+	assert.Equal(t, []string{"match.txt"}, requested,
+		"the orphan digest must be requested once, not once per archive path")
 }
 
 func TestScanArchives_ReusesKnownDigestsWithoutHashing(t *testing.T) {
@@ -110,12 +161,12 @@ func TestScanArchives_ReusesKnownDigestsWithoutHashing(t *testing.T) {
 	known := map[string]entity.FileDigest{"match.txt": knownDigest}
 
 	var requested []string
-	var walkCounter, scanCounter, matchCounter int32
+	var progress ArchiveScanProgress
 	actions, err := ScanArchivesForCopiesWithDigests(
 		[]string{f.archiveDir}, set.NewSet[string](),
 		f.orphans, known, recordingDigestFn(f.sourceDir, &requested),
 		f.sourceFiles, f.destDir, false, nil,
-		&walkCounter, &scanCounter, &matchCounter,
+		&progress,
 	)
 	require.NoError(t, err)
 
@@ -128,13 +179,13 @@ func TestScanArchives_DoesNotMutateCallersDigestMap(t *testing.T) {
 	f := newArchiveScanFixture(t)
 	known := map[string]entity.FileDigest{}
 	var requested []string
-	var walkCounter, scanCounter, matchCounter int32
+	var progress ArchiveScanProgress
 
 	_, err := ScanArchivesForCopiesWithDigests(
 		[]string{f.archiveDir}, set.NewSet[string](),
 		f.orphans, known, recordingDigestFn(f.sourceDir, &requested),
 		f.sourceFiles, f.destDir, false, nil,
-		&walkCounter, &scanCounter, &matchCounter,
+		&progress,
 	)
 	require.NoError(t, err)
 	assert.Empty(t, known, "lazily computed digests must not leak into the caller's map")
@@ -142,14 +193,14 @@ func TestScanArchives_DoesNotMutateCallersDigestMap(t *testing.T) {
 
 func TestScanArchives_WithoutDigestFnFallsBackToKnownDigests(t *testing.T) {
 	f := newArchiveScanFixture(t)
-	var walkCounter, scanCounter, matchCounter int32
+	var progress ArchiveScanProgress
 
 	// No digest function and no known digests: nothing can be compared, so no copies.
 	actions, err := ScanArchivesForCopiesWithDigests(
 		[]string{f.archiveDir}, set.NewSet[string](),
 		f.orphans, nil, nil,
 		f.sourceFiles, f.destDir, false, nil,
-		&walkCounter, &scanCounter, &matchCounter,
+		&progress,
 	)
 	require.NoError(t, err)
 	assert.Empty(t, copyActions(actions), "without any digests there is nothing to match")
@@ -179,6 +230,44 @@ func TestBatchDigestsParallel_MatchesSequentialDigests(t *testing.T) {
 	assert.Equal(t, expected, actual, "parallel digests must equal sequentially computed ones")
 	assert.EqualValues(t, len(relPaths), counter,
 		"counter must advance once per file, including the one that failed")
+}
+
+func TestSortForLocality_OrdersByInodeAndKeepsTheSameSet(t *testing.T) {
+	dir := t.TempDir()
+	var relPaths []string
+	for i := 0; i < 16; i++ {
+		rel := "file-" + strconv.Itoa(i) + ".txt"
+		require.NoError(t, os.WriteFile(filepath.Join(dir, rel), []byte(strconv.Itoa(i)), 0o644))
+		relPaths = append(relPaths, rel)
+	}
+	// Start from an order that is neither sorted by name nor by inode.
+	sort.Sort(sort.Reverse(sort.StringSlice(relPaths)))
+	before := append([]string(nil), relPaths...)
+
+	sortForLocality(dir, relPaths, nil)
+
+	assert.ElementsMatch(t, before, relPaths, "sorting must not add or drop paths")
+	inodes := make([]uint64, 0, len(relPaths))
+	for _, rel := range relPaths {
+		inode, ok := fileInode(filepath.Join(dir, rel))
+		require.True(t, ok, "inode of %s", rel)
+		inodes = append(inodes, inode)
+	}
+	assert.IsIncreasing(t, inodes, "files must be ordered by inode, got %v", inodes)
+}
+
+func TestSortForLocality_FallsBackToPathOrderForRemoteFS(t *testing.T) {
+	relPaths := []string{"c.txt", "a.txt", "b.txt"}
+	// A non-nil FileSystem means remote, where inodes aren't fetched.
+	sortForLocality("/base", relPaths, rsfs.NewLocalFS())
+	assert.Equal(t, []string{"a.txt", "b.txt", "c.txt"}, relPaths)
+}
+
+func TestSortForLocality_KeepsPathOrderWhenInodeUnavailable(t *testing.T) {
+	// Paths that don't exist: no inode can be read, so the path order must survive.
+	relPaths := []string{"c.txt", "a.txt", "b.txt"}
+	sortForLocality(t.TempDir(), relPaths, nil)
+	assert.Equal(t, []string{"a.txt", "b.txt", "c.txt"}, relPaths)
 }
 
 func TestComputeSyncActions_ReturnsOrphanDigestsForReuse(t *testing.T) {
