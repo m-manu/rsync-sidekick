@@ -787,7 +787,10 @@ func startArchiveScanProgress(progress *service.ArchiveScanProgress,
 			case <-done:
 				return
 			case <-ticker.C:
-				fmte.Printf("Scanning archives: %d files found, %d checked, %d hashed, %d matched...\n",
+				// Archives are always on the destination side; the orphan digests running
+				// alongside are on the source side. Label both so the two interleaved
+				// progress lines are telling apart at a glance.
+				fmte.Printf("DST: Scanning archives: %d files found, %d checked, %d hashed, %d matched...\n",
 					atomic.LoadInt32(&progress.FilesFound),
 					atomic.LoadInt32(&progress.FilesChecked),
 					atomic.LoadInt32(&progress.FilesHashed),
@@ -806,7 +809,7 @@ func startArchiveScanProgress(progress *service.ArchiveScanProgress,
 func withDigestProgress(count int, progressFrequency time.Duration,
 	compute func(counter *int32) (map[string]entity.FileDigest, error),
 ) (map[string]entity.FileDigest, error) {
-	fmte.Printf("Computing digests of %d orphan candidate(s)...\n", count)
+	fmte.Printf("SRC: Computing digests of %d orphan candidate(s)...\n", count)
 	var counter int32
 	done := make(chan struct{})
 	if progressFrequency > 0 {
@@ -818,7 +821,7 @@ func withDigestProgress(count int, progressFrequency time.Duration,
 				case <-done:
 					return
 				case <-ticker.C:
-					fmte.Printf("Computing orphan digests: %d / %d...\n",
+					fmte.Printf("SRC: Computing orphan digests: %d / %d...\n",
 						atomic.LoadInt32(&counter), count)
 				}
 			}
@@ -880,7 +883,7 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 				case <-archiveScanDone:
 					return
 				case <-ticker.C:
-					fmte.Printf("Scanning archives on remote: %d files found, %d checked, %d hashed...\n",
+					fmte.Printf("DST: Scanning archives (remote): %d files found, %d checked, %d hashed...\n",
 						atomic.LoadInt32(&archiveWalkCounter),
 						atomic.LoadInt32(&archiveCheckCounter),
 						atomic.LoadInt32(&archiveDigestCounter))
@@ -900,6 +903,13 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 		archiveFiles, _, _, walkErr := agentClient.Walk(archivePath, excludedNames, &archiveWalkCounter, intervalMs, rsfs.DefaultArchiveOneFileSystem)
 		if walkErr != nil {
 			return nil, fmt.Errorf("error scanning archive %s via agent: %w", archivePath, walkErr)
+		}
+		if len(archiveFiles) == 0 {
+			// Most likely a mistyped or unmounted path on the remote: worth saying out loud
+			// rather than quietly finding no matches.
+			fmte.PrintfErr("warning: archive path \"%s\" on remote holds no files - is the path correct?\n",
+				archivePath)
+			continue
 		}
 
 		// An archive file is only worth hashing if its extension and size match an orphan

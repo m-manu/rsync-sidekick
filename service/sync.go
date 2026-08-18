@@ -309,6 +309,20 @@ func WalkArchives(archivePaths []string, exclusions set.Set[string], destFS rsfs
 ) ([]ArchiveWalk, error) {
 	walks := make([]ArchiveWalk, 0, len(archivePaths))
 	for _, archivePath := range archivePaths {
+		readable := false
+		if destFS != nil {
+			readable = destFS.IsReadableDirectory(archivePath)
+		} else {
+			readable = lib.IsReadableDirectory(archivePath)
+		}
+		if !readable {
+			// A single mistyped or unmounted --archive-path must not abort the run, but it
+			// has to be loud: silently contributing nothing looks like "no matches found".
+			fmte.PrintfErr("warning: archive path \"%s\" is not a readable directory - skipping it\n",
+				archivePath)
+			continue
+		}
+
 		var files map[string]entity.FileMeta
 		var err error
 		if destFS != nil {

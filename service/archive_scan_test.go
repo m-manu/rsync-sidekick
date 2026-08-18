@@ -160,14 +160,18 @@ func TestWalkArchives_KeepsPathOrderAndCounts(t *testing.T) {
 	assert.EqualValues(t, 3, counter, "counter must cover files from all archive paths")
 }
 
-func TestWalkArchives_MissingPathIsSkippedNotFatal(t *testing.T) {
-	// A missing archive path is skipped with a warning, as directory walking has always
-	// done — a typo in one --archive-path must not abort the whole run.
-	walks, err := WalkArchives([]string{filepath.Join(t.TempDir(), "does-not-exist")},
-		set.NewSet[string](), nil, nil)
+func TestWalkArchives_MissingPathIsWarnedAndSkipped(t *testing.T) {
+	f := newArchiveScanFixture(t)
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+
+	// A typo in one --archive-path must not abort the run: the path is dropped with a
+	// warning and the remaining paths are still walked.
+	walks, err := WalkArchives([]string{missing, f.archiveDir}, set.NewSet[string](), nil, nil)
+
 	require.NoError(t, err)
-	require.Len(t, walks, 1)
-	assert.Empty(t, walks[0].Files, "a missing path contributes no files")
+	require.Len(t, walks, 1, "the unreadable path must be dropped, got %+v", walks)
+	assert.Equal(t, f.archiveDir, walks[0].Path)
+	assert.Len(t, walks[0].Files, 1, "the readable path must still be walked")
 }
 
 func TestScanArchives_SkipsSecondArchivePathOnceOrphansAreServed(t *testing.T) {

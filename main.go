@@ -21,7 +21,7 @@ import (
 const (
 	applicationMajorVersion = 2
 	applicationMinorVersion = 1
-	applicationPatchVersion = 6
+	applicationPatchVersion = 7
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -40,6 +40,7 @@ const (
 	exitCodeInvalidExclusions
 	exitCodeScriptPathError
 	exitCodeSSHError
+	exitCodeArchivePathError
 )
 
 //go:embed default_exclusions.txt
@@ -372,6 +373,19 @@ func main() {
 	if sourceLoc.IsRemote && destLoc.IsRemote {
 		fmte.PrintfErr("error: only one of source or destination can be remote\n")
 		os.Exit(exitCodeInvalidNumArgs)
+	}
+
+	// Archive paths belong to the destination side, so they can only be checked up front
+	// when that side is local. Checking here — before any scanning starts — is what makes
+	// a typo visible at all: silently skipping one turns instant local reflink copies into
+	// a full transfer over the network, which is not something to bury in a warning.
+	if !destLoc.IsRemote {
+		for _, archivePath := range flags.archivePaths() {
+			if !lib.IsReadableDirectory(archivePath) {
+				fmte.PrintfErr("error: --archive-path \"%s\" is not a readable directory\n", archivePath)
+				os.Exit(exitCodeArchivePathError)
+			}
+		}
 	}
 
 	// Set --one-file-system defaults for LocalFS instances
