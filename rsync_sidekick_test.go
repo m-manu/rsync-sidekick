@@ -405,7 +405,7 @@ func TestCandidateReusedForCopies(t *testing.T) {
 		assert.Equal(t, 2, copyCount, "expected 2 copy actions (candidate reused)")
 
 		// Execute and verify all 3 files end up in destination
-		err = performActions(actions, dstDir, false)
+		err = performActions(actions, dstDir, false, false, 0)
 		stopIfError(t, err)
 
 		assert.FileExists(t, filepath.Join(dstDir, "A", "x"))
@@ -509,7 +509,7 @@ func TestMoveRedirectForCopyActions(t *testing.T) {
 		}
 
 		fmte.Off()
-		err = performActions(actions, dstDir, false)
+		err = performActions(actions, dstDir, false, false, 0)
 		stopIfError(t, err)
 
 		assert.FileExists(t, filepath.Join(dstDir, "A", "x"))
@@ -561,7 +561,7 @@ func TestMoveRedirectForCopyActions(t *testing.T) {
 		}
 
 		fmte.Off()
-		err = performActions(actions, dstDir, false)
+		err = performActions(actions, dstDir, false, false, 0)
 		stopIfError(t, err)
 
 		assert.FileExists(t, filepath.Join(dstDir, "A", "x"))

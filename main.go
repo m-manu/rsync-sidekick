@@ -22,7 +22,7 @@ import (
 const (
 	applicationMajorVersion = 2
 	applicationMinorVersion = 3
-	applicationPatchVersion = 3
+	applicationPatchVersion = 4
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -179,7 +179,7 @@ func setupShellScriptWithNameOpt() {
 
 func setupVerboseOpt() {
 	verbosePtr := flag.BoolP("verbose", "v", false,
-		"generates extra information, even a file dump (caution: makes it slow!)",
+		"logs every single action performed, plus extra information (caution: makes it slow!)",
 	)
 	flags.isVerbose = func() bool {
 		return *verbosePtr

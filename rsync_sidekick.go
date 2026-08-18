@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -301,7 +302,7 @@ func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string
 	if outputScriptPath != "" {
 		return generateScript(actions, outputScriptPath, nil)
 	} else {
-		return performActions(actions, destinationDirPath, dryRun)
+		return performActions(actions, destinationDirPath, dryRun, verbose, progressFrequency)
 	}
 }
 
@@ -396,7 +397,7 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 		}
 		return generateScript(actions, outputScriptPath, sshSpec)
 	}
-	return performActions(actions, destDirPath, dryRun)
+	return performActions(actions, destDirPath, dryRun, verbose, progressFrequency)
 }
 
 // rsyncSidekickRemoteExec handles the remote-execution mode where the agent
@@ -824,11 +825,11 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 	// For remote-execution: actions on the remote side go through the agent
 	if !sourceIsRemote {
 		// Destination is remote: send actions to agent
-		return performActionsViaAgent(agentClient, actions, destDirPath, dryRun)
+		return performActionsViaAgent(agentClient, actions, destDirPath, dryRun, verbose)
 	}
 
 	// Source is remote, destination is local: perform locally
-	return performActions(actions, destDirPath, dryRun)
+	return performActions(actions, destDirPath, dryRun, verbose, progressFrequency)
 }
 
 // newLocalArchiveActionStreamer applies each archive match immediately instead of
@@ -1381,7 +1382,13 @@ func newRemoteArchiveActionStreamer(perform performRemoteFunc, dryRun bool,
 		}
 }
 
-func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.SyncAction, destDirPath string, dryRun bool) error {
+// performActionsViaAgent hands the whole action list to the remote agent at once.
+//
+// The reflink count here is by intent: a reflink that the remote filesystem couldn't do
+// fell back to a full copy on that host, and the agent protocol doesn't report it back.
+func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.SyncAction,
+	destDirPath string, dryRun, verbose bool,
+) error {
 	if dryRun {
 		fmte.Printf("Simulating sync actions at destination (dry run)...\n")
 	} else {
@@ -1397,30 +1404,37 @@ func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.Sy
 		return fmt.Errorf("remote perform failed: %w", err)
 	}
 
+	// The agent performs the whole batch before answering, so there is nothing to report
+	// while it runs: what is left is the breakdown, plus every failure.
+	var stats actionStats
 	successCount := 0
 	for i, r := range results {
-		fmte.Print(strings.Replace(
+		header := strings.Replace(
 			fmt.Sprintf("%4d/%d %s: ", i+1, len(actions), actions[i]),
 			destDirPath+"/", "", -1,
-		))
+		)
 		if r.Success {
-			if dryRun {
-				fmte.Printf("skipping (dry run)\n")
-			} else {
-				fmte.Printf("done\n")
+			stats.record(actions[i], nil)
+			if verbose {
+				if dryRun {
+					fmte.Printf("%sskipping (dry run)\n", header)
+				} else {
+					fmte.Printf("%sdone\n", header)
+				}
 			}
 			successCount++
 		} else {
-			fmte.Printf("failed due to: %s\n", r.Error)
+			stats.record(actions[i], errors.New(r.Error))
+			fmte.PrintfErr("%sfailed due to: %s\n", header, r.Error)
 		}
 	}
 
 	if dryRun {
-		fmte.Printf("Dry run completed in %.1fs: %d actions would be performed\n",
-			end.Sub(start).Seconds(), successCount)
+		fmte.Printf("Dry run completed in %.1fs: %d actions would be performed (%s)\n",
+			end.Sub(start).Seconds(), successCount, stats.summary())
 	} else {
-		fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded\n",
-			end.Sub(start).Seconds(), successCount, len(actions))
+		fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded (%s)\n",
+			end.Sub(start).Seconds(), successCount, len(actions), stats.summary())
 	}
 	return nil
 }
@@ -1434,7 +1448,9 @@ type actionResult struct {
 	dryRun bool
 }
 
-func performActions(actions []action.SyncAction, destinationDirPath string, dryRun bool) error {
+func performActions(actions []action.SyncAction, destinationDirPath string, dryRun, verbose bool,
+	progressFrequency time.Duration,
+) error {
 	if dryRun {
 		fmte.Printf("Simulating sync actions at destination (dry run)...\n")
 	} else {
@@ -1448,7 +1464,11 @@ func performActions(actions []action.SyncAction, destinationDirPath string, dryR
 	total := len(actions)
 	prefixStrip := destinationDirPath + "/"
 
-	// Printer goroutine — does all formatting and stdout I/O
+	var stats actionStats
+	var done atomic.Int64
+
+	// Printer goroutine — does all formatting and stdout I/O. It only sees what is worth
+	// printing: every action under --verbose, and failures always.
 	printCh := make(chan actionResult, 256)
 	var printerDone sync.WaitGroup
 	printerDone.Add(1)
@@ -1459,15 +1479,20 @@ func performActions(actions []action.SyncAction, destinationDirPath string, dryR
 				fmt.Sprintf("%4d/%d %s: ", r.index+1, total, r.action),
 				prefixStrip, "", -1,
 			)
-			if r.dryRun {
+			if r.err != nil {
+				fmte.PrintfErr("%sfailed due to: %+v\n", header, r.err)
+			} else if r.dryRun {
 				fmt.Print(header, "skipping (dry run)\n")
-			} else if r.err == nil {
-				fmt.Print(header, "done\n")
 			} else {
-				fmt.Printf("%sfailed due to: %+v\n", header, r.err)
+				fmt.Print(header, "done\n")
 			}
 		}
 	}()
+
+	stopProgress := func() {}
+	if !verbose {
+		stopProgress = startActionStatsProgress(&stats, &done, total, progressFrequency)
+	}
 
 	// I/O loop — performs actions, sends lightweight results to printer
 	start := time.Now()
@@ -1484,7 +1509,11 @@ func performActions(actions []action.SyncAction, destinationDirPath string, dryR
 			aErr = syncAction.Perform()
 		}
 
-		printCh <- actionResult{index: i, action: syncAction, err: aErr, dryRun: dryRun}
+		stats.record(syncAction, aErr)
+		done.Store(int64(i + 1))
+		if verbose || aErr != nil {
+			printCh <- actionResult{index: i, action: syncAction, err: aErr, dryRun: dryRun}
+		}
 
 		if aErr == nil {
 			successCount++
@@ -1497,16 +1526,17 @@ func performActions(actions []action.SyncAction, destinationDirPath string, dryR
 			}
 		}
 	}
+	stopProgress()
 	close(printCh)
 	printerDone.Wait()
 	end := time.Now()
 
 	if dryRun {
-		fmte.Printf("Dry run completed in %.1fs: %d actions would be performed\n",
-			end.Sub(start).Seconds(), successCount)
+		fmte.Printf("Dry run completed in %.1fs: %d actions would be performed (%s)\n",
+			end.Sub(start).Seconds(), successCount, stats.summary())
 	} else {
-		fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded\n",
-			end.Sub(start).Seconds(), successCount, total)
+		fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded (%s)\n",
+			end.Sub(start).Seconds(), successCount, total, stats.summary())
 	}
 	return nil
 }

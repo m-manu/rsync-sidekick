@@ -88,6 +88,7 @@ const ficlone = 0x40049409
 func reflinkCopy(src, dst string, mode os.FileMode) error {
 	mp := mountpointForPath(dst)
 	if supported, ok := reflinkSupport.Load(mp); ok && !supported.(bool) {
+		reflinkFallbacks.Add(1)
 		return regularCopyWithMode(src, dst, mode)
 	}
 
@@ -107,6 +108,7 @@ func reflinkCopy(src, dst string, mode os.FileMode) error {
 		dstFile.Close()
 		os.Remove(dst)
 		reflinkSupport.Store(mp, false)
+		reflinkFallbacks.Add(1)
 		return regularCopyWithMode(src, dst, mode)
 	}
 
