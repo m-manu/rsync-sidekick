@@ -60,8 +60,10 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		}
 		atomic.StoreInt32(&sourceScanDone, 1)
 	}()
+	destWalkDone := make(chan struct{})
 	go func() {
 		defer wgDirScan.Done()
+		defer close(destWalkDone)
 		if destFS != nil {
 			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectoryWithFS(destFS, destinationDirPath, exclusions, &scanDestCounter)
 		} else {
@@ -69,6 +71,26 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		}
 		atomic.StoreInt32(&destScanDone, 1)
 	}()
+
+	// Archive paths sit on the destination side, so walking them competes with the
+	// destination scan but not with the source scan. Start as soon as the destination is
+	// done and let it run alongside the (often much longer) source scan.
+	var archiveWalks []service.ArchiveWalk
+	var archiveWalkErr error
+	var scanArchiveCounter, archiveScanDone int32
+	var wgArchiveWalk sync.WaitGroup
+	if len(archivePaths) > 0 {
+		wgArchiveWalk.Add(1)
+		go func() {
+			defer wgArchiveWalk.Done()
+			<-destWalkDone
+			if destinationFilesErr == nil {
+				archiveWalks, archiveWalkErr = service.WalkArchives(archivePaths, exclusions, destFS,
+					&scanArchiveCounter)
+			}
+			atomic.StoreInt32(&archiveScanDone, 1)
+		}()
+	}
 	scanDone := make(chan struct{})
 	if progressFrequency > 0 {
 		go func() {
@@ -87,15 +109,32 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 					if atomic.LoadInt32(&destScanDone) == 1 {
 						dstFinished = " [FINISHED]"
 					}
-					fmte.Printf("Scanning files: %d at source%s, %d at destination%s...\n",
+					if len(archivePaths) == 0 {
+						fmte.Printf("Scanning files: %d at source%s, %d at destination%s...\n",
+							atomic.LoadInt32(&scanSourceCounter), srcFinished,
+							atomic.LoadInt32(&scanDestCounter), dstFinished)
+						continue
+					}
+					archFinished := ""
+					if atomic.LoadInt32(&archiveScanDone) == 1 {
+						archFinished = " [FINISHED]"
+					}
+					fmte.Printf("Scanning files: %d at source%s, %d at destination%s, %d in archives%s...\n",
 						atomic.LoadInt32(&scanSourceCounter), srcFinished,
-						atomic.LoadInt32(&scanDestCounter), dstFinished)
+						atomic.LoadInt32(&scanDestCounter), dstFinished,
+						atomic.LoadInt32(&scanArchiveCounter), archFinished)
 				}
 			}
 		}()
 	}
+	// Reporting outlives the source and destination scans: the archive walk deliberately
+	// keeps running into the next phase.
+	go func() {
+		wgDirScan.Wait()
+		wgArchiveWalk.Wait()
+		close(scanDone)
+	}()
 	wgDirScan.Wait()
-	close(scanDone)
 	end = time.Now()
 	if sourceFilesErr != nil {
 		return nil, fmt.Errorf("error scanning source directory: %+v", sourceFilesErr)
@@ -198,10 +237,16 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 						return service.BatchDigestsParallel(sourceFS, sourceDirPath, orphans, counter), nil
 					})
 			}
+			// The walk started back during the destination scan; collect it now.
+			wgArchiveWalk.Wait()
+			if archiveWalkErr != nil {
+				return nil, fmt.Errorf("error scanning archive paths: %+v", archiveWalkErr)
+			}
 			var archiveProgress service.ArchiveScanProgress
+			atomic.StoreInt32(&archiveProgress.FilesFound, atomic.LoadInt32(&scanArchiveCounter))
 			stopArchiveProgress := startArchiveScanProgress(&archiveProgress, progressFrequency)
 			archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
-				archivePaths, exclusions, unmatchedOrphans, knownOrphanDigests, digestFn,
+				archiveWalks, unmatchedOrphans, knownOrphanDigests, digestFn,
 				sourceFiles, destinationDirPath, useReflink, destFS,
 				&archiveProgress)
 			stopArchiveProgress()
@@ -382,8 +427,10 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			atomic.StoreInt32(&localScanDone, 1)
 		}
 	}()
+	destWalkDone := make(chan struct{})
 	go func() {
 		defer wgDirScan.Done()
+		defer close(destWalkDone)
 		if sourceIsRemote {
 			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectory(destDirPath, exclusions, &localScanCounter)
 			if destinationFilesErr == nil && syncDirTimestamps {
@@ -395,6 +442,31 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			atomic.StoreInt32(&remoteScanDone, 1)
 		}
 	}()
+
+	// Archive paths are on the destination side, so their walk competes with the
+	// destination scan but not with the source scan: start it as soon as the destination
+	// is done and let it overlap the source scan, which is usually the long one.
+	//
+	// Only done when the destination is local. Were the archives remote, this walk would
+	// go through the agent and could collide with the digest requests of the next phase —
+	// the AgentClient carries one request at a time.
+	prewalkArchives := len(archivePaths) > 0 && sourceIsRemote
+	var archiveWalks []service.ArchiveWalk
+	var archiveWalkErr error
+	var scanArchiveCounter, archiveScanDone int32
+	var wgArchiveWalk sync.WaitGroup
+	if prewalkArchives {
+		wgArchiveWalk.Add(1)
+		go func() {
+			defer wgArchiveWalk.Done()
+			<-destWalkDone
+			if destinationFilesErr == nil {
+				archiveWalks, archiveWalkErr = service.WalkArchives(archivePaths, exclusions, nil,
+					&scanArchiveCounter)
+			}
+			atomic.StoreInt32(&archiveScanDone, 1)
+		}()
+	}
 	scanDone := make(chan struct{})
 	if progressFrequency > 0 {
 		go func() {
@@ -413,21 +485,36 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 					if atomic.LoadInt32(&remoteScanDone) == 1 {
 						remoteFinished = " [FINISHED]"
 					}
+					archives := ""
+					if prewalkArchives {
+						archFinished := ""
+						if atomic.LoadInt32(&archiveScanDone) == 1 {
+							archFinished = " [FINISHED]"
+						}
+						archives = fmt.Sprintf(", %d in archives (local)%s",
+							atomic.LoadInt32(&scanArchiveCounter), archFinished)
+					}
 					if sourceIsRemote {
-						fmte.Printf("Scanning files: %d at source (remote)%s, %d at destination (local)%s...\n",
+						fmte.Printf("Scanning files: %d at source (remote)%s, %d at destination (local)%s%s...\n",
 							atomic.LoadInt32(&remoteScanCounter), remoteFinished,
-							atomic.LoadInt32(&localScanCounter), localFinished)
+							atomic.LoadInt32(&localScanCounter), localFinished, archives)
 					} else {
-						fmte.Printf("Scanning files: %d at source (local)%s, %d at destination (remote)%s...\n",
+						fmte.Printf("Scanning files: %d at source (local)%s, %d at destination (remote)%s%s...\n",
 							atomic.LoadInt32(&localScanCounter), localFinished,
-							atomic.LoadInt32(&remoteScanCounter), remoteFinished)
+							atomic.LoadInt32(&remoteScanCounter), remoteFinished, archives)
 					}
 				}
 			}
 		}()
 	}
+	// Reporting outlives the source and destination scans: the archive walk deliberately
+	// keeps running into the next phase.
+	go func() {
+		wgDirScan.Wait()
+		wgArchiveWalk.Wait()
+		close(scanDone)
+	}()
 	wgDirScan.Wait()
-	close(scanDone)
 	end = time.Now()
 
 	if sourceFilesErr != nil {
@@ -621,11 +708,16 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 					})
 			}
 			if sourceIsRemote {
-				// Dest is local: scan archives locally
+				// Dest is local: the walk already ran alongside the source scan.
+				wgArchiveWalk.Wait()
+				if archiveWalkErr != nil {
+					return fmt.Errorf("error scanning archive paths: %+v", archiveWalkErr)
+				}
 				var archiveProgress service.ArchiveScanProgress
+				atomic.StoreInt32(&archiveProgress.FilesFound, atomic.LoadInt32(&scanArchiveCounter))
 				stopArchiveProgress := startArchiveScanProgress(&archiveProgress, progressFrequency)
 				archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
-					archivePaths, exclusions, unmatchedOrphans, knownOrphanDigests, digestFn,
+					archiveWalks, unmatchedOrphans, knownOrphanDigests, digestFn,
 					sourceFiles, destDirPath, useReflink, nil,
 					&archiveProgress)
 				stopArchiveProgress()

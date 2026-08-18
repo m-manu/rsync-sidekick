@@ -70,6 +70,14 @@ func recordingDigestFn(sourceDir string, requested *[]string) OrphanDigestFunc {
 	}
 }
 
+// walkFixtureArchives pre-walks archive paths the way a caller does before scanning.
+func walkFixtureArchives(t *testing.T, archivePaths ...string) []ArchiveWalk {
+	t.Helper()
+	walks, err := WalkArchives(archivePaths, set.NewSet[string](), nil, nil)
+	require.NoError(t, err, "walking %v", archivePaths)
+	return walks
+}
+
 func copyActions(actions []action.SyncAction) []action.CopyFileAction {
 	var copies []action.CopyFileAction
 	for _, a := range actions {
@@ -86,7 +94,7 @@ func TestScanArchives_HashesOnlyOrphansAnArchiveCanMatch(t *testing.T) {
 	var progress ArchiveScanProgress
 
 	actions, err := ScanArchivesForCopiesWithDigests(
-		[]string{f.archiveDir}, set.NewSet[string](),
+		walkFixtureArchives(t, f.archiveDir),
 		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested),
 		f.sourceFiles, f.destDir, false, nil,
 		&progress,
@@ -101,8 +109,7 @@ func TestScanArchives_HashesOnlyOrphansAnArchiveCanMatch(t *testing.T) {
 	assert.Equal(t, filepath.Join(f.archiveDir, "copy-of-match.txt"), copies[0].AbsSourcePath)
 	assert.Equal(t, filepath.Join(f.destDir, "match.txt"), copies[0].AbsDestPath)
 	assert.EqualValues(t, 1, progress.Matches, "one orphan was matched")
-	assert.EqualValues(t, 1, progress.FilesFound, "the archive holds a single file")
-	assert.EqualValues(t, 1, progress.FilesChecked, "that file was checked against the orphan index")
+	assert.EqualValues(t, 1, progress.FilesChecked, "the archive file was checked against the orphan index")
 	assert.EqualValues(t, 1, progress.FilesHashed, "and it was a candidate, so it was hashed")
 }
 
@@ -116,7 +123,7 @@ func TestScanArchives_SkipsArchiveFilesWhoseOrphansAreServed(t *testing.T) {
 	var requested []string
 	var progress ArchiveScanProgress
 	actions, err := ScanArchivesForCopiesWithDigests(
-		[]string{f.archiveDir}, set.NewSet[string](),
+		walkFixtureArchives(t, f.archiveDir),
 		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested),
 		f.sourceFiles, f.destDir, false, nil,
 		&progress,
@@ -125,8 +132,42 @@ func TestScanArchives_SkipsArchiveFilesWhoseOrphansAreServed(t *testing.T) {
 
 	require.Len(t, copyActions(actions), 1,
 		"one orphan can only be served once, got actions: %+v", actions)
-	assert.EqualValues(t, 2, progress.FilesFound, "both archive files were walked")
-	assert.EqualValues(t, 1, progress.Matches)
+	assert.EqualValues(t, 2, progress.FilesChecked, "both archive files were checked")
+	assert.EqualValues(t, 1, progress.Matches, "the orphan can only be served once")
+	// Both are hashed: within one archive path the candidate list is built before hashing,
+	// so at that point the orphan is still unmatched and both files qualify. Hashing them
+	// as one parallel batch is worth more than serialising to save the second hash.
+	assert.EqualValues(t, 2, progress.FilesHashed)
+}
+
+func TestWalkArchives_KeepsPathOrderAndCounts(t *testing.T) {
+	f := newArchiveScanFixture(t)
+	second := filepath.Join(t.TempDir(), "archive2")
+	require.NoError(t, os.MkdirAll(second, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(second, "a.txt"), []byte("a"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(second, "b.txt"), []byte("b"), 0o644))
+
+	var counter int32
+	walks, err := WalkArchives([]string{f.archiveDir, second}, set.NewSet[string](), nil, &counter)
+	require.NoError(t, err)
+
+	require.Len(t, walks, 2)
+	assert.Equal(t, f.archiveDir, walks[0].Path,
+		"archive paths must stay in the given order — earlier paths serve an orphan first")
+	assert.Equal(t, second, walks[1].Path)
+	assert.Len(t, walks[0].Files, 1)
+	assert.Len(t, walks[1].Files, 2)
+	assert.EqualValues(t, 3, counter, "counter must cover files from all archive paths")
+}
+
+func TestWalkArchives_MissingPathIsSkippedNotFatal(t *testing.T) {
+	// A missing archive path is skipped with a warning, as directory walking has always
+	// done — a typo in one --archive-path must not abort the whole run.
+	walks, err := WalkArchives([]string{filepath.Join(t.TempDir(), "does-not-exist")},
+		set.NewSet[string](), nil, nil)
+	require.NoError(t, err)
+	require.Len(t, walks, 1)
+	assert.Empty(t, walks[0].Files, "a missing path contributes no files")
 }
 
 func TestScanArchives_SkipsSecondArchivePathOnceOrphansAreServed(t *testing.T) {
@@ -140,7 +181,7 @@ func TestScanArchives_SkipsSecondArchivePathOnceOrphansAreServed(t *testing.T) {
 	var requested []string
 	var progress ArchiveScanProgress
 	actions, err := ScanArchivesForCopiesWithDigests(
-		[]string{f.archiveDir, secondArchive}, set.NewSet[string](),
+		walkFixtureArchives(t, f.archiveDir, secondArchive),
 		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested),
 		f.sourceFiles, f.destDir, false, nil,
 		&progress,
@@ -163,7 +204,7 @@ func TestScanArchives_ReusesKnownDigestsWithoutHashing(t *testing.T) {
 	var requested []string
 	var progress ArchiveScanProgress
 	actions, err := ScanArchivesForCopiesWithDigests(
-		[]string{f.archiveDir}, set.NewSet[string](),
+		walkFixtureArchives(t, f.archiveDir),
 		f.orphans, known, recordingDigestFn(f.sourceDir, &requested),
 		f.sourceFiles, f.destDir, false, nil,
 		&progress,
@@ -182,7 +223,7 @@ func TestScanArchives_DoesNotMutateCallersDigestMap(t *testing.T) {
 	var progress ArchiveScanProgress
 
 	_, err := ScanArchivesForCopiesWithDigests(
-		[]string{f.archiveDir}, set.NewSet[string](),
+		walkFixtureArchives(t, f.archiveDir),
 		f.orphans, known, recordingDigestFn(f.sourceDir, &requested),
 		f.sourceFiles, f.destDir, false, nil,
 		&progress,
@@ -197,7 +238,7 @@ func TestScanArchives_WithoutDigestFnFallsBackToKnownDigests(t *testing.T) {
 
 	// No digest function and no known digests: nothing can be compared, so no copies.
 	actions, err := ScanArchivesForCopiesWithDigests(
-		[]string{f.archiveDir}, set.NewSet[string](),
+		walkFixtureArchives(t, f.archiveDir),
 		f.orphans, nil, nil,
 		f.sourceFiles, f.destDir, false, nil,
 		&progress,

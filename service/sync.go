@@ -294,6 +294,38 @@ func PickBestCandidate(candidates []string, orphanPath string, sourceFiles map[s
 	return candidates[0]
 }
 
+// ArchiveWalk holds the files found below one archive path. Archive paths are kept in
+// the order the user gave them, since earlier paths get to serve an orphan first.
+type ArchiveWalk struct {
+	Path  string
+	Files map[string]entity.FileMeta
+}
+
+// WalkArchives scans the archive paths without hashing anything. It is separate from
+// ScanArchivesForCopiesWithDigests so callers can start it as early as they like — the
+// walk only needs the destination side to be free, not the source scan to be finished.
+func WalkArchives(archivePaths []string, exclusions set.Set[string], destFS rsfs.FileSystem,
+	counter *int32,
+) ([]ArchiveWalk, error) {
+	walks := make([]ArchiveWalk, 0, len(archivePaths))
+	for _, archivePath := range archivePaths {
+		var files map[string]entity.FileMeta
+		var err error
+		if destFS != nil {
+			files, _, err = FindFilesFromDirectoryWithFS(destFS, archivePath, exclusions, counter)
+		} else {
+			fsys := rsfs.NewLocalFSForArchive()
+			files, _, err = FindFilesFromDirectoryWithFS(fsys, archivePath, exclusions, counter)
+			fsys.Close()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error scanning archive %s: %w", archivePath, err)
+		}
+		walks = append(walks, ArchiveWalk{Path: archivePath, Files: files})
+	}
+	return walks, nil
+}
+
 // ArchiveScanProgress carries the counters an archive scan advances while it runs.
 // Callers read them atomically to print progress; a nil *ArchiveScanProgress is fine.
 type ArchiveScanProgress struct {
@@ -399,14 +431,17 @@ func getParallelism(n int) (int, int) {
 //
 // Per archive path the two sides are hashed concurrently: the archive candidates and the
 // orphan digests still missing don't depend on each other.
-func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[string],
+//
+// archiveWalks comes from WalkArchives, which callers typically run early and in parallel
+// with the source scan.
+func ScanArchivesForCopiesWithDigests(archiveWalks []ArchiveWalk,
 	unmatchedOrphans []string, knownOrphanDigests map[string]entity.FileDigest,
 	digestFn OrphanDigestFunc,
 	sourceFiles map[string]entity.FileMeta,
 	destDirPath string, useReflink bool, destFS rsfs.FileSystem,
 	progress *ArchiveScanProgress,
 ) ([]action.SyncAction, error) {
-	if len(unmatchedOrphans) == 0 || len(archivePaths) == 0 {
+	if len(unmatchedOrphans) == 0 || len(archiveWalks) == 0 {
 		return nil, nil
 	}
 	if progress == nil {
@@ -438,19 +473,8 @@ func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[
 	var actions []action.SyncAction
 	uniqueness := set.NewSet[string]()
 
-	for _, archivePath := range archivePaths {
-		var archiveFiles map[string]entity.FileMeta
-		var err error
-		if destFS != nil {
-			archiveFiles, _, err = FindFilesFromDirectoryWithFS(destFS, archivePath, exclusions, &progress.FilesFound)
-		} else {
-			fsys := rsfs.NewLocalFSForArchive()
-			archiveFiles, _, err = FindFilesFromDirectoryWithFS(fsys, archivePath, exclusions, &progress.FilesFound)
-			fsys.Close()
-		}
-		if err != nil {
-			return nil, fmt.Errorf("error scanning archive %s: %w", archivePath, err)
-		}
+	for _, archiveWalk := range archiveWalks {
+		archivePath, archiveFiles := archiveWalk.Path, archiveWalk.Files
 
 		// An archive file is worth hashing only if its extension and size match an orphan
 		// that is still unmatched. Everything else never reaches a digest comparison.
