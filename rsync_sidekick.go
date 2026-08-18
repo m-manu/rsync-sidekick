@@ -872,11 +872,11 @@ func startArchiveScanProgress(progress *service.ArchiveScanProgress,
 				// Archives are always on the destination side; the orphan digests running
 				// alongside are on the source side. Label both so the two interleaved
 				// progress lines are telling apart at a glance.
-				fmte.Printf("DST: Scanning archives: %d files found, %d checked, %d / %d hashed, %d matched...\n",
+				fmte.Printf("DST: Scanning archives: %d files found, %d checked, %d / %d digests, %d matched...\n",
 					atomic.LoadInt32(&progress.FilesFound),
 					atomic.LoadInt32(&progress.FilesChecked),
-					atomic.LoadInt32(&progress.FilesHashed),
-					atomic.LoadInt32(&progress.FilesToHash),
+					atomic.LoadInt32(&progress.DigestsDone),
+					atomic.LoadInt32(&progress.DigestsNeeded),
 					atomic.LoadInt32(&progress.Matches))
 			}
 		}
@@ -887,7 +887,7 @@ func startArchiveScanProgress(progress *service.ArchiveScanProgress,
 	}
 }
 
-// withDigestProgress runs compute, reporting how many of count files are hashed so far.
+// withDigestProgress runs compute, reporting how many of count digests are done so far.
 // The counter it hands to compute is what drives that output.
 func withDigestProgress(count int, progressFrequency time.Duration,
 	compute func(counter *int32) (map[string]entity.FileDigest, error),
@@ -1005,7 +1005,7 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archiveWalks []servic
 				case <-archiveScanDone:
 					return
 				case <-ticker.C:
-					fmte.Printf("DST: Scanning archives (remote): %d files found, %d checked, %d hashed...\n",
+					fmte.Printf("DST: Scanning archives (remote): %d files found, %d checked, %d digests...\n",
 						atomic.LoadInt32(&archiveWalkCounter),
 						atomic.LoadInt32(&archiveCheckCounter),
 						atomic.LoadInt32(&archiveDigestCounter))

@@ -349,11 +349,11 @@ func WalkArchives(archivePaths []string, exclusions set.Set[string], destFS rsfs
 // ArchiveScanProgress carries the counters an archive scan advances while it runs.
 // Callers read them atomically to print progress; a nil *ArchiveScanProgress is fine.
 type ArchiveScanProgress struct {
-	FilesFound   int32 // archive files seen while walking
-	FilesChecked int32 // archive files compared against the orphan index
-	FilesToHash  int32 // candidates found so far; grows by one archive path at a time
-	FilesHashed  int32 // candidates hashed
-	Matches      int32 // orphans matched to an archive file
+	FilesFound    int32 // archive files seen while walking
+	FilesChecked  int32 // archive files compared against the orphan index
+	DigestsNeeded int32 // candidates found so far; grows by one archive path at a time
+	DigestsDone   int32 // candidate digests computed
+	Matches       int32 // orphans matched to an archive file
 }
 
 // sortForLocality orders relPaths so hashing reads the disk in one direction: by inode
@@ -537,7 +537,7 @@ func ScanArchivesForCopiesWithDigests(archiveWalks []ArchiveWalk,
 		// The candidate list is complete before any hashing starts, so it can serve as the
 		// denominator for progress. Adding per archive path keeps it truthful when a later
 		// path contributes more candidates.
-		atomic.AddInt32(&progress.FilesToHash, int32(len(candidatePaths)))
+		atomic.AddInt32(&progress.DigestsNeeded, int32(len(candidatePaths)))
 
 		// Sort the whole list first, then cut it into chunks: each chunk is a contiguous,
 		// ascending inode range, so working chunk by chunk still reads the disk in one
@@ -582,7 +582,7 @@ func ScanArchivesForCopiesWithDigests(archiveWalks []ArchiveWalk,
 				// Those candidates need no digest because every orphan they could serve is
 				// already served. Take them off the total instead of counting them as
 				// hashed, so the two numbers stay truthful and still meet at the end.
-				atomic.AddInt32(&progress.FilesToHash, int32(-skipped))
+				atomic.AddInt32(&progress.DigestsNeeded, int32(-skipped))
 			}
 			if len(toHash) == 0 {
 				continue
@@ -596,7 +596,7 @@ func ScanArchivesForCopiesWithDigests(archiveWalks []ArchiveWalk,
 			wg.Add(2)
 			go func() {
 				defer wg.Done()
-				archiveDigests = BatchDigestsParallel(destFS, archivePath, toHash, &progress.FilesHashed)
+				archiveDigests = BatchDigestsParallel(destFS, archivePath, toHash, &progress.DigestsDone)
 			}()
 			go func() {
 				defer wg.Done()
@@ -634,8 +634,8 @@ func matchChunk(chunk []string, pendingForChunk map[string][]string,
 	sourceFiles map[string]entity.FileMeta,
 ) error {
 	for _, archiveRelPath := range chunk {
-		archiveDigest, hashed := archiveDigests[archiveRelPath]
-		if !hashed {
+		archiveDigest, haveDigest := archiveDigests[archiveRelPath]
+		if !haveDigest {
 			continue
 		}
 		archiveAbsPath := filepath.Join(archivePath, archiveRelPath)

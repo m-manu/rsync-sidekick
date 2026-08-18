@@ -111,9 +111,9 @@ func TestScanArchives_HashesOnlyOrphansAnArchiveCanMatch(t *testing.T) {
 	assert.Equal(t, filepath.Join(f.destDir, "match.txt"), copies[0].AbsDestPath)
 	assert.EqualValues(t, 1, progress.Matches, "one orphan was matched")
 	assert.EqualValues(t, 1, progress.FilesChecked, "the archive file was checked against the orphan index")
-	assert.EqualValues(t, 1, progress.FilesToHash,
+	assert.EqualValues(t, 1, progress.DigestsNeeded,
 		"the candidate count must be known before hashing starts, to serve as a denominator")
-	assert.EqualValues(t, 1, progress.FilesHashed, "and it was a candidate, so it was hashed")
+	assert.EqualValues(t, 1, progress.DigestsDone, "and it was a candidate, so its digest was computed")
 }
 
 func TestScanArchives_SkipsArchiveFilesWhoseOrphansAreServed(t *testing.T) {
@@ -140,7 +140,7 @@ func TestScanArchives_SkipsArchiveFilesWhoseOrphansAreServed(t *testing.T) {
 	// Both are hashed: within one archive path the candidate list is built before hashing,
 	// so at that point the orphan is still unmatched and both files qualify. Hashing them
 	// as one parallel batch is worth more than serialising to save the second hash.
-	assert.EqualValues(t, 2, progress.FilesHashed)
+	assert.EqualValues(t, 2, progress.DigestsDone)
 }
 
 func TestScanArchives_StreamsActionsInsteadOfReturningThem(t *testing.T) {
@@ -199,10 +199,10 @@ func TestScanArchives_MatchesArriveBeforeAllHashingIsDone(t *testing.T) {
 
 	// Record how far hashing had got when the first action was emitted.
 	var progress ArchiveScanProgress
-	hashedAtFirstAction := int32(-1)
+	digestsAtFirstAction := int32(-1)
 	onAction := func(action.SyncAction) error {
-		if hashedAtFirstAction < 0 {
-			hashedAtFirstAction = atomic.LoadInt32(&progress.FilesHashed)
+		if digestsAtFirstAction < 0 {
+			digestsAtFirstAction = atomic.LoadInt32(&progress.DigestsDone)
 		}
 		return nil
 	}
@@ -218,8 +218,8 @@ func TestScanArchives_MatchesArriveBeforeAllHashingIsDone(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	require.GreaterOrEqual(t, hashedAtFirstAction, int32(0), "at least one action must be emitted")
-	assert.Less(t, hashedAtFirstAction, int32(total),
+	require.GreaterOrEqual(t, digestsAtFirstAction, int32(0), "at least one action must be emitted")
+	assert.Less(t, digestsAtFirstAction, int32(total),
 		"the first match must arrive before every candidate is hashed")
 	assert.EqualValues(t, total, progress.Matches, "every orphan has its copy in the archive")
 }
@@ -294,7 +294,7 @@ func TestScanArchives_SkipsSecondArchivePathOnceOrphansAreServed(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, copyActions(actions), 1, "got actions: %+v", actions)
-	assert.EqualValues(t, 1, progress.FilesHashed,
+	assert.EqualValues(t, 1, progress.DigestsDone,
 		"the second archive path holds nothing unserved, so nothing more may be hashed")
 	assert.Equal(t, []string{"match.txt"}, requested,
 		"the orphan digest must be requested once, not once per archive path")
