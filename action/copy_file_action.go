@@ -78,8 +78,15 @@ func (a CopyFileAction) Uniqueness() string {
 	return "cp" + cmdSeparator + a.AbsDestPath
 }
 
+// String names what the action is about to do. A reflink says so: the two are the same
+// action here, but they cost very different amounts of disk, and a log that calls both
+// "copy" hides which one actually happened.
 func (a CopyFileAction) String() string {
-	return fmt.Sprintf(`copy file "%s" to "%s"`, sanitizePath(a.AbsSourcePath), sanitizePath(a.AbsDestPath))
+	verb := "copy"
+	if a.UseReflink {
+		verb = "reflink"
+	}
+	return fmt.Sprintf(`%s file "%s" to "%s"`, verb, sanitizePath(a.AbsSourcePath), sanitizePath(a.AbsDestPath))
 }
 
 func regularCopyWithMode(src, dst string, mode os.FileMode) error {
