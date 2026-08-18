@@ -31,13 +31,45 @@ func RunAgent(agentVersion string) error {
 
 // runAgentOn is RunAgent against explicit streams, which is what makes the dispatch
 // loop testable.
+//
+// Reading is kept separate from working: a request is handed to a goroutine so the next
+// one can be read right away. That is what lets a client have, say, a walk and a digest
+// request in flight at once. Which requests may actually overlap is decided per kind:
+//
+//   - walks run one at a time, because they configure global filesystem settings
+//     (one-file-system, min-size) that a second walk would overwrite;
+//   - digests run one at a time, since each already saturates the disk with workers;
+//   - perform requests run in a single queue, strictly in arrival order, because a copy
+//     can depend on a directory an earlier action created;
+//   - version requests answer immediately.
 func runAgentOn(in io.Reader, out io.Writer, agentVersion string) error {
 	reader := bufio.NewReader(in)
-	writer := out
+	writer := newSyncWriter(out)
+
+	var walkMu, digestMu sync.Mutex
+	var workers sync.WaitGroup
+
+	// Perform requests go through one worker so their order is the order they arrived in;
+	// a mutex would not guarantee that.
+	performQueue := make(chan Envelope, 64)
+	var performWorker sync.WaitGroup
+	performWorker.Add(1)
+	go func() {
+		defer performWorker.Done()
+		for env := range performQueue {
+			handlePerform(writer.forRequest(env.ID), env.Payload)
+		}
+	}()
+	shutdown := func() {
+		close(performQueue)
+		performWorker.Wait()
+		workers.Wait()
+	}
 
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
+			shutdown()
 			if err == io.EOF {
 				return nil
 			}
@@ -51,33 +83,47 @@ func runAgentOn(in io.Reader, out io.Writer, agentVersion string) error {
 
 		var env Envelope
 		if err := json.Unmarshal(line, &env); err != nil {
-			writeError(writer, fmt.Sprintf("invalid message: %v", err))
+			writeError(writer.forRequest(env.ID), fmt.Sprintf("invalid message: %v", err))
 			continue
 		}
 
 		switch env.Type {
 		case MsgQuit:
+			shutdown()
 			return nil
 
 		case MsgWalkRequest:
-			handleWalk(writer, env.Payload)
+			workers.Add(1)
+			go func(env Envelope) {
+				defer workers.Done()
+				walkMu.Lock()
+				defer walkMu.Unlock()
+				handleWalk(writer.forRequest(env.ID), env.Payload)
+			}(env)
 
 		case MsgDigestRequest:
-			handleDigest(writer, env.Payload)
+			workers.Add(1)
+			go func(env Envelope) {
+				defer workers.Done()
+				digestMu.Lock()
+				defer digestMu.Unlock()
+				handleDigest(writer.forRequest(env.ID), env.Payload)
+			}(env)
 
 		case MsgPerformRequest:
-			handlePerform(writer, env.Payload)
+			performQueue <- env
 
 		case MsgVersionRequest:
-			writeResponse(writer, MsgVersionResponse, VersionResponse{Version: agentVersion})
+			writeResponse(writer.forRequest(env.ID), MsgVersionResponse,
+				VersionResponse{Version: agentVersion})
 
 		default:
-			writeError(writer, fmt.Sprintf("unknown message type: %s", env.Type))
+			writeError(writer.forRequest(env.ID), fmt.Sprintf("unknown message type: %s", env.Type))
 		}
 	}
 }
 
-func handleWalk(w io.Writer, payload []byte) {
+func handleWalk(w *requestWriter, payload []byte) {
 	var req WalkRequest
 	if err := json.Unmarshal(payload, &req); err != nil {
 		writeError(w, fmt.Sprintf("bad walk request: %v", err))
@@ -144,7 +190,7 @@ func handleWalk(w io.Writer, payload []byte) {
 	writeResponse(w, MsgWalkResponse, resp)
 }
 
-func handleDigest(w io.Writer, payload []byte) {
+func handleDigest(w *requestWriter, payload []byte) {
 	var req DigestRequest
 	if err := json.Unmarshal(payload, &req); err != nil {
 		writeError(w, fmt.Sprintf("bad digest request: %v", err))
@@ -195,7 +241,7 @@ func handleDigest(w io.Writer, payload []byte) {
 	writeResponse(w, MsgDigestResponse, resp)
 }
 
-func handlePerform(w io.Writer, payload []byte) {
+func handlePerform(w *requestWriter, payload []byte) {
 	var req PerformRequest
 	if err := json.Unmarshal(payload, &req); err != nil {
 		writeError(w, fmt.Sprintf("bad perform request: %v", err))
@@ -285,14 +331,43 @@ func executeAction(spec ActionSpec) error {
 	}
 }
 
-func writeResponse(w io.Writer, msgType string, payload interface{}) {
-	data, _ := json.Marshal(payload)
-	env := Envelope{Type: msgType, Payload: data}
-	line, _ := json.Marshal(env)
-	line = append(line, '\n')
-	_, _ = w.Write(line)
+// syncWriter serialises writes to the agent's single output stream. One response can be
+// megabytes, hence several pipe writes, and two goroutines must never interleave theirs.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
 }
 
-func writeError(w io.Writer, msg string) {
+func newSyncWriter(w io.Writer) *syncWriter {
+	return &syncWriter{w: w}
+}
+
+// forRequest returns a writer that stamps every message with the given request ID, so the
+// client can tell whose message it is.
+func (s *syncWriter) forRequest(id uint64) *requestWriter {
+	return &requestWriter{out: s, id: id}
+}
+
+// requestWriter writes messages belonging to one request.
+type requestWriter struct {
+	out *syncWriter
+	id  uint64
+}
+
+func (w *requestWriter) writeLine(line []byte) {
+	w.out.mu.Lock()
+	defer w.out.mu.Unlock()
+	_, _ = w.out.w.Write(line)
+}
+
+func writeResponse(w *requestWriter, msgType string, payload interface{}) {
+	data, _ := json.Marshal(payload)
+	env := Envelope{Type: msgType, ID: w.id, Payload: data}
+	line, _ := json.Marshal(env)
+	line = append(line, '\n')
+	w.writeLine(line)
+}
+
+func writeError(w *requestWriter, msg string) {
 	writeResponse(w, MsgError, ErrorResponse{Message: msg})
 }

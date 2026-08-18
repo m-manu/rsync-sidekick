@@ -37,7 +37,7 @@ func runDigestHandler(t *testing.T, req DigestRequest) ([]DigestProgress, Digest
 	require.NoError(t, err)
 
 	var buf bytes.Buffer
-	handleDigest(&buf, payload)
+	handleDigest(newSyncWriter(&buf).forRequest(0), payload)
 
 	var progress []DigestProgress
 	var resp DigestResponse
@@ -128,7 +128,7 @@ func TestAgentDigest_SkipsUnreadableFiles(t *testing.T) {
 
 func TestAgentDigest_RejectsMalformedRequest(t *testing.T) {
 	var buf bytes.Buffer
-	handleDigest(&buf, []byte("{not json"))
+	handleDigest(newSyncWriter(&buf).forRequest(0), []byte("{not json"))
 
 	var env Envelope
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &env))

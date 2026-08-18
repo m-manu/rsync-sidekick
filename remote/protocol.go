@@ -31,6 +31,11 @@ type VersionResponse struct {
 // Envelope wraps every message.
 type Envelope struct {
 	Type string `json:"type"`
+	// ID ties a response to its request, which is what allows more than one request to be
+	// in flight on the single connection. The agent echoes it on every message it sends
+	// for that request. Zero means unset — agents predating this field answer that way,
+	// and a client talking to one keeps to a single request at a time.
+	ID uint64 `json:"id,omitempty"`
 	// Payload is one of the *Request/*Response structs, encoded as raw JSON.
 	Payload []byte `json:"payload,omitempty"`
 }

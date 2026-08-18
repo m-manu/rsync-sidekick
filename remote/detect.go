@@ -14,6 +14,11 @@ import (
 // minAgentVersion is the minimum remote rsync-sidekick version required for agent mode.
 var minAgentVersion = [3]int{1, 10, 6}
 
+// minConcurrentAgentVersion is the first version whose agent echoes request IDs and reads
+// while it works. Only against such an agent may the client keep several requests in
+// flight; older ones get one request at a time, exactly as before.
+var minConcurrentAgentVersion = [3]int{2, 3, 0}
+
 // ProbeRemoteAgent checks whether rsync-sidekick is available on the remote host
 // and whether its version is at least minAgentVersion.
 // Returns true if the agent can be used (remote-execution mode).
@@ -71,6 +76,13 @@ func SetupRemote(loc Location, explicitKeyPath string, sidekickPath string, forc
 				version, minAgentVersion[0], minAgentVersion[1], minAgentVersion[2])
 			_ = client.Close()
 			return nil, nil
+		}
+		if isVersionAtLeast(version, minConcurrentAgentVersion) {
+			client.SetConcurrent(true)
+			fmte.PrintfV("Remote agent supports concurrent requests\n")
+		} else {
+			fmte.PrintfV("Remote agent handles one request at a time (needs >= v%d.%d.%d)\n",
+				minConcurrentAgentVersion[0], minConcurrentAgentVersion[1], minConcurrentAgentVersion[2])
 		}
 	case errors.Is(versionErr, ErrVersionRequestUnsupported):
 		// The agent is running and speaks the protocol, it just predates this message.
