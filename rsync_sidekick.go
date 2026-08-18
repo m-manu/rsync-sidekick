@@ -120,6 +120,9 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 	fmte.Printf("Finding candidates at destination...\n")
 	candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, orphansAtSource)
 	var actions []action.SyncAction
+	// Digests computed while matching moves; reused by the archive scan below. Empty when
+	// there were no candidates at destination, in which case that phase never ran.
+	var knownOrphanDigests map[string]entity.FileDigest
 	if len(candidatesAtDestination) == 0 {
 		fmte.Printf("No candidates found. Looks like all %d files are new.\n", len(orphansAtSource))
 	} else {
@@ -139,7 +142,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			actions, savings, syncErr = service.ComputeSyncActionsWithFS(sourceFS, destFS,
+			actions, savings, knownOrphanDigests, syncErr = service.ComputeSyncActionsWithFS(sourceFS, destFS,
 				sourceDirPath, sourceFiles, orphansAtSource,
 				destinationDirPath, destinationFiles, candidatesAtDestination, &sourceCounter, &destinationCounter,
 				copyDuplicates, useReflink)
@@ -187,40 +190,14 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		if len(unmatchedOrphans) > 0 {
 			fmte.Printf("Scanning %d archive path(s) for %d unmatched orphans...\n",
 				len(archivePaths), len(unmatchedOrphans))
-			// Compute digests for unmatched orphans at source
-			var orphanDigestCounter int32
-			orphanDigests := make(map[string]entity.FileDigest)
-			orphanDigestDone := make(chan struct{})
-			if progressFrequency > 0 {
-				go func() {
-					ticker := time.NewTicker(progressFrequency)
-					defer ticker.Stop()
-					for {
-						select {
-						case <-orphanDigestDone:
-							return
-						case <-ticker.C:
-							fmte.Printf("Computing orphan digests: %d / %d...\n",
-								atomic.LoadInt32(&orphanDigestCounter), len(unmatchedOrphans))
-						}
-					}
-				}()
+			// Digests of unmatched orphans at source, computed on demand: only orphans
+			// that some archive file matches on extension and size are ever hashed.
+			digestFn := func(orphans []string) (map[string]entity.FileDigest, error) {
+				return withDigestProgress(len(orphans), progressFrequency,
+					func(counter *int32) (map[string]entity.FileDigest, error) {
+						return service.BatchDigestsParallel(sourceFS, sourceDirPath, orphans, counter), nil
+					})
 			}
-			for _, o := range unmatchedOrphans {
-				absPath := sourceDirPath + "/" + o
-				var digest entity.FileDigest
-				var err error
-				if sourceFS != nil {
-					digest, err = service.GetDigestWithFS(sourceFS, absPath)
-				} else {
-					digest, err = service.GetDigest(absPath)
-				}
-				if err == nil {
-					orphanDigests[o] = digest
-				}
-				atomic.AddInt32(&orphanDigestCounter, 1)
-			}
-			close(orphanDigestDone)
 			var archiveWalkCounter, archiveScanCounter, archiveMatchCounter int32
 			archiveScanDone := make(chan struct{})
 			if progressFrequency > 0 {
@@ -241,7 +218,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 				}()
 			}
 			archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
-				archivePaths, exclusions, unmatchedOrphans, orphanDigests,
+				archivePaths, exclusions, unmatchedOrphans, knownOrphanDigests, digestFn,
 				sourceFiles, destinationDirPath, useReflink, destFS,
 				&archiveWalkCounter, &archiveScanCounter, &archiveMatchCounter)
 			close(archiveScanDone)
@@ -485,6 +462,9 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 	orphansAtSource := service.FindOrphans(sourceFiles, destinationFiles)
 
 	var actions []action.SyncAction
+	// Digests computed while matching moves; reused by the archive scan below. Empty when
+	// there were no candidates at destination, in which case that phase never ran.
+	var knownOrphanDigests map[string]entity.FileDigest
 	if len(orphansAtSource) == 0 {
 		fmte.Printf("All files at source directory have counterparts.\n")
 	} else {
@@ -575,6 +555,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 				orphanDigests = localDigests
 				candidateDigests = remoteDigests
 			}
+			knownOrphanDigests = orphanDigests
 
 			// Match digests and build actions
 			actions = matchAndBuildActions(sourceDirPath, sourceFiles, orphansAtSource, orphanDigests,
@@ -645,34 +626,16 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 		if len(unmatchedOrphans) > 0 {
 			fmte.Printf("Scanning %d archive path(s) for %d unmatched orphans...\n",
 				len(archivePaths), len(unmatchedOrphans))
-			// Compute digests for unmatched orphans at source
-			var unmatchedDigests map[string]entity.FileDigest
-			var digestErr error
-			var orphanDigestCounter int32
-			orphanDigestDone := make(chan struct{})
-			if progressFrequency > 0 {
-				go func() {
-					ticker := time.NewTicker(progressFrequency)
-					defer ticker.Stop()
-					for {
-						select {
-						case <-orphanDigestDone:
-							return
-						case <-ticker.C:
-							fmte.Printf("Computing orphan digests: %d / %d...\n",
-								atomic.LoadInt32(&orphanDigestCounter), len(unmatchedOrphans))
+			// Digests of unmatched orphans at source, computed on demand: only orphans
+			// that some archive file matches on extension and size are ever hashed.
+			digestFn := func(orphans []string) (map[string]entity.FileDigest, error) {
+				return withDigestProgress(len(orphans), progressFrequency,
+					func(counter *int32) (map[string]entity.FileDigest, error) {
+						if sourceIsRemote {
+							return agentClient.BatchDigest(sourceDirPath, orphans, counter)
 						}
-					}
-				}()
-			}
-			if sourceIsRemote {
-				unmatchedDigests, digestErr = agentClient.BatchDigest(sourceDirPath, unmatchedOrphans, &orphanDigestCounter)
-			} else {
-				unmatchedDigests, digestErr = batchDigestLocal(sourceDirPath, unmatchedOrphans, &orphanDigestCounter)
-			}
-			close(orphanDigestDone)
-			if digestErr != nil {
-				return fmt.Errorf("error computing orphan digests for archive scan: %+v", digestErr)
+						return service.BatchDigestsParallel(nil, sourceDirPath, orphans, counter), nil
+					})
 			}
 			if sourceIsRemote {
 				// Dest is local: scan archives locally
@@ -696,7 +659,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 					}()
 				}
 				archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
-					archivePaths, exclusions, unmatchedOrphans, unmatchedDigests,
+					archivePaths, exclusions, unmatchedOrphans, knownOrphanDigests, digestFn,
 					sourceFiles, destDirPath, useReflink, nil,
 					&archiveWalkCounter, &archiveScanCounter, &archiveMatchCounter)
 				close(archiveScanDone)
@@ -710,7 +673,8 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			} else {
 				// Dest is remote: scan archives via agent
 				archiveActions, archiveErr := scanArchivesViaAgent(agentClient, archivePaths, excludedNames,
-					unmatchedOrphans, unmatchedDigests, sourceFiles, destDirPath, useReflink, progressFrequency)
+					unmatchedOrphans, knownOrphanDigests, digestFn, sourceFiles, destDirPath, useReflink,
+					progressFrequency)
 				if archiveErr != nil {
 					return fmt.Errorf("error scanning archives via agent: %+v", archiveErr)
 				}
@@ -745,6 +709,34 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 	return performActions(actions, destDirPath, dryRun)
 }
 
+// withDigestProgress runs compute, reporting how many of count files are hashed so far.
+// The counter it hands to compute is what drives that output.
+func withDigestProgress(count int, progressFrequency time.Duration,
+	compute func(counter *int32) (map[string]entity.FileDigest, error),
+) (map[string]entity.FileDigest, error) {
+	fmte.Printf("Computing digests of %d orphan candidate(s)...\n", count)
+	var counter int32
+	done := make(chan struct{})
+	if progressFrequency > 0 {
+		go func() {
+			ticker := time.NewTicker(progressFrequency)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					fmte.Printf("Computing orphan digests: %d / %d...\n",
+						atomic.LoadInt32(&counter), count)
+				}
+			}
+		}()
+	}
+	digests, err := compute(&counter)
+	close(done)
+	return digests, err
+}
+
 func batchDigestLocal(basePath string, files []string, counter *int32) (map[string]entity.FileDigest, error) {
 	digests := make(map[string]entity.FileDigest, len(files))
 	for _, relPath := range files {
@@ -764,7 +756,8 @@ func batchDigestLocal(basePath string, files []string, counter *int32) (map[stri
 // scanArchivesViaAgent scans archive paths on the remote destination via the agent,
 // matching archive files against unmatched orphans by digest.
 func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string, excludedNames []string,
-	unmatchedOrphans []string, orphanDigests map[string]entity.FileDigest,
+	unmatchedOrphans []string, knownOrphanDigests map[string]entity.FileDigest,
+	digestFn service.OrphanDigestFunc,
 	sourceFiles map[string]entity.FileMeta, destDirPath string, useReflink bool,
 	progressFrequency time.Duration,
 ) ([]action.SyncAction, error) {
@@ -779,6 +772,13 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 		k := orphanKey{ext: lib.GetFileExt(o), size: fm.Size}
 		orphansByKey[k] = append(orphansByKey[k], o)
 	}
+
+	// Local copy plus a cache of lazily computed digests; see ScanArchivesForCopiesWithDigests.
+	orphanDigests := make(map[string]entity.FileDigest, len(knownOrphanDigests))
+	for orphan, digest := range knownOrphanDigests {
+		orphanDigests[orphan] = digest
+	}
+	requestedDigests := set.NewSet[string]()
 
 	matchedOrphans := set.NewSet[string]()
 	var actions []action.SyncAction
@@ -824,6 +824,35 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 		}
 		if len(candidates) == 0 {
 			continue
+		}
+
+		// Hash only the orphans these archive candidates can possibly match.
+		if digestFn != nil {
+			var needed []string
+			for _, relPath := range candidates {
+				k := orphanKey{ext: lib.GetFileExt(relPath), size: archiveFiles[relPath].Size}
+				for _, orphan := range orphansByKey[k] {
+					if matchedOrphans.Contains(orphan) || requestedDigests.Contains(orphan) {
+						continue
+					}
+					if _, known := orphanDigests[orphan]; known {
+						continue
+					}
+					requestedDigests.Add(orphan)
+					needed = append(needed, orphan)
+				}
+			}
+			if len(needed) > 0 {
+				sort.Strings(needed)
+				freshDigests, digestErr := digestFn(needed)
+				if digestErr != nil {
+					return nil, fmt.Errorf("error computing digests of %d orphan candidate(s): %w",
+						len(needed), digestErr)
+				}
+				for orphan, digest := range freshDigests {
+					orphanDigests[orphan] = digest
+				}
+			}
 		}
 
 		// Digest archive candidates via agent

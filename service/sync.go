@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -82,12 +83,14 @@ func buildIndexWithFS(fsys rsfs.FileSystem, baseDirPath string, filesToScan []st
 
 // ComputeSyncActionsWithFS is like ComputeSyncActions but uses the given FileSystems.
 // If sourceFS or destFS is nil, local OS calls are used for the respective side.
+// The returned orphanDigests map holds the digests computed for orphansAtSource, so a
+// later archive scan can reuse them instead of hashing the same files a second time.
 func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 	sourceDirPath string, sourceFiles map[string]entity.FileMeta, orphansAtSource []string,
 	destinationDirPath string, destinationFiles map[string]entity.FileMeta, candidatesAtDestination []string,
 	sourceCounter *int32, destinationCounter *int32,
 	copyDuplicates bool, useReflink bool,
-) (actions []action.SyncAction, savings int64, err error) {
+) (actions []action.SyncAction, savings int64, orphanDigests map[string]entity.FileDigest, err error) {
 	orphanFilesToDigests := lib.NewSafeMap[string, entity.FileDigest]()
 	candidateFilesToDigests := lib.NewSafeMap[string, entity.FileDigest]()
 	orphanDigestsToFiles := lib.NewMultiMap[entity.FileDigest, string]()
@@ -139,12 +142,20 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 	}
 	wg.Wait()
 	if len(sourceIndexErrs) > 0 {
-		return nil, 0, fmte.Errors("error(s) while building index on source directory: ",
+		return nil, 0, nil, fmte.Errors("error(s) while building index on source directory: ",
 			sourceIndexErrs)
 	}
 	if len(destinationIndexErrs) > 0 {
-		return nil, 0, fmte.Errors("error(s) while building index on destination directory: ",
+		return nil, 0, nil, fmte.Errors("error(s) while building index on destination directory: ",
 			destinationIndexErrs)
+	}
+	// Hand the orphan digests back for reuse. Files that failed to hash are stored as a
+	// zero digest by buildIndex — leave those out so a later phase can retry them.
+	orphanDigests = make(map[string]entity.FileDigest, orphanFilesToDigests.Len())
+	for orphanAtSource, orphanDigest := range orphanFilesToDigests.ForEach() {
+		if orphanDigest != (entity.FileDigest{}) {
+			orphanDigests[orphanAtSource] = orphanDigest
+		}
 	}
 	actions = make([]action.SyncAction, 0, orphanFilesToDigests.Len())
 	uniqueness := set.NewSetWithSize[string](orphanFilesToDigests.Len())
@@ -282,6 +293,57 @@ func PickBestCandidate(candidates []string, orphanPath string, sourceFiles map[s
 	return candidates[0]
 }
 
+// OrphanDigestFunc computes digests for the given orphan relative paths on demand.
+// ScanArchivesForCopiesWithDigests calls it only for orphans that an archive path can
+// actually match, so callers must not assume it is invoked for every orphan.
+type OrphanDigestFunc func(orphans []string) (map[string]entity.FileDigest, error)
+
+// BatchDigestsParallel computes digests for relPaths below baseDirPath, spreading the
+// work over the same number of workers as the index build. fsys is used when non-nil,
+// otherwise local OS calls are made. Files that cannot be hashed are skipped (they
+// simply end up absent from the returned map), mirroring index building.
+func BatchDigestsParallel(fsys rsfs.FileSystem, baseDirPath string, relPaths []string, counter *int32) map[string]entity.FileDigest {
+	if len(relPaths) == 0 {
+		return map[string]entity.FileDigest{}
+	}
+	a, b := getParallelism(runtime.NumCPU())
+	workers := min(a+b, len(relPaths))
+	digests := lib.NewSafeMap[string, entity.FileDigest]()
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(index int) {
+			defer wg.Done()
+			low := index * len(relPaths) / workers
+			high := (index + 1) * len(relPaths) / workers
+			for _, relativePath := range relPaths[low:high] {
+				path := filepath.Join(baseDirPath, relativePath)
+				var digest entity.FileDigest
+				var err error
+				if fsys != nil {
+					digest, err = getDigestWithFS(fsys, path)
+				} else {
+					digest, err = getDigest(path)
+				}
+				if counter != nil {
+					atomic.AddInt32(counter, 1)
+				}
+				if err != nil {
+					fmte.PrintfErrV("couldn't hash file \"%s\" (skipping): %+v\n", path, err)
+					continue
+				}
+				digests.Set(relativePath, digest)
+			}
+		}(i)
+	}
+	wg.Wait()
+	result := make(map[string]entity.FileDigest, digests.Len())
+	for relativePath, digest := range digests.ForEach() {
+		result[relativePath] = digest
+	}
+	return result
+}
+
 func getParallelism(n int) (int, int) {
 	if n > 3 {
 		if n%2 == 0 {
@@ -294,11 +356,17 @@ func getParallelism(n int) (int, int) {
 }
 
 // ScanArchivesForCopiesWithDigests scans archive directories for files matching
-// unmatched orphans whose digests are already known. Archive paths are on the
-// destination side; if destFS is non-nil it is used to scan archives and check
-// directories (e.g. SFTP mode).
+// unmatched orphans. Archive paths are on the destination side; if destFS is non-nil it
+// is used to scan archives and check directories (e.g. SFTP mode).
+//
+// Matching is a two-stage filter: an orphan is only a possible match if some archive
+// file shares its extension and size, and only then do the digests decide. Digests are
+// therefore obtained lazily — knownOrphanDigests is consulted first, and digestFn is
+// called only for the orphans an archive path can actually match. Hashing every orphan
+// up front is what made this phase dominate the runtime on large trees.
 func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[string],
-	unmatchedOrphans []string, orphanDigests map[string]entity.FileDigest,
+	unmatchedOrphans []string, knownOrphanDigests map[string]entity.FileDigest,
+	digestFn OrphanDigestFunc,
 	sourceFiles map[string]entity.FileMeta,
 	destDirPath string, useReflink bool, destFS rsfs.FileSystem,
 	archiveWalkCounter *int32, archiveScanCounter *int32, archiveMatchCounter *int32,
@@ -306,6 +374,15 @@ func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[
 	if len(unmatchedOrphans) == 0 || len(archivePaths) == 0 {
 		return nil, nil
 	}
+
+	// Local copy: the caller's map must not be mutated, and lazily computed digests are
+	// cached here so a later archive path doesn't hash the same orphan again.
+	orphanDigests := make(map[string]entity.FileDigest, len(knownOrphanDigests))
+	for orphan, digest := range knownOrphanDigests {
+		orphanDigests[orphan] = digest
+	}
+	// Orphans already handed to digestFn — a second attempt would fail the same way.
+	requestedDigests := set.NewSet[string]()
 
 	// Build ext+size set from unmatched orphans
 	type orphanKey struct {
@@ -335,6 +412,36 @@ func ScanArchivesForCopiesWithDigests(archivePaths []string, exclusions set.Set[
 		}
 		if err != nil {
 			return nil, fmt.Errorf("error scanning archive %s: %w", archivePath, err)
+		}
+
+		// Hash only the orphans this archive path can possibly match.
+		if digestFn != nil {
+			var needed []string
+			for archiveRelPath, archiveMeta := range archiveFiles {
+				k := orphanKey{ext: lib.GetFileExt(archiveRelPath), size: archiveMeta.Size}
+				for _, orphan := range orphansByKey[k] {
+					if matchedOrphans.Contains(orphan) || requestedDigests.Contains(orphan) {
+						continue
+					}
+					if _, known := orphanDigests[orphan]; known {
+						continue
+					}
+					requestedDigests.Add(orphan)
+					needed = append(needed, orphan)
+				}
+			}
+			if len(needed) > 0 {
+				// Sorted for deterministic batches and for locality while hashing.
+				slices.Sort(needed)
+				freshDigests, digestErr := digestFn(needed)
+				if digestErr != nil {
+					return nil, fmt.Errorf("error computing digests of %d orphan candidate(s): %w",
+						len(needed), digestErr)
+				}
+				for orphan, digest := range freshDigests {
+					orphanDigests[orphan] = digest
+				}
+			}
 		}
 
 		for archiveRelPath, archiveMeta := range archiveFiles {
