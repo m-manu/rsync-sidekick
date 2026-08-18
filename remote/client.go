@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"github.com/m-manu/rsync-sidekick/v2/entity"
+	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
 )
 
 // AgentClient communicates with a remote rsync-sidekick agent over SSH
@@ -99,7 +100,10 @@ func (c *AgentClient) Version() (string, error) {
 // oneFileSystem prevents crossing filesystem boundaries during the scan.
 // Returns files, dirs (relPath→modtime), totalSize, error.
 func (c *AgentClient) Walk(dirPath string, excludedNames []string, counter *int32, progressIntervalMs int64, oneFileSystem bool) (map[string]entity.FileMeta, map[string]int64, int64, error) {
-	req := WalkRequest{DirPath: dirPath, ExcludedNames: excludedNames, ProgressIntervalMs: progressIntervalMs, OneFileSystem: oneFileSystem}
+	req := WalkRequest{
+		DirPath: dirPath, ExcludedNames: excludedNames, ProgressIntervalMs: progressIntervalMs,
+		OneFileSystem: oneFileSystem, MinSize: rsfs.DefaultMinSize,
+	}
 	if err := c.send(MsgWalkRequest, req); err != nil {
 		return nil, nil, 0, err
 	}
@@ -123,13 +127,22 @@ func (c *AgentClient) Walk(dirPath string, excludedNames []string, counter *int3
 				return nil, nil, 0, fmt.Errorf("bad walk response: %w", err)
 			}
 			files := make(map[string]entity.FileMeta, len(walkResp.Files))
+			totalSize := walkResp.TotalSize
 			for p, fm := range walkResp.Files {
-				files[p] = fm.ToEntity()
+				meta := fm.ToEntity()
+				// Filter again locally: an agent older than the min_size field returns
+				// everything, and both sides must apply the same threshold or small files
+				// would count as missing at the destination.
+				if rsfs.SkipBySize(false, meta.Size) {
+					totalSize -= meta.Size
+					continue
+				}
+				files[p] = meta
 			}
 			if counter != nil {
 				atomic.StoreInt32(counter, int32(len(files)))
 			}
-			return files, walkResp.Dirs, walkResp.TotalSize, nil
+			return files, walkResp.Dirs, totalSize, nil
 		default:
 			return nil, nil, 0, fmt.Errorf("unexpected message type during walk: %s", env.Type)
 		}

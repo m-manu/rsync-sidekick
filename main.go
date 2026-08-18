@@ -10,6 +10,7 @@ import (
 	"time"
 
 	set "github.com/deckarep/golang-set/v2"
+	"github.com/m-manu/rsync-sidekick/v2/bytesutil"
 	"github.com/m-manu/rsync-sidekick/v2/fmte"
 	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
 	"github.com/m-manu/rsync-sidekick/v2/lib"
@@ -20,8 +21,8 @@ import (
 
 const (
 	applicationMajorVersion = 2
-	applicationMinorVersion = 1
-	applicationPatchVersion = 9
+	applicationMinorVersion = 2
+	applicationPatchVersion = 0
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -41,6 +42,7 @@ const (
 	exitCodeScriptPathError
 	exitCodeSSHError
 	exitCodeArchivePathError
+	exitCodeInvalidMinSize
 )
 
 //go:embed default_exclusions.txt
@@ -66,6 +68,7 @@ var flags struct {
 	archivePaths         func() []string
 	oneFileSystem        func() bool
 	archiveOneFileSystem func() bool
+	minSize              func() int64
 }
 
 func setupExclusionsOpt() {
@@ -228,6 +231,26 @@ func setupAgentOpt() {
 	_ = flag.CommandLine.MarkHidden("agent")
 }
 
+func setupMinSizeOpt() {
+	const minSizeFlag = "min-size"
+	minSizePtr := flag.String(minSizeFlag, "",
+		"ignore files smaller than this size, e.g. '1M', '512k', '2g'\n"+
+			"(they are left out of every directory scan, so they are never hashed;\n"+
+			"rsync transfers them normally - useful when small files dominate the count)")
+	flags.minSize = func() int64 {
+		if *minSizePtr == "" {
+			return 0
+		}
+		size, err := bytesutil.ParseBinarySize(*minSizePtr)
+		if err != nil {
+			fmte.PrintfErr("error: argument to flag --%s is invalid: %+v\n", minSizeFlag, err)
+			flag.Usage()
+			os.Exit(exitCodeInvalidMinSize)
+		}
+		return size
+	}
+}
+
 func setupSyncDirTimestampsOpt() {
 	syncDirTsPtr := flag.BoolP("sync-dir-timestamps", "d", false,
 		"also propagate directory timestamps from source to destination")
@@ -312,6 +335,7 @@ func setupFlags() {
 	setupShellScriptWithNameOpt()
 	setupVerboseOpt()
 	setupProgressFrequencyOpt()
+	setupMinSizeOpt()
 	setupGetListFilesDir()
 	setupShowVersion()
 	setupDryRunOpt()
@@ -386,6 +410,12 @@ func main() {
 				os.Exit(exitCodeArchivePathError)
 			}
 		}
+	}
+
+	// --min-size applies to every walk, local and remote alike.
+	if minSize := flags.minSize(); minSize > 0 {
+		rsfs.DefaultMinSize = minSize
+		fmte.Printf("Ignoring files smaller than %s\n", bytesutil.BinaryFormat(minSize))
 	}
 
 	// Set --one-file-system defaults for LocalFS instances

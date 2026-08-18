@@ -31,6 +31,19 @@ var DefaultOneFileSystem bool
 // DefaultArchiveOneFileSystem is the default for OneFileSystem on archive scans.
 var DefaultArchiveOneFileSystem bool
 
+// DefaultMinSize is the --min-size threshold in bytes: regular files smaller than this are
+// left out of every walk, so they never become orphans, candidates or archive candidates
+// and never get hashed. Zero disables it. Directories are never filtered.
+//
+// Filtering inside the walks rather than afterwards keeps the progress counters honest —
+// they report what will actually be worked on.
+var DefaultMinSize int64
+
+// SkipBySize reports whether a regular file of this size is below DefaultMinSize.
+func SkipBySize(isDir bool, size int64) bool {
+	return !isDir && DefaultMinSize > 0 && size < DefaultMinSize
+}
+
 // NewLocalFSForArchive returns a LocalFS configured for archive scanning.
 func NewLocalFSForArchive() *LocalFS {
 	return &LocalFS{OneFileSystem: DefaultArchiveOneFileSystem}
@@ -88,6 +101,9 @@ func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}, counte
 			}
 			// Skip the root directory itself
 			if relativePath == "." {
+				return nil
+			}
+			if SkipBySize(d.IsDir(), info.Size()) {
 				return nil
 			}
 			entries = append(entries, DirEntry{

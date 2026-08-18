@@ -431,6 +431,9 @@ func BtrfsWalk(dirPath string, excludedNames map[string]struct{}, counter *int32
 					treeID:       curTreeID,
 				})
 			} else {
+				if SkipBySize(false, info.Size) {
+					continue
+				}
 				result = append(result, DirEntry{
 					RelativePath: child.relPath,
 					Size:         info.Size,
@@ -479,6 +482,9 @@ func fallbackWalkDir(absDir, relPrefix string, excludedNames map[string]struct{}
 		}
 		mode := st.Mode & syscall.S_IFMT
 		if mode == syscall.S_IFREG {
+			if SkipBySize(false, st.Size) {
+				continue
+			}
 			result = append(result, DirEntry{
 				RelativePath: relPath,
 				Size:         st.Size,

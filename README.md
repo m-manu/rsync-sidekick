@@ -109,6 +109,9 @@ flags: (all optional)
                                       (even if this is not set, files/directories such these will still be ignored: $RECYCLE.BIN, desktop.ini, Thumbs.db etc.)
   -h, --help                          display help
       --list                          list files along their metadata for given directory
+      --min-size string               ignore files smaller than this size, e.g. '1M', '512k', '2g'
+                                      (they are left out of every directory scan, so they are never hashed;
+                                      rsync transfers them normally - useful when small files dominate the count)
       --one-file-system               don't cross filesystem boundaries when scanning source and destination (like rsync -x)
                                       (works locally and with remote-exec, not with SFTP)
   -f, --progress-frequency duration   frequency of progress reporting e.g. '5s', '1m' (default 5s)
@@ -197,6 +200,26 @@ it falls back to a regular copy automatically. This flag only has an effect when
 # Instant zero-cost copies on btrfs:
 rsync-sidekick -c --reflink /Users/manu/Photos/ /mnt/btrfs-backup/Photos/
 ```
+
+### Skipping small files (`--min-size`)
+
+Every file `rsync-sidekick` considers costs a few disk seeks to hash, whether it is 2 KiB or 2 GiB —
+so on trees where small files dominate the file count, most of the runtime buys almost no transfer
+savings. `--min-size` leaves those files out of **every** directory scan (source, destination and
+archive paths), so they never become orphans, never get hashed and never appear in an action.
+`rsync` transfers them normally afterwards.
+
+Sizes are binary multiples, and `k`, `m`, `g` and `t` are all understood — as is the format
+`rsync-sidekick` prints itself, so a size from the output can be pasted straight back in:
+
+```bash
+# Only bother with files of 1 MiB and up:
+rsync-sidekick --min-size 1M /mnt/media/ /mnt/backup/media/
+```
+
+Directories are never filtered, so `--sync-dir-timestamps` keeps working. In remote-exec mode the
+threshold is sent to the agent, and the client applies it to the answer as well — so an older agent
+that ignores the field still yields the same result, just with more data on the wire.
 
 ### Staying on one filesystem (`--one-file-system`)
 

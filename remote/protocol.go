@@ -37,6 +37,10 @@ type Envelope struct {
 
 // WalkRequest asks the agent to scan a directory.
 type WalkRequest struct {
+	// MinSize mirrors --min-size so the agent can leave small files out on its side.
+	// Clients filter the response as well, so an agent that ignores this field still
+	// produces the same result — just with more data on the wire.
+	MinSize            int64    `json:"min_size,omitempty"`
 	DirPath            string   `json:"dir_path"`
 	ExcludedNames      []string `json:"excluded_names"`
 	ProgressIntervalMs int64    `json:"progress_interval_ms,omitempty"`

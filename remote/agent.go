@@ -86,6 +86,7 @@ func handleWalk(w io.Writer, payload []byte) {
 
 	// Apply one-file-system setting from the client
 	rsfs.DefaultOneFileSystem = req.OneFileSystem
+	rsfs.DefaultMinSize = req.MinSize
 
 	excluded := set.NewThreadUnsafeSetWithSize[string](len(req.ExcludedNames))
 	for _, name := range req.ExcludedNames {
