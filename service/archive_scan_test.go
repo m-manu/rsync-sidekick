@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"sync/atomic"
 	"testing"
 
 	set "github.com/deckarep/golang-set/v2"
@@ -163,6 +164,64 @@ func TestScanArchives_StreamsActionsInsteadOfReturningThem(t *testing.T) {
 	assert.Empty(t, actions,
 		"a streamed action must not also be returned, or it would be applied twice")
 	assert.EqualValues(t, 1, progress.Matches)
+}
+
+func TestScanArchives_MatchesArriveBeforeAllHashingIsDone(t *testing.T) {
+	// More candidates than one chunk holds, each matching its own orphan. If matching only
+	// happened after the last hash, nothing would be emitted until the very end; chunked
+	// matching has to produce actions while hashing continues.
+	base := t.TempDir()
+	sourceDir := filepath.Join(base, "source")
+	archiveDir := filepath.Join(base, "archive")
+	destDir := filepath.Join(base, "dest")
+	for _, dir := range []string{sourceDir, archiveDir, destDir} {
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+	}
+
+	// Shrink the chunk so the test stays fast; the mechanism is the same at any size.
+	previousChunkSize := archiveMatchChunkSize
+	archiveMatchChunkSize = 20
+	t.Cleanup(func() { archiveMatchChunkSize = previousChunkSize })
+
+	const total = 55 // more than two chunks
+	sourceFiles := make(map[string]entity.FileMeta, total)
+	orphans := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		// Distinct content per pair, so each archive file matches exactly one orphan.
+		content := []byte("payload " + strconv.Itoa(i))
+		name := "file-" + strconv.Itoa(i) + ".bin"
+		require.NoError(t, os.WriteFile(filepath.Join(sourceDir, name), content, 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(archiveDir, name), content, 0o644))
+		sourceFiles[name] = entity.FileMeta{Size: int64(len(content)), ModifiedTimestamp: 1}
+		orphans = append(orphans, name)
+	}
+	sort.Strings(orphans)
+
+	// Record how far hashing had got when the first action was emitted.
+	var progress ArchiveScanProgress
+	hashedAtFirstAction := int32(-1)
+	onAction := func(action.SyncAction) error {
+		if hashedAtFirstAction < 0 {
+			hashedAtFirstAction = atomic.LoadInt32(&progress.FilesHashed)
+		}
+		return nil
+	}
+	digestFn := func(orphansToHash []string) (map[string]entity.FileDigest, error) {
+		return BatchDigestsParallel(nil, sourceDir, orphansToHash, nil), nil
+	}
+
+	_, err := ScanArchivesForCopiesWithDigests(
+		walkFixtureArchives(t, archiveDir),
+		orphans, nil, digestFn, onAction,
+		sourceFiles, destDir, false, nil,
+		&progress,
+	)
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, hashedAtFirstAction, int32(0), "at least one action must be emitted")
+	assert.Less(t, hashedAtFirstAction, int32(total),
+		"the first match must arrive before every candidate is hashed")
+	assert.EqualValues(t, total, progress.Matches, "every orphan has its copy in the archive")
 }
 
 func TestScanArchives_StreamErrorAbortsTheScan(t *testing.T) {

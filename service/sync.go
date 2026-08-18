@@ -25,6 +25,12 @@ const (
 	indexBuildErrorCountTolerance = 20
 )
 
+// archiveMatchChunkSize is how many archive candidates are hashed and matched before the
+// next batch starts. It exists so the first copies land on disk after minutes rather than
+// after the last hash of the whole path. Large enough that per-chunk overhead and the
+// parallel hashing stay worthwhile; a variable only so tests can shrink it.
+var archiveMatchChunkSize = 10_000
+
 // FindOrphans finds files at source that do not have corresponding files at destination.
 // File at destination must exist and have same size and same modified timestamp.
 func FindOrphans(sourceFiles, destinationFiles map[string]entity.FileMeta) []string {
@@ -512,133 +518,170 @@ func ScanArchivesForCopiesWithDigests(archiveWalks []ArchiveWalk,
 
 		// An archive file is worth hashing only if its extension and size match an orphan
 		// that is still unmatched. Everything else never reaches a digest comparison.
-		type archiveCandidate struct {
-			relPath string
-			orphans []string
-		}
-		var candidates []archiveCandidate
-		var neededOrphans []string
+		candidateOrphans := make(map[string][]string)
+		var candidatePaths []string
 		for archiveRelPath, archiveMeta := range archiveFiles {
 			atomic.AddInt32(&progress.FilesChecked, 1)
 			k := orphanKey{ext: lib.GetFileExt(archiveRelPath), size: archiveMeta.Size}
 			orphans, ok := orphansByKey[k]
-			if !ok {
+			if !ok || len(orphans) == 0 {
 				continue
 			}
-			pending := make([]string, 0, len(orphans))
-			for _, orphan := range orphans {
-				if matchedOrphans.Contains(orphan) {
-					continue
-				}
-				pending = append(pending, orphan)
-				if digestFn == nil || requestedDigests.Contains(orphan) {
-					continue
-				}
-				if _, known := orphanDigests[orphan]; known {
-					continue
-				}
-				requestedDigests.Add(orphan)
-				neededOrphans = append(neededOrphans, orphan)
-			}
-			if len(pending) == 0 {
-				// Every orphan of this size and extension is already served.
-				continue
-			}
-			candidates = append(candidates, archiveCandidate{relPath: archiveRelPath, orphans: pending})
+			candidateOrphans[archiveRelPath] = orphans
+			candidatePaths = append(candidatePaths, archiveRelPath)
 		}
-		if len(candidates) == 0 {
+		if len(candidatePaths) == 0 {
 			continue
 		}
 
 		// The candidate list is complete before any hashing starts, so it can serve as the
 		// denominator for progress. Adding per archive path keeps it truthful when a later
 		// path contributes more candidates.
-		atomic.AddInt32(&progress.FilesToHash, int32(len(candidates)))
+		atomic.AddInt32(&progress.FilesToHash, int32(len(candidatePaths)))
 
-		candidatePaths := make([]string, 0, len(candidates))
-		for _, candidate := range candidates {
-			candidatePaths = append(candidatePaths, candidate.relPath)
-		}
+		// Sort the whole list first, then cut it into chunks: each chunk is a contiguous,
+		// ascending inode range, so working chunk by chunk still reads the disk in one
+		// direction.
 		sortForLocality(archivePath, candidatePaths, destFS)
-		slices.Sort(neededOrphans) // deterministic batches for digestFn
 
-		// Both sides are independent, so hash them at the same time.
-		var archiveDigests, freshOrphanDigests map[string]entity.FileDigest
-		var orphanDigestErr error
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			archiveDigests = BatchDigestsParallel(destFS, archivePath, candidatePaths, &progress.FilesHashed)
-		}()
-		go func() {
-			defer wg.Done()
-			if len(neededOrphans) > 0 {
-				freshOrphanDigests, orphanDigestErr = digestFn(neededOrphans)
+		for start := 0; start < len(candidatePaths); start += archiveMatchChunkSize {
+			end := min(start+archiveMatchChunkSize, len(candidatePaths))
+			chunk := candidatePaths[start:end]
+
+			// Which orphans can this chunk still serve, and which of those need a digest?
+			// Re-checked per chunk, because earlier chunks have matched orphans since.
+			pendingForChunk := make(map[string][]string, len(chunk))
+			var neededOrphans []string
+			for _, archiveRelPath := range chunk {
+				pending := make([]string, 0, len(candidateOrphans[archiveRelPath]))
+				for _, orphan := range candidateOrphans[archiveRelPath] {
+					if matchedOrphans.Contains(orphan) {
+						continue
+					}
+					pending = append(pending, orphan)
+					if digestFn == nil || requestedDigests.Contains(orphan) {
+						continue
+					}
+					if _, known := orphanDigests[orphan]; known {
+						continue
+					}
+					requestedDigests.Add(orphan)
+					neededOrphans = append(neededOrphans, orphan)
+				}
+				if len(pending) > 0 {
+					pendingForChunk[archiveRelPath] = pending
+				}
 			}
-		}()
-		wg.Wait()
-		if orphanDigestErr != nil {
-			return nil, fmt.Errorf("error computing digests of %d orphan candidate(s): %w",
-				len(neededOrphans), orphanDigestErr)
-		}
-		for orphan, digest := range freshOrphanDigests {
-			orphanDigests[orphan] = digest
-		}
-
-		for _, candidate := range candidates {
-			archiveRelPath := candidate.relPath
-			archiveDigest, hashed := archiveDigests[archiveRelPath]
-			if !hashed {
+			toHash := make([]string, 0, len(pendingForChunk))
+			for _, archiveRelPath := range chunk {
+				if _, ok := pendingForChunk[archiveRelPath]; ok {
+					toHash = append(toHash, archiveRelPath)
+				}
+			}
+			if skipped := len(chunk) - len(toHash); skipped > 0 {
+				// Those candidates need no digest because every orphan they could serve is
+				// already served. Take them off the total instead of counting them as
+				// hashed, so the two numbers stay truthful and still meet at the end.
+				atomic.AddInt32(&progress.FilesToHash, int32(-skipped))
+			}
+			if len(toHash) == 0 {
 				continue
 			}
-			archiveAbsPath := filepath.Join(archivePath, archiveRelPath)
-			for _, orphan := range candidate.orphans {
-				if matchedOrphans.Contains(orphan) {
-					continue
+			slices.Sort(neededOrphans) // deterministic batches for digestFn
+
+			// Both sides are independent, so hash them at the same time.
+			var archiveDigests, freshOrphanDigests map[string]entity.FileDigest
+			var orphanDigestErr error
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				archiveDigests = BatchDigestsParallel(destFS, archivePath, toHash, &progress.FilesHashed)
+			}()
+			go func() {
+				defer wg.Done()
+				if len(neededOrphans) > 0 {
+					freshOrphanDigests, orphanDigestErr = digestFn(neededOrphans)
 				}
-				oDigest, ok := orphanDigests[orphan]
-				if !ok {
-					continue
-				}
-				if oDigest == archiveDigest {
-					absDest := filepath.Join(destDirPath, orphan)
-					parentDir := filepath.Dir(absDest)
-					isReadable := false
-					if destFS != nil {
-						isReadable = destFS.IsReadableDirectory(parentDir)
-					} else {
-						isReadable = lib.IsReadableDirectory(parentDir)
-					}
-					if !isReadable {
-						mkdirAction := action.MakeDirectoryAction{AbsoluteDirPath: parentDir, FS: destFS}
-						if !uniqueness.Contains(mkdirAction.Uniqueness()) {
-							if err := emit(mkdirAction, onAction, &actions); err != nil {
-								return nil, err
-							}
-							uniqueness.Add(mkdirAction.Uniqueness())
-						}
-					}
-					copyAction := action.CopyFileAction{
-						AbsSourcePath: archiveAbsPath,
-						AbsDestPath:   absDest,
-						SourceModTime: time.Unix(sourceFiles[orphan].ModifiedTimestamp, 0),
-						UseReflink:    useReflink,
-					}
-					if !uniqueness.Contains(copyAction.Uniqueness()) {
-						if err := emit(copyAction, onAction, &actions); err != nil {
-							return nil, err
-						}
-						uniqueness.Add(copyAction.Uniqueness())
-						matchedOrphans.Add(orphan)
-						atomic.AddInt32(&progress.Matches, 1)
-					}
-				}
+			}()
+			wg.Wait()
+			if orphanDigestErr != nil {
+				return nil, fmt.Errorf("error computing digests of %d orphan candidate(s): %w",
+					len(neededOrphans), orphanDigestErr)
+			}
+			for orphan, digest := range freshOrphanDigests {
+				orphanDigests[orphan] = digest
+			}
+
+			if err := matchChunk(chunk, pendingForChunk, archiveDigests, orphanDigests,
+				matchedOrphans, uniqueness, onAction, &actions, progress,
+				archivePath, destDirPath, useReflink, destFS, sourceFiles); err != nil {
+				return nil, err
 			}
 		}
 	}
 
 	return actions, nil
+}
+
+// matchChunk compares one chunk of hashed archive files against the orphan digests and
+// emits the actions for every match. Kept separate so the scan loop above stays readable.
+func matchChunk(chunk []string, pendingForChunk map[string][]string,
+	archiveDigests, orphanDigests map[string]entity.FileDigest,
+	matchedOrphans, uniqueness set.Set[string], onAction ArchiveActionFunc,
+	actions *[]action.SyncAction, progress *ArchiveScanProgress,
+	archivePath, destDirPath string, useReflink bool, destFS rsfs.FileSystem,
+	sourceFiles map[string]entity.FileMeta,
+) error {
+	for _, archiveRelPath := range chunk {
+		archiveDigest, hashed := archiveDigests[archiveRelPath]
+		if !hashed {
+			continue
+		}
+		archiveAbsPath := filepath.Join(archivePath, archiveRelPath)
+		for _, orphan := range pendingForChunk[archiveRelPath] {
+			if matchedOrphans.Contains(orphan) {
+				continue
+			}
+			orphanDigest, ok := orphanDigests[orphan]
+			if !ok || orphanDigest != archiveDigest {
+				continue
+			}
+			absDest := filepath.Join(destDirPath, orphan)
+			parentDir := filepath.Dir(absDest)
+			isReadable := false
+			if destFS != nil {
+				isReadable = destFS.IsReadableDirectory(parentDir)
+			} else {
+				isReadable = lib.IsReadableDirectory(parentDir)
+			}
+			if !isReadable {
+				mkdirAction := action.MakeDirectoryAction{AbsoluteDirPath: parentDir, FS: destFS}
+				if !uniqueness.Contains(mkdirAction.Uniqueness()) {
+					if err := emit(mkdirAction, onAction, actions); err != nil {
+						return err
+					}
+					uniqueness.Add(mkdirAction.Uniqueness())
+				}
+			}
+			copyAction := action.CopyFileAction{
+				AbsSourcePath: archiveAbsPath,
+				AbsDestPath:   absDest,
+				SourceModTime: time.Unix(sourceFiles[orphan].ModifiedTimestamp, 0),
+				UseReflink:    useReflink,
+			}
+			if !uniqueness.Contains(copyAction.Uniqueness()) {
+				if err := emit(copyAction, onAction, actions); err != nil {
+					return err
+				}
+				uniqueness.Add(copyAction.Uniqueness())
+				matchedOrphans.Add(orphan)
+				atomic.AddInt32(&progress.Matches, 1)
+			}
+		}
+	}
+
+	return nil
 }
 
 func FindDirectoryResultToCsv(dirPath string, excludedFiles set.Set[string], file *os.File) error {
