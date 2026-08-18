@@ -5,6 +5,8 @@ package fs
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,28 +73,37 @@ var mountFSTypeCache map[string]string
 var mountFSTypeCacheOnce sync.Once
 
 func buildMountCache() {
-	mountFSTypeCache = make(map[string]string)
-	data, err := syscall.Open("/proc/self/mounts", syscall.O_RDONLY, 0)
+	f, err := os.Open("/proc/self/mounts")
 	if err != nil {
+		mountFSTypeCache = make(map[string]string)
 		return
 	}
-	defer syscall.Close(data)
-	buf := make([]byte, 64*1024)
-	n, _ := syscall.Read(data, buf)
-	if n <= 0 {
-		return
+	defer f.Close()
+	mountFSTypeCache = parseMountFSTypes(f)
+}
+
+// parseMountFSTypes maps mountpoint → fs type from the /proc/self/mounts format.
+//
+// It has to read to EOF, not once: procfs hands out its content in chunks of a few
+// kilobytes regardless of the buffer offered, so a single read on a host with many mounts
+// (docker overlays, for instance) returns only the first few entries. Everything past the
+// first chunk would be missing from the map, and a mountpoint that isn't in the map is not
+// recognised as BTRFS - which silently costs the optimized walk on exactly those hosts.
+func parseMountFSTypes(r io.Reader) map[string]string {
+	byMountpoint := make(map[string]string)
+	data, err := io.ReadAll(r)
+	if err != nil && len(data) == 0 {
+		return byMountpoint
 	}
-	for _, line := range strings.Split(string(buf[:n]), "\n") {
+	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 3 {
 			continue
 		}
-		mountpoint := fields[1]
 		// Unescape octal sequences (e.g. \040 for space)
-		mountpoint = unescapeOctal(mountpoint)
-		fstype := fields[2]
-		mountFSTypeCache[mountpoint] = fstype
+		byMountpoint[unescapeOctal(fields[1])] = fields[2]
 	}
+	return byMountpoint
 }
 
 func unescapeOctal(s string) string {
