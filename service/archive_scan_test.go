@@ -95,7 +95,7 @@ func TestScanArchives_HashesOnlyOrphansAnArchiveCanMatch(t *testing.T) {
 
 	actions, err := ScanArchivesForCopiesWithDigests(
 		walkFixtureArchives(t, f.archiveDir),
-		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested),
+		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested), nil,
 		f.sourceFiles, f.destDir, false, nil,
 		&progress,
 	)
@@ -126,7 +126,7 @@ func TestScanArchives_SkipsArchiveFilesWhoseOrphansAreServed(t *testing.T) {
 	var progress ArchiveScanProgress
 	actions, err := ScanArchivesForCopiesWithDigests(
 		walkFixtureArchives(t, f.archiveDir),
-		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested),
+		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested), nil,
 		f.sourceFiles, f.destDir, false, nil,
 		&progress,
 	)
@@ -140,6 +140,46 @@ func TestScanArchives_SkipsArchiveFilesWhoseOrphansAreServed(t *testing.T) {
 	// so at that point the orphan is still unmatched and both files qualify. Hashing them
 	// as one parallel batch is worth more than serialising to save the second hash.
 	assert.EqualValues(t, 2, progress.FilesHashed)
+}
+
+func TestScanArchives_StreamsActionsInsteadOfReturningThem(t *testing.T) {
+	f := newArchiveScanFixture(t)
+	var requested, streamed []string
+	var progress ArchiveScanProgress
+
+	onAction := func(a action.SyncAction) error {
+		streamed = append(streamed, a.Uniqueness())
+		return nil
+	}
+	actions, err := ScanArchivesForCopiesWithDigests(
+		walkFixtureArchives(t, f.archiveDir),
+		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested), onAction,
+		f.sourceFiles, f.destDir, false, nil,
+		&progress,
+	)
+	require.NoError(t, err)
+
+	assert.Len(t, streamed, 1, "the match must be handed over as it is found, got %v", streamed)
+	assert.Empty(t, actions,
+		"a streamed action must not also be returned, or it would be applied twice")
+	assert.EqualValues(t, 1, progress.Matches)
+}
+
+func TestScanArchives_StreamErrorAbortsTheScan(t *testing.T) {
+	f := newArchiveScanFixture(t)
+	var requested []string
+	var progress ArchiveScanProgress
+
+	failing := func(action.SyncAction) error { return assert.AnError }
+	_, err := ScanArchivesForCopiesWithDigests(
+		walkFixtureArchives(t, f.archiveDir),
+		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested), failing,
+		f.sourceFiles, f.destDir, false, nil,
+		&progress,
+	)
+
+	require.ErrorIs(t, err, assert.AnError,
+		"a failing copy must stop the scan rather than be silently dropped")
 }
 
 func TestWalkArchives_KeepsPathOrderAndCounts(t *testing.T) {
@@ -188,7 +228,7 @@ func TestScanArchives_SkipsSecondArchivePathOnceOrphansAreServed(t *testing.T) {
 	var progress ArchiveScanProgress
 	actions, err := ScanArchivesForCopiesWithDigests(
 		walkFixtureArchives(t, f.archiveDir, secondArchive),
-		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested),
+		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested), nil,
 		f.sourceFiles, f.destDir, false, nil,
 		&progress,
 	)
@@ -211,7 +251,7 @@ func TestScanArchives_ReusesKnownDigestsWithoutHashing(t *testing.T) {
 	var progress ArchiveScanProgress
 	actions, err := ScanArchivesForCopiesWithDigests(
 		walkFixtureArchives(t, f.archiveDir),
-		f.orphans, known, recordingDigestFn(f.sourceDir, &requested),
+		f.orphans, known, recordingDigestFn(f.sourceDir, &requested), nil,
 		f.sourceFiles, f.destDir, false, nil,
 		&progress,
 	)
@@ -230,7 +270,7 @@ func TestScanArchives_DoesNotMutateCallersDigestMap(t *testing.T) {
 
 	_, err := ScanArchivesForCopiesWithDigests(
 		walkFixtureArchives(t, f.archiveDir),
-		f.orphans, known, recordingDigestFn(f.sourceDir, &requested),
+		f.orphans, known, recordingDigestFn(f.sourceDir, &requested), nil,
 		f.sourceFiles, f.destDir, false, nil,
 		&progress,
 	)
@@ -245,7 +285,7 @@ func TestScanArchives_WithoutDigestFnFallsBackToKnownDigests(t *testing.T) {
 	// No digest function and no known digests: nothing can be compared, so no copies.
 	actions, err := ScanArchivesForCopiesWithDigests(
 		walkFixtureArchives(t, f.archiveDir),
-		f.orphans, nil, nil,
+		f.orphans, nil, nil, nil,
 		f.sourceFiles, f.destDir, false, nil,
 		&progress,
 	)

@@ -27,16 +27,18 @@ const unixCommandLengthGuess = 200
 func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions set.Set[string],
 	destinationDirPath string, verbose bool, progressFrequency time.Duration,
 	copyDuplicates bool, useReflink bool, archivePaths []string,
+	onArchiveAction service.ArchiveActionFunc,
 ) ([]action.SyncAction, error) {
 	return getSyncActionsWithProgressFS(runID, sourceDirPath, nil, exclusions,
 		destinationDirPath, nil, verbose, progressFrequency,
-		copyDuplicates, useReflink, archivePaths)
+		copyDuplicates, useReflink, archivePaths, onArchiveAction)
 }
 
 func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS rsfs.FileSystem,
 	exclusions set.Set[string], destinationDirPath string, destFS rsfs.FileSystem,
 	verbose bool, progressFrequency time.Duration,
 	copyDuplicates bool, useReflink bool, archivePaths []string,
+	onArchiveAction service.ArchiveActionFunc,
 ) ([]action.SyncAction, error) {
 	if verbose {
 		fmte.VerboseOn()
@@ -246,7 +248,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 			atomic.StoreInt32(&archiveProgress.FilesFound, atomic.LoadInt32(&scanArchiveCounter))
 			stopArchiveProgress := startArchiveScanProgress(&archiveProgress, progressFrequency)
 			archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
-				archiveWalks, unmatchedOrphans, knownOrphanDigests, digestFn,
+				archiveWalks, unmatchedOrphans, knownOrphanDigests, digestFn, onArchiveAction,
 				sourceFiles, destinationDirPath, useReflink, destFS,
 				&archiveProgress)
 			stopArchiveProgress()
@@ -271,8 +273,18 @@ func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string
 	outputScriptPath string, verbose bool, dryRun bool, syncDirTimestamps bool, progressFrequency time.Duration,
 	copyDuplicates bool, useReflink bool, archivePaths []string,
 ) error {
+	// Archive matches are applied as they are found, so an interrupted run keeps them.
+	// Not in script mode, which needs the complete list, and not for a dry run.
+	var appliedArchiveActions int
+	var onArchiveAction service.ArchiveActionFunc
+	if outputScriptPath == "" && !dryRun {
+		onArchiveAction = newLocalArchiveActionStreamer(&appliedArchiveActions)
+	}
 	actions, err := getSyncActionsWithProgress(runID, sourceDirPath, exclusions, destinationDirPath, verbose, progressFrequency,
-		copyDuplicates, useReflink, archivePaths)
+		copyDuplicates, useReflink, archivePaths, onArchiveAction)
+	if appliedArchiveActions > 0 {
+		fmte.Printf("Applied %d actions from archive paths while scanning\n", appliedArchiveActions)
+	}
 	if err != nil {
 		return err // no extra info needed
 	}
@@ -350,9 +362,19 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 		destDirPath = remotePath
 	}
 
+	// Stream archive matches only when the destination is local; over SFTP each action
+	// would be its own round-trip.
+	var appliedArchiveActions int
+	var onArchiveAction service.ArchiveActionFunc
+	if destFS == nil && outputScriptPath == "" && !dryRun {
+		onArchiveAction = newLocalArchiveActionStreamer(&appliedArchiveActions)
+	}
 	actions, actionsErr := getSyncActionsWithProgressFS(runID, sourceDirPath, sourceFS,
 		exclusions, destDirPath, destFS, verbose, progressFrequency,
-		copyDuplicates, useReflink, archivePaths)
+		copyDuplicates, useReflink, archivePaths, onArchiveAction)
+	if appliedArchiveActions > 0 {
+		fmte.Printf("Applied %d actions from archive paths while scanning\n", appliedArchiveActions)
+	}
 	if actionsErr != nil {
 		return actionsErr
 	}
@@ -713,14 +735,23 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 				if archiveWalkErr != nil {
 					return fmt.Errorf("error scanning archive paths: %+v", archiveWalkErr)
 				}
+				// The destination is local, so matches can be applied as they are found.
+				var appliedArchiveActions int
+				var onArchiveAction service.ArchiveActionFunc
+				if outputScriptPath == "" && !dryRun {
+					onArchiveAction = newLocalArchiveActionStreamer(&appliedArchiveActions)
+				}
 				var archiveProgress service.ArchiveScanProgress
 				atomic.StoreInt32(&archiveProgress.FilesFound, atomic.LoadInt32(&scanArchiveCounter))
 				stopArchiveProgress := startArchiveScanProgress(&archiveProgress, progressFrequency)
 				archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
-					archiveWalks, unmatchedOrphans, knownOrphanDigests, digestFn,
+					archiveWalks, unmatchedOrphans, knownOrphanDigests, digestFn, onArchiveAction,
 					sourceFiles, destDirPath, useReflink, nil,
 					&archiveProgress)
 				stopArchiveProgress()
+				if appliedArchiveActions > 0 {
+					fmte.Printf("Applied %d actions from archive paths while scanning\n", appliedArchiveActions)
+				}
 				if archiveErr != nil {
 					return fmt.Errorf("error scanning archives: %+v", archiveErr)
 				}
@@ -765,6 +796,24 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 
 	// Source is remote, destination is local: perform locally
 	return performActions(actions, destDirPath, dryRun)
+}
+
+// newLocalArchiveActionStreamer applies each archive match immediately instead of
+// collecting it for the end, so an interrupted run keeps every copy it already made. The
+// count of applied actions is reported through applied.
+//
+// Only for a local destination: there a copy is a reflink or a plain local write, cheap
+// enough to do one at a time. With a remote destination each action would be its own
+// round-trip over the agent connection, where batching at the end is the better trade.
+func newLocalArchiveActionStreamer(applied *int) service.ArchiveActionFunc {
+	return func(a action.SyncAction) error {
+		if err := a.Perform(); err != nil {
+			return fmt.Errorf("error performing \"%s\": %w", a.UnixCommand(), err)
+		}
+		*applied++
+		fmte.PrintfV("Performed: %s\n", a.UnixCommand())
+		return nil
+	}
 }
 
 // startArchiveScanProgress reports the archive scan counters until the returned stop

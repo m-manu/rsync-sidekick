@@ -372,6 +372,22 @@ func sortForLocality(basePath string, relPaths []string, fsys rsfs.FileSystem) {
 	})
 }
 
+// ArchiveActionFunc receives each action an archive scan produces, the moment it is
+// known. It lets callers apply a match right away instead of collecting everything for
+// the end: an interrupted run then keeps every copy it already made. Actions arrive in
+// dependency order — a directory before the file that goes into it. Returning an error
+// aborts the scan.
+type ArchiveActionFunc func(action.SyncAction) error
+
+// emit hands an action to onAction, or collects it when there is none.
+func emit(a action.SyncAction, onAction ArchiveActionFunc, collected *[]action.SyncAction) error {
+	if onAction == nil {
+		*collected = append(*collected, a)
+		return nil
+	}
+	return onAction(a)
+}
+
 // OrphanDigestFunc computes digests for the given orphan relative paths on demand.
 // ScanArchivesForCopiesWithDigests calls it only for orphans that an archive path can
 // actually match, so callers must not assume it is invoked for every orphan.
@@ -449,9 +465,12 @@ func getParallelism(n int) (int, int) {
 //
 // archiveWalks comes from WalkArchives, which callers typically run early and in parallel
 // with the source scan.
+//
+// With onAction set, actions are handed over as they are found and the returned slice
+// stays empty — so an action can never be applied twice.
 func ScanArchivesForCopiesWithDigests(archiveWalks []ArchiveWalk,
 	unmatchedOrphans []string, knownOrphanDigests map[string]entity.FileDigest,
-	digestFn OrphanDigestFunc,
+	digestFn OrphanDigestFunc, onAction ArchiveActionFunc,
 	sourceFiles map[string]entity.FileMeta,
 	destDirPath string, useReflink bool, destFS rsfs.FileSystem,
 	progress *ArchiveScanProgress,
@@ -594,7 +613,9 @@ func ScanArchivesForCopiesWithDigests(archiveWalks []ArchiveWalk,
 					if !isReadable {
 						mkdirAction := action.MakeDirectoryAction{AbsoluteDirPath: parentDir, FS: destFS}
 						if !uniqueness.Contains(mkdirAction.Uniqueness()) {
-							actions = append(actions, mkdirAction)
+							if err := emit(mkdirAction, onAction, &actions); err != nil {
+								return nil, err
+							}
 							uniqueness.Add(mkdirAction.Uniqueness())
 						}
 					}
@@ -605,7 +626,9 @@ func ScanArchivesForCopiesWithDigests(archiveWalks []ArchiveWalk,
 						UseReflink:    useReflink,
 					}
 					if !uniqueness.Contains(copyAction.Uniqueness()) {
-						actions = append(actions, copyAction)
+						if err := emit(copyAction, onAction, &actions); err != nil {
+							return nil, err
+						}
 						uniqueness.Add(copyAction.Uniqueness())
 						matchedOrphans.Add(orphan)
 						atomic.AddInt32(&progress.Matches, 1)
