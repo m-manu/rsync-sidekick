@@ -511,9 +511,9 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			go func() {
 				defer wgDigest.Done()
 				if sourceIsRemote && len(remoteOrphans) > 0 {
-					remoteDigests, remoteDigestErr = agentClient.BatchDigest(sourceDirPath, remoteOrphans, &remoteCounter)
+					remoteDigests, remoteDigestErr = agentClient.BatchDigest(sourceDirPath, remoteOrphans, &remoteCounter, intervalMs)
 				} else if !sourceIsRemote && len(remoteCandiates) > 0 {
-					remoteDigests, remoteDigestErr = agentClient.BatchDigest(destDirPath, remoteCandiates, &remoteCounter)
+					remoteDigests, remoteDigestErr = agentClient.BatchDigest(destDirPath, remoteCandiates, &remoteCounter, intervalMs)
 				}
 			}()
 			go func() {
@@ -632,7 +632,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 				return withDigestProgress(len(orphans), progressFrequency,
 					func(counter *int32) (map[string]entity.FileDigest, error) {
 						if sourceIsRemote {
-							return agentClient.BatchDigest(sourceDirPath, orphans, counter)
+							return agentClient.BatchDigest(sourceDirPath, orphans, counter, progressFrequency.Milliseconds())
 						}
 						return service.BatchDigestsParallel(nil, sourceDirPath, orphans, counter), nil
 					})
@@ -737,20 +737,10 @@ func withDigestProgress(count int, progressFrequency time.Duration,
 	return digests, err
 }
 
+// batchDigestLocal hashes the local side of a remote-exec run. It mirrors what the agent
+// does for the remote side, so neither direction of a sync is slower than the other.
 func batchDigestLocal(basePath string, files []string, counter *int32) (map[string]entity.FileDigest, error) {
-	digests := make(map[string]entity.FileDigest, len(files))
-	for _, relPath := range files {
-		absPath := fmt.Sprintf("%s/%s", basePath, relPath)
-		digest, err := service.GetDigest(absPath)
-		if counter != nil {
-			atomic.AddInt32(counter, 1)
-		}
-		if err != nil {
-			continue
-		}
-		digests[relPath] = digest
-	}
-	return digests, nil
+	return service.BatchDigestsParallel(nil, basePath, files, counter), nil
 }
 
 // scanArchivesViaAgent scans archive paths on the remote destination via the agent,
@@ -856,7 +846,7 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 		}
 
 		// Digest archive candidates via agent
-		archiveDigests, digestErr := agentClient.BatchDigest(archivePath, candidates, &archiveDigestCounter)
+		archiveDigests, digestErr := agentClient.BatchDigest(archivePath, candidates, &archiveDigestCounter, intervalMs)
 		if digestErr != nil {
 			return nil, fmt.Errorf("error computing archive digests via agent: %w", digestErr)
 		}

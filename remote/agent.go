@@ -18,6 +18,10 @@ import (
 	"github.com/m-manu/rsync-sidekick/v2/service"
 )
 
+// defaultDigestProgressInterval is used when a DigestRequest carries no interval,
+// which is what clients older than the throttled progress reporting send.
+const defaultDigestProgressInterval = 2 * time.Second
+
 // RunAgent reads JSON-line requests from stdin, executes them locally,
 // and writes JSON-line responses to stdout. This is invoked on the remote
 // side via "rsync-sidekick --agent".
@@ -138,17 +142,44 @@ func handleDigest(w io.Writer, payload []byte) {
 	}
 
 	total := len(req.Files)
-	resp := DigestResponse{
-		Digests: make(map[string]FileDigest, total),
-	}
 
-	for i, relPath := range req.Files {
-		absPath := filepath.Join(req.BasePath, relPath)
-		digest, err := service.GetDigest(absPath)
-		if err == nil {
-			resp.Digests[relPath] = FileDigestFromEntity(digest)
+	// Hashing runs with the same parallelism as a local run, so a sync is equally fast
+	// in either direction. Progress is reported on a timer rather than per file — one
+	// message per file used to put len(Files) round-trips on the wire.
+	interval := time.Duration(req.ProgressIntervalMs) * time.Millisecond
+	if interval <= 0 {
+		interval = defaultDigestProgressInterval
+	}
+	var counter int32
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				writeResponse(w, MsgDigestProgress,
+					DigestProgress{FilesHashed: int(atomic.LoadInt32(&counter)), Total: total})
+			}
 		}
-		writeResponse(w, MsgDigestProgress, DigestProgress{FilesHashed: i + 1, Total: total})
+	}()
+
+	digests := service.BatchDigestsParallel(nil, req.BasePath, req.Files, &counter)
+
+	// Stop reporting before writing the response: writeResponse has a single writer.
+	close(done)
+	wg.Wait()
+
+	resp := DigestResponse{
+		Digests: make(map[string]FileDigest, len(digests)),
+	}
+	for relPath, digest := range digests {
+		resp.Digests[relPath] = FileDigestFromEntity(digest)
 	}
 
 	writeResponse(w, MsgDigestResponse, resp)

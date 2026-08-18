@@ -95,9 +95,12 @@ func (c *AgentClient) Walk(dirPath string, excludedNames []string, counter *int3
 }
 
 // BatchDigest asks the remote agent to compute digests for a batch of files.
-// counter, if non-nil, is updated atomically as the agent reports progress.
-func (c *AgentClient) BatchDigest(basePath string, files []string, counter *int32) (map[string]entity.FileDigest, error) {
-	req := DigestRequest{BasePath: basePath, Files: files}
+// counter, if non-nil, is updated atomically as the agent reports progress, which it
+// does every progressIntervalMs milliseconds (zero leaves the interval to the agent).
+func (c *AgentClient) BatchDigest(basePath string, files []string, counter *int32,
+	progressIntervalMs int64,
+) (map[string]entity.FileDigest, error) {
+	req := DigestRequest{BasePath: basePath, Files: files, ProgressIntervalMs: progressIntervalMs}
 	if err := c.send(MsgDigestRequest, req); err != nil {
 		return nil, err
 	}

@@ -54,6 +54,9 @@ type WalkResponse struct {
 type DigestRequest struct {
 	BasePath string   `json:"base_path"`
 	Files    []string `json:"files"`
+	// ProgressIntervalMs throttles DigestProgress messages. Left at zero — as older
+	// clients do — the agent falls back to defaultDigestProgressIntervalMs.
+	ProgressIntervalMs int64 `json:"progress_interval_ms,omitempty"`
 }
 
 // DigestProgress is sent by the agent after each file is hashed.
