@@ -13,9 +13,20 @@ const (
 	MsgDigestResponse  = "digest_response"
 	MsgPerformRequest  = "perform_request"
 	MsgPerformResponse = "perform_response"
+	MsgVersionRequest  = "version_request"
+	MsgVersionResponse = "version_response"
 	MsgQuit            = "quit"
 	MsgError           = "error"
 )
+
+// VersionRequest asks the agent which version it is. Agents that predate this message
+// answer with MsgError, which callers treat as "alive, but ask over a separate ssh call".
+type VersionRequest struct{}
+
+// VersionResponse carries the agent's application version, e.g. "v2.1.5".
+type VersionResponse struct {
+	Version string `json:"version"`
+}
 
 // Envelope wraps every message.
 type Envelope struct {

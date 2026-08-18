@@ -3,6 +3,7 @@ package remote
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -49,6 +50,47 @@ func NewAgentClient(loc Location, explicitKeyPath string, sidekickPath string) (
 		stdin:  stdin,
 		stdout: bufio.NewReader(stdout),
 	}, nil
+}
+
+// AgentError is an error the remote agent reported. Getting one back means the agent is
+// alive and speaking the protocol — as opposed to an I/O error, which means it isn't.
+type AgentError struct {
+	Message string
+}
+
+func (e *AgentError) Error() string {
+	return "remote agent error: " + e.Message
+}
+
+// ErrVersionRequestUnsupported means the agent answered the version request with an
+// error, so it predates that message. The connection is fine and stays usable — only the
+// version has to be obtained some other way.
+var ErrVersionRequestUnsupported = errors.New("remote agent does not support version requests")
+
+// Version asks the running agent for its version, which saves the separate
+// "rsync-sidekick --version" ssh call — and with it a second password prompt.
+// Returns ErrVersionRequestUnsupported for agents that don't know the message yet.
+func (c *AgentClient) Version() (string, error) {
+	if err := c.send(MsgVersionRequest, VersionRequest{}); err != nil {
+		return "", err
+	}
+	env, err := c.recv()
+	if err != nil {
+		// An error message back from the agent means it runs but doesn't know the request.
+		var agentErr *AgentError
+		if errors.As(err, &agentErr) {
+			return "", ErrVersionRequestUnsupported
+		}
+		return "", err
+	}
+	if env.Type != MsgVersionResponse {
+		return "", fmt.Errorf("unexpected message type during version request: %s", env.Type)
+	}
+	var resp VersionResponse
+	if err := json.Unmarshal(env.Payload, &resp); err != nil {
+		return "", fmt.Errorf("bad version response: %w", err)
+	}
+	return strings.TrimSpace(resp.Version), nil
 }
 
 // Walk asks the remote agent to scan a directory.
@@ -201,9 +243,9 @@ func (c *AgentClient) recv() (*Envelope, error) {
 	if env.Type == MsgError {
 		var errResp ErrorResponse
 		if err := json.Unmarshal(env.Payload, &errResp); err == nil {
-			return nil, fmt.Errorf("remote agent error: %s", errResp.Message)
+			return nil, &AgentError{Message: errResp.Message}
 		}
-		return nil, fmt.Errorf("remote agent error (unparseable)")
+		return nil, &AgentError{Message: "(unparseable)"}
 	}
 
 	return &env, nil

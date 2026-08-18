@@ -21,7 +21,7 @@ import (
 const (
 	applicationMajorVersion = 2
 	applicationMinorVersion = 1
-	applicationPatchVersion = 4
+	applicationPatchVersion = 5
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -333,7 +333,7 @@ func main() {
 
 	// Agent mode: run as remote agent (reads from stdin, writes to stdout)
 	if flags.isAgent() {
-		if err := remote.RunAgent(); err != nil {
+		if err := remote.RunAgent(applicationVersion); err != nil {
 			fmte.PrintfErr("agent error: %+v\n", err)
 			os.Exit(exitCodeSyncError)
 		}

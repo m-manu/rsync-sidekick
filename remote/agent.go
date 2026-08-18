@@ -25,9 +25,15 @@ const defaultDigestProgressInterval = 2 * time.Second
 // RunAgent reads JSON-line requests from stdin, executes them locally,
 // and writes JSON-line responses to stdout. This is invoked on the remote
 // side via "rsync-sidekick --agent".
-func RunAgent() error {
-	reader := bufio.NewReader(os.Stdin)
-	writer := os.Stdout
+func RunAgent(agentVersion string) error {
+	return runAgentOn(os.Stdin, os.Stdout, agentVersion)
+}
+
+// runAgentOn is RunAgent against explicit streams, which is what makes the dispatch
+// loop testable.
+func runAgentOn(in io.Reader, out io.Writer, agentVersion string) error {
+	reader := bufio.NewReader(in)
+	writer := out
 
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -61,6 +67,9 @@ func RunAgent() error {
 
 		case MsgPerformRequest:
 			handlePerform(writer, env.Payload)
+
+		case MsgVersionRequest:
+			writeResponse(writer, MsgVersionResponse, VersionResponse{Version: agentVersion})
 
 		default:
 			writeError(writer, fmt.Sprintf("unknown message type: %s", env.Type))
