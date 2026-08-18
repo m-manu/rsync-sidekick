@@ -790,10 +790,11 @@ func startArchiveScanProgress(progress *service.ArchiveScanProgress,
 				// Archives are always on the destination side; the orphan digests running
 				// alongside are on the source side. Label both so the two interleaved
 				// progress lines are telling apart at a glance.
-				fmte.Printf("DST: Scanning archives: %d files found, %d checked, %d hashed, %d matched...\n",
+				fmte.Printf("DST: Scanning archives: %d files found, %d checked, %d / %d hashed, %d matched...\n",
 					atomic.LoadInt32(&progress.FilesFound),
 					atomic.LoadInt32(&progress.FilesChecked),
 					atomic.LoadInt32(&progress.FilesHashed),
+					atomic.LoadInt32(&progress.FilesToHash),
 					atomic.LoadInt32(&progress.Matches))
 			}
 		}

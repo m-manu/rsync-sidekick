@@ -110,6 +110,8 @@ func TestScanArchives_HashesOnlyOrphansAnArchiveCanMatch(t *testing.T) {
 	assert.Equal(t, filepath.Join(f.destDir, "match.txt"), copies[0].AbsDestPath)
 	assert.EqualValues(t, 1, progress.Matches, "one orphan was matched")
 	assert.EqualValues(t, 1, progress.FilesChecked, "the archive file was checked against the orphan index")
+	assert.EqualValues(t, 1, progress.FilesToHash,
+		"the candidate count must be known before hashing starts, to serve as a denominator")
 	assert.EqualValues(t, 1, progress.FilesHashed, "and it was a candidate, so it was hashed")
 }
 

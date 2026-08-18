@@ -345,7 +345,8 @@ func WalkArchives(archivePaths []string, exclusions set.Set[string], destFS rsfs
 type ArchiveScanProgress struct {
 	FilesFound   int32 // archive files seen while walking
 	FilesChecked int32 // archive files compared against the orphan index
-	FilesHashed  int32 // archive files that turned out to be candidates and were hashed
+	FilesToHash  int32 // candidates found so far; grows by one archive path at a time
+	FilesHashed  int32 // candidates hashed
 	Matches      int32 // orphans matched to an archive file
 }
 
@@ -529,6 +530,11 @@ func ScanArchivesForCopiesWithDigests(archiveWalks []ArchiveWalk,
 		if len(candidates) == 0 {
 			continue
 		}
+
+		// The candidate list is complete before any hashing starts, so it can serve as the
+		// denominator for progress. Adding per archive path keeps it truthful when a later
+		// path contributes more candidates.
+		atomic.AddInt32(&progress.FilesToHash, int32(len(candidates)))
 
 		candidatePaths := make([]string, 0, len(candidates))
 		for _, candidate := range candidates {
