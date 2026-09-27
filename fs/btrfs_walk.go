@@ -414,7 +414,7 @@ func BtrfsWalk(dirPath string, excludedNames map[string]struct{}, counter *int32
 				if syscall.Stat(child.absPath, &st) != nil {
 					continue
 				}
-				info = btrfsInodeInfo{Size: st.Size, Mode: st.Mode, MTimeSec: st.Mtim.Sec}
+				info = btrfsInodeInfo{Size: st.Size, Mode: st.Mode, MTimeSec: int64(st.Mtim.Sec)}
 			}
 
 			if child.dtype == btrfsFtDir {
@@ -482,7 +482,7 @@ func fallbackWalkDir(absDir, relPrefix string, excludedNames map[string]struct{}
 			result = append(result, DirEntry{
 				RelativePath: relPath,
 				Size:         st.Size,
-				ModTime:      st.Mtim.Sec,
+				ModTime:      int64(st.Mtim.Sec),
 				IsDir:        false,
 			})
 			if counter != nil {
@@ -492,7 +492,7 @@ func fallbackWalkDir(absDir, relPrefix string, excludedNames map[string]struct{}
 			result = append(result, DirEntry{
 				RelativePath: relPath,
 				Size:         0,
-				ModTime:      st.Mtim.Sec,
+				ModTime:      int64(st.Mtim.Sec),
 				IsDir:        true,
 			})
 			// Recurse
