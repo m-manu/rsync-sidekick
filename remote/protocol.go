@@ -77,6 +77,14 @@ type DigestRequest struct {
 	// ProgressIntervalMs throttles DigestProgress messages. Left at zero — as older
 	// clients do — the agent falls back to defaultDigestProgressIntervalMs.
 	ProgressIntervalMs int64 `json:"progress_interval_ms,omitempty"`
+	// DigestCache asks the agent to reuse and record digests in its own cache file.
+	// Nil, as sent by older clients, leaves the cache off. An empty Path means the
+	// agent's default location.
+	DigestCache *DigestCacheSpec `json:"digest_cache,omitempty"`
+}
+
+type DigestCacheSpec struct {
+	Path string `json:"path,omitempty"`
 }
 
 // DigestProgress is sent by the agent after each file is hashed.

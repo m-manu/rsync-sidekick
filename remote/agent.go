@@ -64,6 +64,7 @@ func runAgentOn(in io.Reader, out io.Writer, agentVersion string) error {
 		close(performQueue)
 		performWorker.Wait()
 		workers.Wait()
+		closeAgentDigestCache()
 	}
 
 	for {
@@ -197,6 +198,7 @@ func handleDigest(w *requestWriter, payload []byte) {
 		return
 	}
 
+	useAgentDigestCache(req.DigestCache)
 	total := len(req.Files)
 
 	// Hashing runs with the same parallelism as a local run, so a sync is equally fast

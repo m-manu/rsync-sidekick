@@ -24,6 +24,8 @@ import (
 // possible: without it, one caller would read another caller's messages off the shared
 // stream. Callers therefore never read from the connection themselves.
 type AgentClient struct {
+	DigestCache *DigestCacheSpec
+
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout *bufio.Reader
@@ -256,7 +258,8 @@ func (c *AgentClient) Walk(dirPath string, excludedNames []string, counter *int3
 func (c *AgentClient) BatchDigest(basePath string, files []string, counter *int32,
 	progressIntervalMs int64,
 ) (map[string]entity.FileDigest, error) {
-	req := DigestRequest{BasePath: basePath, Files: files, ProgressIntervalMs: progressIntervalMs}
+	req := DigestRequest{BasePath: basePath, Files: files, ProgressIntervalMs: progressIntervalMs,
+		DigestCache: c.DigestCache}
 	env, err := c.roundTrip(MsgDigestRequest, req, counter)
 	if err != nil {
 		return nil, err

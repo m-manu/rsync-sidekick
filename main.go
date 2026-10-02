@@ -21,8 +21,8 @@ import (
 
 const (
 	applicationMajorVersion = 2
-	applicationMinorVersion = 3
-	applicationPatchVersion = 6
+	applicationMinorVersion = 4
+	applicationPatchVersion = 0
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -49,26 +49,28 @@ const (
 var defaultExclusionsStr string
 
 var flags struct {
-	isHelp               func() bool
-	getExcludedFiles     func() set.Set[string]
-	isShellScriptMode    func() bool
-	scriptOutputPath     func() string
-	getListFilesDir      func() bool
-	isVerbose            func() bool
-	showVersion          func() bool
-	isDryRun             func() bool
-	progressFrequency    func() time.Duration
-	sshKeyPath           func() string
-	sidekickPath         func() string
-	isSFTP               func() bool
-	isAgent              func() bool
-	syncDirTimestamps    func() bool
-	copyDuplicates       func() bool
-	useReflink           func() bool
-	archivePaths         func() []string
-	oneFileSystem        func() bool
-	archiveOneFileSystem func() bool
-	minSize              func() int64
+	isHelp                func() bool
+	getExcludedFiles      func() set.Set[string]
+	isShellScriptMode     func() bool
+	scriptOutputPath      func() string
+	getListFilesDir       func() bool
+	isVerbose             func() bool
+	showVersion           func() bool
+	isDryRun              func() bool
+	progressFrequency     func() time.Duration
+	sshKeyPath            func() string
+	sidekickPath          func() string
+	isSFTP                func() bool
+	isAgent               func() bool
+	syncDirTimestamps     func() bool
+	copyDuplicates        func() bool
+	useReflink            func() bool
+	archivePaths          func() []string
+	oneFileSystem         func() bool
+	archiveOneFileSystem  func() bool
+	minSize               func() int64
+	digestCachePath       func() string
+	remoteDigestCachePath func() (string, bool)
 }
 
 func setupExclusionsOpt() {
@@ -251,6 +253,60 @@ func setupMinSizeOpt() {
 	}
 }
 
+func setupDigestCacheOpt() {
+	enabledPtr := flag.Bool("digest-cache", false,
+		"reuse digests from earlier runs; a file is hashed again only when its size, mtime,\n"+
+			"ctime or inode changed (one cache per host, default ~/.cache/rsync-sidekick/digests.tsv;\n"+
+			"a read-only cache file is used without saving new digests)")
+	pathPtr := flag.String("digest-cache-path", "",
+		"digest cache file on this host (implies --digest-cache)")
+	remotePathPtr := flag.String("remote-digest-cache-path", "",
+		"digest cache file on the remote host (implies --digest-cache, remote-exec only)")
+	flags.digestCachePath = func() string {
+		if *pathPtr != "" {
+			return *pathPtr
+		}
+		if !*enabledPtr && *remotePathPtr == "" {
+			return ""
+		}
+		defaultPath, err := service.DefaultDigestCachePath()
+		if err != nil {
+			fmte.PrintfErr("warning: no default location for the digest cache (%+v) - digests are not cached\n", err)
+			return ""
+		}
+		return defaultPath
+	}
+	flags.remoteDigestCachePath = func() (string, bool) {
+		return *remotePathPtr, *enabledPtr || *pathPtr != "" || *remotePathPtr != ""
+	}
+}
+
+func openDigestCache() {
+	path := flags.digestCachePath()
+	if path == "" {
+		return
+	}
+	c, err := service.OpenDigestCache(path)
+	if err != nil {
+		fmte.PrintfErr("warning: %+v - digests are not cached\n", err)
+		return
+	}
+	service.SetDigestCache(c)
+}
+
+func closeDigestCache() {
+	c := service.ActiveDigestCache()
+	if c == nil {
+		return
+	}
+	service.SetDigestCache(nil)
+	hits, misses := c.Stats()
+	fmte.Printf("Digest cache %s: %d reused, %d computed\n", c.Path(), hits, misses)
+	if err := c.Close(); err != nil {
+		fmte.PrintfErr("warning: couldn't save digest cache %s: %+v\n", c.Path(), err)
+	}
+}
+
 func setupSyncDirTimestampsOpt() {
 	syncDirTsPtr := flag.BoolP("sync-dir-timestamps", "d", false,
 		"also propagate directory timestamps from source to destination")
@@ -348,6 +404,7 @@ func setupFlags() {
 	setupReflinkOpt()
 	setupArchivePathOpt()
 	setupOneFileSystemOpt()
+	setupDigestCacheOpt()
 	setupUsage()
 }
 
@@ -457,9 +514,11 @@ func main() {
 		}
 
 		copyDup := flags.copyDuplicates() || len(flags.archivePaths()) > 0
+		openDigestCache()
 		syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath, scriptOutputPath,
 			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
 			copyDup, flags.useReflink(), flags.archivePaths())
+		closeDigestCache()
 		if syncErr != nil {
 			fmte.PrintfErr("error while syncing: %+v\n", syncErr)
 			os.Exit(exitCodeSyncError)
@@ -519,6 +578,14 @@ func main() {
 	}
 
 	copyDup := flags.copyDuplicates() || len(flags.archivePaths()) > 0
+	openDigestCache()
+	if remotePath, enabled := flags.remoteDigestCachePath(); enabled {
+		if agentClient != nil {
+			agentClient.DigestCache = &remote.DigestCacheSpec{Path: remotePath}
+		} else {
+			fmte.PrintfErr("warning: the digest cache only covers the local side in SFTP mode\n")
+		}
+	}
 	var syncErr error
 	if sourceLoc.IsRemote {
 		syncErr = rsyncSidekickRemote(runID, remoteLoc, absLocalPath, true,
@@ -531,6 +598,7 @@ func main() {
 			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
 			copyDup, flags.useReflink(), flags.archivePaths())
 	}
+	closeDigestCache()
 	if syncErr != nil {
 		fmte.PrintfErr("error while syncing: %+v\n", syncErr)
 		os.Exit(exitCodeSyncError)

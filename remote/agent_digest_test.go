@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/m-manu/rsync-sidekick/v2/service"
 	"github.com/stretchr/testify/assert"
@@ -148,4 +149,27 @@ func TestDigestRequest_IntervalSurvivesTheWire(t *testing.T) {
 	dataWithoutInterval, err := json.Marshal(DigestRequest{BasePath: "/base", Files: []string{"a"}})
 	require.NoError(t, err)
 	assert.NotContains(t, string(dataWithoutInterval), "progress_interval_ms")
+}
+
+func TestAgentDigest_UsesRequestedDigestCache(t *testing.T) {
+	dir, relPaths := digestTestTree(t, 8)
+	cachePath := filepath.Join(t.TempDir(), "remote-digests.tsv")
+	time.Sleep(2100 * time.Millisecond)
+	req := DigestRequest{BasePath: dir, Files: relPaths, ProgressIntervalMs: 3_600_000,
+		DigestCache: &DigestCacheSpec{Path: cachePath}}
+
+	_, first := runDigestHandler(t, req)
+	c := service.ActiveDigestCache()
+	require.NotNil(t, c, "a digest request with a cache spec must open the cache")
+	_, second := runDigestHandler(t, req)
+	hits, misses := c.Stats()
+	closeAgentDigestCache()
+
+	assert.Equal(t, first.Digests, second.Digests)
+	assert.Equal(t, [2]int64{int64(len(relPaths)), int64(len(relPaths))}, [2]int64{hits, misses},
+		"second request must be answered from the cache")
+	assert.Nil(t, service.ActiveDigestCache(), "shutdown must close the agent's cache")
+	data, err := os.ReadFile(cachePath)
+	require.NoError(t, err)
+	assert.Equal(t, len(relPaths)+1, bytes.Count(data, []byte("\n")), "header plus one line per file:\n%s", data)
 }
