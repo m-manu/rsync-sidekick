@@ -112,6 +112,8 @@ flags: (all optional)
   -x, --exclusions string                 path to file containing newline separated list of file/directory names to be excluded
                                           (even if this is not set, files/directories such these will still be ignored: $RECYCLE.BIN, desktop.ini, Thumbs.db etc.)
   -h, --help                              display help
+      --ignore-extension                  match files by size and content only, not by file extension
+                                          (finds copies whose names differ, e.g. an archive that names files by their hash)
       --list                              list files along their metadata for given directory
       --min-size string                   ignore files smaller than this size, e.g. '1M', '512k', '2g'
                                           (they are left out of every directory scan, so they are never hashed;
@@ -131,7 +133,7 @@ flags: (all optional)
   -i, --ssh-key string                    path to SSH private key for remote connections
   -d, --sync-dir-timestamps               also propagate directory timestamps from source to destination
   -v, --verbose                           logs every single action performed, plus extra information (caution: makes it slow!)
-      --version                           show application version (v2.4.0) and exit
+      --version                           show application version (v2.5.0) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```
@@ -246,6 +248,16 @@ rsync-sidekick --one-file-system -c --reflink /mnt/data/@ /mnt/backup/@
 
 # Archives cross into snapshots by default (no extra flag needed):
 rsync-sidekick --one-file-system -c --reflink -a /mnt/backup/.snapshots/@/ /mnt/data/@ /mnt/backup/@
+```
+
+### Ignoring file extensions (`--ignore-extension`)
+
+By default a file only matches another one with the same extension, size and digest. `--ignore-extension`
+drops the extension from that comparison, so a copy is found even when its name is entirely different —
+for example in an archive that stores every file under its content hash, without an extension:
+
+```bash
+rsync-sidekick --ignore-extension --reflink -a /mnt/backup/by-hash/ user@server:/photos/ /mnt/backup/photos/
 ```
 
 ### Reusing digests across runs (`--digest-cache`)

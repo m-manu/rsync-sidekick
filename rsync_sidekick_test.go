@@ -12,6 +12,7 @@ import (
 	set "github.com/deckarep/golang-set/v2"
 	"github.com/m-manu/rsync-sidekick/v2/action"
 	"github.com/m-manu/rsync-sidekick/v2/fmte"
+	"github.com/m-manu/rsync-sidekick/v2/lib"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -462,6 +463,47 @@ func TestCandidateReusedForCopies(t *testing.T) {
 		assert.Equal(t, 1, moveCount, "expected exactly 1 move action")
 		assert.Equal(t, 0, copyCount, "expected 0 copy actions without --copy-duplicates")
 	})
+}
+
+func TestIgnoreExtensionMatchesHashNamedArchive(t *testing.T) {
+	fileContent := []byte("content stored under its hash in the archive")
+	ts := time.Now().Add(-1 * time.Hour)
+	testDir, err := filepath.Abs("./test_ignore_extension_" + runID)
+	stopIfError(t, err)
+	createDirectory(testDir)
+	defer func() { _ = os.RemoveAll(testDir) }()
+
+	srcDir := filepath.Join(testDir, "source")
+	dstDir := filepath.Join(testDir, "destination")
+	archiveDir := filepath.Join(testDir, "archive")
+	for _, dir := range []string{srcDir, dstDir, archiveDir} {
+		createDirectory(dir)
+	}
+	for _, path := range []string{filepath.Join(srcDir, "photo.jpg"), filepath.Join(archiveDir, "9f86d081884c7d65")} {
+		stopIfError(t, os.WriteFile(path, fileContent, 0644))
+		stopIfError(t, os.Chtimes(path, ts, ts))
+	}
+	fmte.Off()
+	defer func() { lib.IgnoreFileExtension = false }()
+
+	for _, ignore := range []bool{false, true} {
+		lib.IgnoreFileExtension = ignore
+		actions, syncErr := getSyncActionsWithProgress(runID, srcDir, set.NewSet[string](), dstDir,
+			false, 0, true, false, []string{archiveDir}, nil)
+		stopIfError(t, syncErr)
+		copies := 0
+		for _, a := range actions {
+			if _, ok := a.(action.CopyFileAction); ok {
+				copies++
+			}
+		}
+		expected := 0
+		if ignore {
+			expected = 1
+		}
+		assert.Equal(t, expected, copies, "copies from the hash-named archive with ignore-extension=%v, actions: %v",
+			ignore, actions)
+	}
 }
 
 // TestMoveRedirectForCopyActions verifies that when a file is moved and a later

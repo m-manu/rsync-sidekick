@@ -14,6 +14,7 @@ import (
 
 	"github.com/m-manu/rsync-sidekick/v2/entity"
 	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
+	"github.com/m-manu/rsync-sidekick/v2/lib"
 )
 
 // AgentClient communicates with a remote rsync-sidekick agent over SSH
@@ -273,7 +274,11 @@ func (c *AgentClient) BatchDigest(basePath string, files []string, counter *int3
 	}
 	digests := make(map[string]entity.FileDigest, len(digestResp.Digests))
 	for p, fd := range digestResp.Digests {
-		digests[p] = fd.ToEntity()
+		digest := fd.ToEntity()
+		if lib.IgnoreFileExtension {
+			digest.FileExtension = ""
+		}
+		digests[p] = digest
 	}
 	if counter != nil {
 		atomic.StoreInt32(counter, int32(len(files)))

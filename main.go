@@ -21,7 +21,7 @@ import (
 
 const (
 	applicationMajorVersion = 2
-	applicationMinorVersion = 4
+	applicationMinorVersion = 5
 	applicationPatchVersion = 0
 )
 
@@ -69,6 +69,7 @@ var flags struct {
 	oneFileSystem         func() bool
 	archiveOneFileSystem  func() bool
 	minSize               func() int64
+	ignoreExtension       func() bool
 	digestCachePath       func() string
 	remoteDigestCachePath func() (string, bool)
 }
@@ -231,6 +232,15 @@ func setupAgentOpt() {
 		return *agentPtr
 	}
 	_ = flag.CommandLine.MarkHidden("agent")
+}
+
+func setupIgnoreExtensionOpt() {
+	ignoreExtPtr := flag.Bool("ignore-extension", false,
+		"match files by size and content only, not by file extension\n"+
+			"(finds copies whose names differ, e.g. an archive that names files by their hash)")
+	flags.ignoreExtension = func() bool {
+		return *ignoreExtPtr
+	}
 }
 
 func setupMinSizeOpt() {
@@ -405,6 +415,7 @@ func setupFlags() {
 	setupArchivePathOpt()
 	setupOneFileSystemOpt()
 	setupDigestCacheOpt()
+	setupIgnoreExtensionOpt()
 	setupUsage()
 }
 
@@ -467,6 +478,10 @@ func main() {
 				os.Exit(exitCodeArchivePathError)
 			}
 		}
+	}
+
+	if flags.ignoreExtension() {
+		lib.IgnoreFileExtension = true
 	}
 
 	// --min-size applies to every walk, local and remote alike.

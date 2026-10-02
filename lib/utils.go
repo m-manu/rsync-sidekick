@@ -18,8 +18,15 @@ func IsReadableDirectory(path string) bool {
 	return info.IsDir()
 }
 
+// IgnoreFileExtension makes GetFileExt report no extension, so files match by size
+// and content alone (--ignore-extension).
+var IgnoreFileExtension bool
+
 // GetFileExt gets file extension in lower case
 func GetFileExt(path string) string {
+	if IgnoreFileExtension {
+		return ""
+	}
 	ext := filepath.Ext(path)
 	return strings.ToLower(ext)
 }
