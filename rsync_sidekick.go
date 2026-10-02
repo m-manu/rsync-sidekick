@@ -88,8 +88,8 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 			defer wgArchiveWalk.Done()
 			<-destWalkDone
 			if destinationFilesErr == nil {
-				archiveWalks, archiveWalkErr = service.WalkArchives(archivePaths, exclusions, destFS,
-					&scanArchiveCounter)
+				archiveWalks, archiveWalkErr = service.WalkArchivesKnowing(archivePaths, exclusions, destFS,
+					&scanArchiveCounter, &service.KnownTree{Root: destinationDirPath, Files: destinationFiles})
 			}
 			atomic.StoreInt32(&archiveScanDone, 1)
 		}()
@@ -486,8 +486,8 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			<-destWalkDone
 			if destinationFilesErr == nil {
 				if archivesAreLocal {
-					archiveWalks, archiveWalkErr = service.WalkArchives(archivePaths, exclusions, nil,
-						&scanArchiveCounter)
+					archiveWalks, archiveWalkErr = service.WalkArchivesKnowing(archivePaths, exclusions, nil,
+						&scanArchiveCounter, &service.KnownTree{Root: destDirPath, Files: destinationFiles})
 				} else {
 					archiveWalks, archiveWalkErr = walkArchivesViaAgent(agentClient, archivePaths,
 						excludedNames, &scanArchiveCounter, intervalMs)

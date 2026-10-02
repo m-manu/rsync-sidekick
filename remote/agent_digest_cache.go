@@ -12,28 +12,34 @@ var (
 	agentDigestCacheTried bool
 )
 
+// useAgentDigestCache sets up the agent's cache on the first digest request. Without a
+// spec, as from older clients or without --digest-cache, digests are still remembered
+// for the lifetime of the agent, just not saved.
 func useAgentDigestCache(spec *DigestCacheSpec) {
-	if spec == nil {
-		return
-	}
 	agentDigestCacheMu.Lock()
 	defer agentDigestCacheMu.Unlock()
 	if agentDigestCacheTried {
 		return
 	}
 	agentDigestCacheTried = true
+	if spec == nil {
+		service.SetDigestCache(service.NewMemoryDigestCache())
+		return
+	}
 	path := spec.Path
 	if path == "" {
 		defaultPath, err := service.DefaultDigestCachePath()
 		if err != nil {
-			fmte.PrintfErr("warning: remote: no default location for the digest cache (%+v) - digests are not cached\n", err)
+			fmte.PrintfErr("warning: remote: no default location for the digest cache (%+v) - digests are not saved\n", err)
+			service.SetDigestCache(service.NewMemoryDigestCache())
 			return
 		}
 		path = defaultPath
 	}
-	c, err := service.OpenDigestCache(path)
+	c, err := service.OpenDigestCache(path, spec.Roots)
 	if err != nil {
-		fmte.PrintfErr("warning: remote: %+v - digests are not cached\n", err)
+		fmte.PrintfErr("warning: remote: %+v - digests are not saved\n", err)
+		service.SetDigestCache(service.NewMemoryDigestCache())
 		return
 	}
 	service.SetDigestCache(c)
@@ -48,6 +54,9 @@ func closeAgentDigestCache() {
 		return
 	}
 	service.SetDigestCache(nil)
+	if !c.Persistent() {
+		return
+	}
 	hits, misses := c.Stats()
 	fmte.PrintfErr("Remote digest cache %s: %d reused, %d computed\n", c.Path(), hits, misses)
 	if err := c.Close(); err != nil {

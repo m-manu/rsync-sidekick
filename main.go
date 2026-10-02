@@ -21,7 +21,7 @@ import (
 
 const (
 	applicationMajorVersion = 2
-	applicationMinorVersion = 5
+	applicationMinorVersion = 6
 	applicationPatchVersion = 0
 )
 
@@ -291,14 +291,16 @@ func setupDigestCacheOpt() {
 	}
 }
 
-func openDigestCache() {
+func openDigestCache(roots []string) {
 	path := flags.digestCachePath()
 	if path == "" {
+		service.SetDigestCache(service.NewMemoryDigestCache())
 		return
 	}
-	c, err := service.OpenDigestCache(path)
+	c, err := service.OpenDigestCache(path, roots)
 	if err != nil {
 		fmte.PrintfErr("warning: %+v - digests are not cached\n", err)
+		service.SetDigestCache(service.NewMemoryDigestCache())
 		return
 	}
 	service.SetDigestCache(c)
@@ -311,6 +313,12 @@ func closeDigestCache() {
 	}
 	service.SetDigestCache(nil)
 	hits, misses := c.Stats()
+	if !c.Persistent() {
+		if hits > 0 {
+			fmte.Printf("Digests reused within this run: %d (computed: %d)\n", hits, misses)
+		}
+		return
+	}
 	fmte.Printf("Digest cache %s: %d reused, %d computed\n", c.Path(), hits, misses)
 	if err := c.Close(); err != nil {
 		fmte.PrintfErr("warning: couldn't save digest cache %s: %+v\n", c.Path(), err)
@@ -529,7 +537,7 @@ func main() {
 		}
 
 		copyDup := flags.copyDuplicates() || len(flags.archivePaths()) > 0
-		openDigestCache()
+		openDigestCache(append([]string{sourcePath, destinationPath}, flags.archivePaths()...))
 		syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath, scriptOutputPath,
 			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
 			copyDup, flags.useReflink(), flags.archivePaths())
@@ -593,10 +601,17 @@ func main() {
 	}
 
 	copyDup := flags.copyDuplicates() || len(flags.archivePaths()) > 0
-	openDigestCache()
+	localRoots := []string{absLocalPath}
+	remoteRoots := []string{remoteLoc.Path}
+	if sourceLoc.IsRemote {
+		localRoots = append(localRoots, flags.archivePaths()...)
+	} else {
+		remoteRoots = append(remoteRoots, flags.archivePaths()...)
+	}
+	openDigestCache(localRoots)
 	if remotePath, enabled := flags.remoteDigestCachePath(); enabled {
 		if agentClient != nil {
-			agentClient.DigestCache = &remote.DigestCacheSpec{Path: remotePath}
+			agentClient.DigestCache = &remote.DigestCacheSpec{Path: remotePath, Roots: remoteRoots}
 		} else {
 			fmte.PrintfErr("warning: the digest cache only covers the local side in SFTP mode\n")
 		}

@@ -152,6 +152,7 @@ func TestDigestRequest_IntervalSurvivesTheWire(t *testing.T) {
 }
 
 func TestAgentDigest_UsesRequestedDigestCache(t *testing.T) {
+	closeAgentDigestCache()
 	dir, relPaths := digestTestTree(t, 8)
 	cachePath := filepath.Join(t.TempDir(), "remote-digests.tsv")
 	time.Sleep(2100 * time.Millisecond)

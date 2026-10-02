@@ -133,7 +133,7 @@ flags: (all optional)
   -i, --ssh-key string                    path to SSH private key for remote connections
   -d, --sync-dir-timestamps               also propagate directory timestamps from source to destination
   -v, --verbose                           logs every single action performed, plus extra information (caution: makes it slow!)
-      --version                           show application version (v2.5.0) and exit
+      --version                           show application version (v2.6.0) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```
@@ -279,8 +279,22 @@ unnoticed.
 * A dry run (`-n`) fills the cache too — digests are facts, not actions.
 * A cache file that is not writable, or held by another running `rsync-sidekick`, is used read-only:
   cached digests are reused, new ones are not saved, and a warning says so.
-* Format: one tab-separated line per file, appended as digests are computed, compacted on open when mostly
-  outdated. A cache from an incompatible version is discarded.
+* Only entries below the paths of the run (source, destination, archive paths) are loaded into memory;
+  the rest of the file is read past and kept, so one cache can serve many different runs.
+* Format: one tab-separated line per file, appended as digests are computed. A changed file gets a new line;
+  the newest line of a path wins. When more than half of the lines are outdated (and at least 10,000), the
+  file is rewritten without them on open. A cache from an incompatible version is discarded.
+* Without `--digest-cache`, digests are still remembered for the duration of the run, so no file is hashed
+  twice — for example when the destination lies inside an archive path.
+
+### Overlapping paths
+
+An archive path may contain the destination (`-a /mnt/backup/ … /mnt/backup/photos/`), lie inside it, or
+contain another archive path. Each directory is still read only once: a destination inside an archive path is
+skipped by the archive walk and taken from the destination's file list, and a path inside one already walked
+is taken from that walk. Files of the destination found this way only serve as copy sources; moves are decided
+by comparing source and destination alone, before any archive is looked at. (Applies to local archive paths
+when source/destination and archives follow the same `--one-file-system` setting.)
 
 ```bash
 # The second run reuses every digest of unchanged files:

@@ -16,7 +16,7 @@ import (
 
 func openTestCache(t *testing.T, path string) *DigestCache {
 	t.Helper()
-	c, err := OpenDigestCache(path)
+	c, err := OpenDigestCache(path, nil)
 	require.NoError(t, err)
 	c.racyWindow = 0
 	return c
@@ -110,7 +110,7 @@ func TestDigestCache_recentlyChangedFileIsNotStored(t *testing.T) {
 	require.NoError(t, os.WriteFile(file, []byte("fresh"), 0o644))
 	info, err := os.Lstat(file)
 	require.NoError(t, err)
-	c, err := OpenDigestCache(filepath.Join(dir, "digests.tsv"))
+	c, err := OpenDigestCache(filepath.Join(dir, "digests.tsv"), nil)
 	require.NoError(t, err)
 
 	c.Store(file, info, "f00000000")
@@ -204,4 +204,83 @@ func TestDigestCache_compactsWhenMostlyStale(t *testing.T) {
 	assert.True(t, found)
 	assert.Equal(t, "f44444444", hash)
 	assert.Len(t, cacheLines(t, cachePath), 2, "header plus one entry after compaction")
+}
+
+func fakeCacheLine(path string, n int) string {
+	return formatDigestCacheLine(path, digestCacheEntry{key: fileKey{dev: 1, ino: uint64(n), size: 10}, hash: "f0000000" + string(rune('0'+n%10))})
+}
+
+func TestDigestCache_loadsOnlyEntriesBelowRoots(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "digests.tsv")
+	content := digestCacheHeader + "\n" +
+		fakeCacheLine("/data/photos/a.jpg", 1) +
+		fakeCacheLine("/data/photosX/b.jpg", 2) +
+		fakeCacheLine("/other/c.jpg", 3) +
+		fakeCacheLine("/data/photos", 4)
+	require.NoError(t, os.WriteFile(cachePath, []byte(content), 0o600))
+
+	c, err := OpenDigestCache(cachePath, []string{"/data/photos"})
+	require.NoError(t, err)
+	keys := make([]string, 0, len(c.entries))
+	for k := range c.entries {
+		keys = append(keys, k)
+	}
+	require.NoError(t, c.Close())
+	assert.ElementsMatch(t, []string{"/data/photos/a.jpg", "/data/photos"}, keys,
+		"only the root itself and paths below it, not a sibling sharing the prefix")
+	assert.Equal(t, content, readFile(t, cachePath), "entries outside the roots stay in the file")
+}
+
+func TestDigestCache_compactionKeepsLatestLineOfEveryPath(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "digests.tsv")
+	var b strings.Builder
+	b.WriteString(digestCacheHeader + "\n")
+	for i := 0; i < digestCacheCompactSlack+10; i++ {
+		b.WriteString(fakeCacheLine("/elsewhere/old.bin", i))
+	}
+	b.WriteString(fakeCacheLine("/elsewhere/other.bin", 7))
+	b.WriteString(fakeCacheLine("/run/root/f.bin", 8))
+	b.WriteString("garbage line without tabs\n")
+	require.NoError(t, os.WriteFile(cachePath, []byte(b.String()), 0o600))
+
+	c, err := OpenDigestCache(cachePath, []string{"/run/root"})
+	require.NoError(t, err)
+	assert.Len(t, c.entries, 1)
+	require.NoError(t, c.Close())
+
+	lastOld := fakeCacheLine("/elsewhere/old.bin", digestCacheCompactSlack+9)
+	assert.ElementsMatch(t, []string{digestCacheHeader, strings.TrimSuffix(lastOld, "\n"),
+		strings.TrimSuffix(fakeCacheLine("/elsewhere/other.bin", 7), "\n"),
+		strings.TrimSuffix(fakeCacheLine("/run/root/f.bin", 8), "\n")},
+		cacheLines(t, cachePath), "outdated and malformed lines go, the newest line of each path stays - also outside the roots")
+}
+
+func TestDigestCache_memoryCacheReusesWithinRunWithoutFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.bin")
+	writeTestFile(t, file, bytes.Repeat([]byte("m"), 50_000), time.Unix(1_700_000_000, 0))
+	c := NewMemoryDigestCache()
+	c.racyWindow = 0
+	SetDigestCache(c)
+	defer SetDigestCache(nil)
+
+	first, err := getDigest(file)
+	require.NoError(t, err)
+	second, err := getDigest(file)
+	require.NoError(t, err)
+	assert.Equal(t, first, second)
+	hits, misses := c.Stats()
+	assert.Equal(t, [2]int64{1, 1}, [2]int64{hits, misses})
+	assert.False(t, c.Persistent())
+	require.NoError(t, c.Close())
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "a memory cache writes no file")
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return string(data)
 }

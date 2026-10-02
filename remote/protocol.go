@@ -85,6 +85,8 @@ type DigestRequest struct {
 
 type DigestCacheSpec struct {
 	Path string `json:"path,omitempty"`
+	// Roots limits which cache entries the agent loads: only those below these paths.
+	Roots []string `json:"roots,omitempty"`
 }
 
 // DigestProgress is sent by the agent after each file is hashed.

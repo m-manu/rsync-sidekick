@@ -313,19 +313,35 @@ type ArchiveWalk struct {
 func WalkArchives(archivePaths []string, exclusions set.Set[string], destFS rsfs.FileSystem,
 	counter *int32,
 ) ([]ArchiveWalk, error) {
-	walks := make([]ArchiveWalk, 0, len(archivePaths))
-	for _, archivePath := range archivePaths {
-		readable := false
+	return WalkArchivesKnowing(archivePaths, exclusions, destFS, counter, nil)
+}
+
+// WalkArchivesKnowing is WalkArchives with the destination's file list at hand: archive
+// paths that overlap the destination or each other are then not read twice.
+func WalkArchivesKnowing(archivePaths []string, exclusions set.Set[string], destFS rsfs.FileSystem,
+	counter *int32, known *KnownTree,
+) ([]ArchiveWalk, error) {
+	readable := func(archivePath string) bool {
+		ok := false
 		if destFS != nil {
-			readable = destFS.IsReadableDirectory(archivePath)
+			ok = destFS.IsReadableDirectory(archivePath)
 		} else {
-			readable = lib.IsReadableDirectory(archivePath)
+			ok = lib.IsReadableDirectory(archivePath)
 		}
-		if !readable {
+		if !ok {
 			// A single mistyped or unmounted --archive-path must not abort the run, but it
 			// has to be loud: silently contributing nothing looks like "no matches found".
 			fmte.PrintfErr("warning: archive path \"%s\" is not a readable directory - skipping it\n",
 				archivePath)
+		}
+		return ok
+	}
+	if canReuseWalks(destFS) {
+		return walkArchivesReusing(archivePaths, exclusions, counter, known, readable)
+	}
+	walks := make([]ArchiveWalk, 0, len(archivePaths))
+	for _, archivePath := range archivePaths {
+		if !readable(archivePath) {
 			continue
 		}
 
@@ -339,11 +355,15 @@ func WalkArchives(archivePaths []string, exclusions set.Set[string], destFS rsfs
 			fsys.Close()
 		}
 		if err != nil {
-			return nil, fmt.Errorf("error scanning archive %s: %w", archivePath, err)
+			return nil, archiveWalkError(archivePath, err)
 		}
 		walks = append(walks, ArchiveWalk{Path: archivePath, Files: files})
 	}
 	return walks, nil
+}
+
+func archiveWalkError(archivePath string, err error) error {
+	return fmt.Errorf("error scanning archive %s: %w", archivePath, err)
 }
 
 // ArchiveScanProgress carries the counters an archive scan advances while it runs.
