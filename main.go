@@ -21,8 +21,8 @@ import (
 
 const (
 	applicationMajorVersion = 2
-	applicationMinorVersion = 13
-	applicationPatchVersion = 4
+	applicationMinorVersion = 14
+	applicationPatchVersion = 0
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -76,6 +76,7 @@ var flags struct {
 	applyPlanPath         func() string
 	includeDirs           func() ([]string, error)
 	hashMinSize           func() int64
+	walkThreads           func() int
 }
 
 func setupExclusionsOpt() {
@@ -283,6 +284,21 @@ func setupHashMinSizeOpt() {
 			os.Exit(exitCodeInvalidMinSize)
 		}
 		return size
+	}
+}
+
+func setupWalkThreadsOpt() {
+	const walkThreadsFlag = "walk-threads"
+	walkThreadsPtr := flag.Int(walkThreadsFlag, rsfs.DefaultWalkThreads,
+		"directories read at once per scan on BTRFS (local and remote) - several outstanding\n"+
+			"requests keep all disks of an array busy; 1 reads one directory after the other")
+	flags.walkThreads = func() int {
+		if *walkThreadsPtr < 1 {
+			fmte.PrintfErr("error: argument to flag --%s must be at least 1\n", walkThreadsFlag)
+			flag.Usage()
+			os.Exit(exitCodeInvalidNumArgs)
+		}
+		return *walkThreadsPtr
 	}
 }
 
@@ -507,6 +523,7 @@ func setupFlags() {
 	setupCopyPlanOpt()
 	setupIncludeDirOpt()
 	setupHashMinSizeOpt()
+	setupWalkThreadsOpt()
 	setupUsage()
 }
 
@@ -603,6 +620,7 @@ func main() {
 		rsfs.DefaultMinSize = minSize
 		fmte.Printf("Ignoring files smaller than %s\n", bytesutil.BinaryFormat(minSize))
 	}
+	rsfs.DefaultWalkThreads = flags.walkThreads()
 	if size := flags.hashMinSize(); size > 0 {
 		hashMinSize = size
 		fmte.Printf("Not hashing files smaller than %s\n", bytesutil.BinaryFormat(size))

@@ -328,137 +328,182 @@ func BtrfsWalk(dirPath string, excludedNames map[string]struct{}, counter *int32
 	}
 	defer syscall.Close(fd)
 
-	var result []DirEntry
+	// Directories are handed out to DefaultWalkThreads workers. Each worker collects its
+	// entries on its own; a worker that finds the queue empty waits as long as another
+	// one may still add subdirectories.
+	threads := max(DefaultWalkThreads, 1)
+	var mu sync.Mutex
+	queueChanged := sync.NewCond(&mu)
+	queue := []btrfsWalkItem{{inodeID: rootInode, relativePath: "", absPath: dirPath, treeID: treeID}}
+	busy := 0
+	perWorker := make([][]DirEntry, threads)
+	var wg sync.WaitGroup
+	wg.Add(threads)
+	for w := 0; w < threads; w++ {
+		go func(w int) {
+			defer wg.Done()
+			for {
+				mu.Lock()
+				for len(queue) == 0 && busy > 0 {
+					queueChanged.Wait()
+				}
+				if len(queue) == 0 {
+					mu.Unlock()
+					return
+				}
+				item := queue[len(queue)-1]
+				queue = queue[:len(queue)-1]
+				busy++
+				mu.Unlock()
 
-	type walkItem struct {
-		inodeID      uint64
-		relativePath string
-		absPath      string
-		treeID       uint64
+				entries, subdirs := btrfsWalkDir(fd, item, excludedNames, counter)
+				perWorker[w] = append(perWorker[w], entries...)
+
+				mu.Lock()
+				queue = append(queue, subdirs...)
+				busy--
+				mu.Unlock()
+				queueChanged.Broadcast()
+			}
+		}(w)
 	}
+	wg.Wait()
 
-	queue := []walkItem{{inodeID: rootInode, relativePath: "", absPath: dirPath, treeID: treeID}}
-
-	for len(queue) > 0 {
-		item := queue[0]
-		queue = queue[1:]
-
-		// Check if this directory is still on BTRFS (not a submount with different fs)
-		if item.relativePath != "" && !IsBtrfs(item.absPath) {
-			// Different filesystem — fall back to stat-based walk for this subtree
-			fallbackEntries, err := fallbackWalkDir(item.absPath, item.relativePath, excludedNames, counter)
-			if err == nil {
-				result = append(result, fallbackEntries...)
-			}
-			continue
-		}
-
-		// Detect subvolume boundary: child dir may be a different subvolume
-		curTreeID := item.treeID
-		if item.relativePath != "" {
-			newTreeID := getSubvolID(item.absPath)
-			if newTreeID != curTreeID {
-				curTreeID = newTreeID
-				// Re-open fd for the new subvolume's inode space
-				item.inodeID = getInodeID(item.absPath)
-			}
-		}
-
-		// Read directory entries via ioctl
-		dirEntries, err := readDirIndex(fd, curTreeID, item.inodeID)
-		if err != nil {
-			// ioctl failed — fall back for this directory
-			fallbackEntries, err := fallbackWalkDir(item.absPath, item.relativePath, excludedNames, counter)
-			if err == nil {
-				result = append(result, fallbackEntries...)
-			}
-			continue
-		}
-
-		// Collect inode IDs for batch lookup
-		var minIno, maxIno uint64
-		type childInfo struct {
-			relPath string
-			absPath string
-			dtype   uint8
-		}
-		children := make(map[uint64]childInfo, len(dirEntries))
-		for _, de := range dirEntries {
-			if _, excluded := excludedNames[de.Name]; excluded {
-				continue
-			}
-			if strings.HasPrefix(de.Name, "._") {
-				continue
-			}
-			if de.Type != btrfsFtRegFile && de.Type != btrfsFtDir {
-				continue
-			}
-			relPath := de.Name
-			if item.relativePath != "" {
-				relPath = item.relativePath + "/" + de.Name
-			}
-			absPath := item.absPath + "/" + de.Name
-			children[de.InodeID] = childInfo{relPath: relPath, absPath: absPath, dtype: de.Type}
-			if minIno == 0 || de.InodeID < minIno {
-				minIno = de.InodeID
-			}
-			if de.InodeID > maxIno {
-				maxIno = de.InodeID
-			}
-		}
-
-		if len(children) == 0 {
-			continue
-		}
-
-		// Batch-read inode items
-		inodeInfos, err := readInodeItems(fd, curTreeID, minIno, maxIno)
-		if err != nil {
-			continue
-		}
-
-		for ino, child := range children {
-			info, ok := inodeInfos[ino]
-			if !ok {
-				// Inode not found in batch — may be in a different subvolume, stat individually
-				var st syscall.Stat_t
-				if syscall.Stat(child.absPath, &st) != nil {
-					continue
-				}
-				info = btrfsInodeInfo{Size: st.Size, Mode: st.Mode, MTimeSec: int64(st.Mtim.Sec)}
-			}
-
-			if child.dtype == btrfsFtDir {
-				result = append(result, DirEntry{
-					RelativePath: child.relPath,
-					Size:         0,
-					ModTime:      info.MTimeSec,
-					IsDir:        true,
-				})
-				queue = append(queue, walkItem{
-					inodeID:      ino,
-					relativePath: child.relPath,
-					absPath:      child.absPath,
-					treeID:       curTreeID,
-				})
-			} else {
-				if SkipBySize(false, info.Size) {
-					continue
-				}
-				result = append(result, DirEntry{
-					RelativePath: child.relPath,
-					Size:         info.Size,
-					ModTime:      info.MTimeSec,
-					IsDir:        false,
-				})
-				if counter != nil {
-					atomic.AddInt32(counter, 1)
-				}
-			}
-		}
+	total := 0
+	for _, entries := range perWorker {
+		total += len(entries)
 	}
-
+	result := make([]DirEntry, 0, total)
+	for _, entries := range perWorker {
+		result = append(result, entries...)
+	}
 	return result, nil
+}
+
+type btrfsWalkItem struct {
+	inodeID      uint64
+	relativePath string
+	absPath      string
+	treeID       uint64
+}
+
+// btrfsWalkDir reads one directory: its entries, and the subdirectories still to walk.
+func btrfsWalkDir(fd int, item btrfsWalkItem, excludedNames map[string]struct{}, counter *int32,
+) (result []DirEntry, subdirs []btrfsWalkItem) {
+	// Check if this directory is still on BTRFS (not a submount with different fs)
+	if item.relativePath != "" && !IsBtrfs(item.absPath) {
+		// Different filesystem — fall back to stat-based walk for this subtree
+		fallbackEntries, err := fallbackWalkDir(item.absPath, item.relativePath, excludedNames, counter)
+		if err == nil {
+			result = append(result, fallbackEntries...)
+		}
+		return result, nil
+	}
+
+	// Detect subvolume boundary: child dir may be a different subvolume
+	curTreeID := item.treeID
+	if item.relativePath != "" {
+		newTreeID := getSubvolID(item.absPath)
+		if newTreeID != curTreeID {
+			curTreeID = newTreeID
+			// Re-open fd for the new subvolume's inode space
+			item.inodeID = getInodeID(item.absPath)
+		}
+	}
+
+	// Read directory entries via ioctl
+	dirEntries, err := readDirIndex(fd, curTreeID, item.inodeID)
+	if err != nil {
+		// ioctl failed — fall back for this directory
+		fallbackEntries, err := fallbackWalkDir(item.absPath, item.relativePath, excludedNames, counter)
+		if err == nil {
+			result = append(result, fallbackEntries...)
+		}
+		return result, nil
+	}
+
+	// Collect inode IDs for batch lookup
+	var minIno, maxIno uint64
+	type childInfo struct {
+		relPath string
+		absPath string
+		dtype   uint8
+	}
+	children := make(map[uint64]childInfo, len(dirEntries))
+	for _, de := range dirEntries {
+		if _, excluded := excludedNames[de.Name]; excluded {
+			continue
+		}
+		if strings.HasPrefix(de.Name, "._") {
+			continue
+		}
+		if de.Type != btrfsFtRegFile && de.Type != btrfsFtDir {
+			continue
+		}
+		relPath := de.Name
+		if item.relativePath != "" {
+			relPath = item.relativePath + "/" + de.Name
+		}
+		absPath := item.absPath + "/" + de.Name
+		children[de.InodeID] = childInfo{relPath: relPath, absPath: absPath, dtype: de.Type}
+		if minIno == 0 || de.InodeID < minIno {
+			minIno = de.InodeID
+		}
+		if de.InodeID > maxIno {
+			maxIno = de.InodeID
+		}
+	}
+
+	if len(children) == 0 {
+		return nil, nil
+	}
+
+	// Batch-read inode items
+	inodeInfos, err := readInodeItems(fd, curTreeID, minIno, maxIno)
+	if err != nil {
+		return nil, nil
+	}
+
+	for ino, child := range children {
+		info, ok := inodeInfos[ino]
+		if !ok {
+			// Inode not found in batch — may be in a different subvolume, stat individually
+			var st syscall.Stat_t
+			if syscall.Stat(child.absPath, &st) != nil {
+				continue
+			}
+			info = btrfsInodeInfo{Size: st.Size, Mode: st.Mode, MTimeSec: int64(st.Mtim.Sec)}
+		}
+
+		if child.dtype == btrfsFtDir {
+			result = append(result, DirEntry{
+				RelativePath: child.relPath,
+				Size:         0,
+				ModTime:      info.MTimeSec,
+				IsDir:        true,
+			})
+			subdirs = append(subdirs, btrfsWalkItem{
+				inodeID:      ino,
+				relativePath: child.relPath,
+				absPath:      child.absPath,
+				treeID:       curTreeID,
+			})
+		} else {
+			if SkipBySize(false, info.Size) {
+				continue
+			}
+			result = append(result, DirEntry{
+				RelativePath: child.relPath,
+				Size:         info.Size,
+				ModTime:      info.MTimeSec,
+				IsDir:        false,
+			})
+			if counter != nil {
+				atomic.AddInt32(counter, 1)
+			}
+		}
+	}
+	return result, subdirs
 }
 
 // fallbackWalkDir does a standard stat-based walk for a subtree that's not on BTRFS.

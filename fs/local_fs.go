@@ -39,6 +39,11 @@ var DefaultArchiveOneFileSystem bool
 // they report what will actually be worked on.
 var DefaultMinSize int64
 
+// DefaultWalkThreads is how many directories a BTRFS walk reads at once (--walk-threads).
+// Several outstanding requests keep the disks of an array busy together and let the I/O
+// scheduler sort the seeks.
+var DefaultWalkThreads = 4
+
 // SkipBySize reports whether a regular file of this size is below DefaultMinSize.
 func SkipBySize(isDir bool, size int64) bool {
 	return !isDir && DefaultMinSize > 0 && size < DefaultMinSize

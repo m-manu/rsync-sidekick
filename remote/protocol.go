@@ -63,6 +63,8 @@ type WalkRequest struct {
 	ExcludedNames      []string `json:"excluded_names"`
 	ProgressIntervalMs int64    `json:"progress_interval_ms,omitempty"`
 	OneFileSystem      bool     `json:"one_file_system,omitempty"`
+	// WalkThreads mirrors --walk-threads; an agent that doesn't know it walks with its default.
+	WalkThreads int `json:"walk_threads,omitempty"`
 }
 
 // WalkProgress is sent by the agent periodically during a directory scan.

@@ -231,7 +231,7 @@ func (c *AgentClient) Version() (string, error) {
 func (c *AgentClient) Walk(dirPath string, excludedNames []string, counter *int32, progressIntervalMs int64, oneFileSystem bool) (map[string]entity.FileMeta, map[string]int64, int64, error) {
 	req := WalkRequest{
 		DirPath: dirPath, ExcludedNames: excludedNames, ProgressIntervalMs: progressIntervalMs,
-		OneFileSystem: oneFileSystem, MinSize: rsfs.DefaultMinSize,
+		OneFileSystem: oneFileSystem, MinSize: rsfs.DefaultMinSize, WalkThreads: rsfs.DefaultWalkThreads,
 	}
 	base := counterValue(counter)
 	env, err := c.roundTrip(MsgWalkRequest, req, counter)

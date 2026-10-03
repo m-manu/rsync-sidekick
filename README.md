@@ -145,6 +145,8 @@ flags: (all optional)
   -d, --sync-dir-timestamps               also propagate directory timestamps from source to destination
   -v, --verbose                           logs every single action performed, plus extra information (caution: makes it slow!)
       --version                           show application version and exit
+      --walk-threads int                  directories read at once per scan on BTRFS (local and remote) - several outstanding
+                                          requests keep all disks of an array busy; 1 reads one directory after the other (default 4)
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```
