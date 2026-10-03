@@ -428,18 +428,19 @@ func (c *DigestCache) Close() error {
 }
 
 func cachedFileHash(path string, info os.FileInfo) (string, error) {
+	compute := func() (string, error) { return fileHash(path, info.Size()) }
 	c := activeDigestCache.Load()
 	if c == nil {
-		return fileHash(path, info.Size())
+		return hashOnce(info, compute)
 	}
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return fileHash(path, info.Size())
+		return hashOnce(info, compute)
 	}
 	if hash, ok := c.Lookup(absPath, info); ok {
 		return hash, nil
 	}
-	hash, err := fileHash(path, info.Size())
+	hash, err := hashOnce(info, compute)
 	if err != nil {
 		return "", err
 	}
