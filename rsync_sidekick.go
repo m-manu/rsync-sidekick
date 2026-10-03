@@ -34,17 +34,15 @@ func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions s
 		copyDuplicates, useReflink, archivePaths, onArchiveAction, nil, nil)
 }
 
-// getSyncActionsWithProgressFS computes the sync actions. With applyDestActions set, the
-// moves and copies found within the destination are handed to it as soon as they are
-// known — before the archive scan, which can take hours — and are not returned again.
-// moved is where applyDestActions records its moves; the archive file lists, taken
-// before, are updated from it.
+// getSyncActionsWithProgressFS computes the sync actions. With an applier, the moves and
+// copies found within the destination are applied chunk by chunk while hashing goes on —
+// long before the archive scan — and are not returned again. moved is where the applier
+// records its moves; the archive file lists, taken before, are updated from it.
 func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS rsfs.FileSystem,
 	exclusions set.Set[string], destinationDirPath string, destFS rsfs.FileSystem,
 	verbose bool, progressFrequency time.Duration,
 	copyDuplicates bool, useReflink bool, archivePaths []string,
-	onArchiveAction service.ArchiveActionFunc, applyDestActions func([]action.SyncAction) error,
-	moved movedFiles,
+	onArchiveAction service.ArchiveActionFunc, applier destApplier, moved movedFiles,
 ) ([]action.SyncAction, error) {
 	if verbose {
 		fmte.VerboseOn()
@@ -176,42 +174,34 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		fmte.Printf("Found %d candidates.\n", len(candidatesAtDestination))
 		fmte.Printf("Identifying file renames/movements and timestamp changes...\n")
 		start = time.Now()
-		var savings int64
-		var syncErr error
 		var sourceCounter, destinationCounter int32
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			actions, savings, knownOrphanDigests, syncErr = service.ComputeSyncActionsWithFS(sourceFS, destFS,
-				sourceDirPath, sourceFiles, orphansAtSource,
-				destinationDirPath, destinationFiles, candidatesAtDestination, &sourceCounter, &destinationCounter,
-				copyDuplicates, useReflink)
-		}()
-		go func() {
-			defer wg.Done()
-			reportProgress(&sourceCounter, int32(len(orphansAtSource)),
-				&destinationCounter, int32(len(candidatesAtDestination)),
-				progressFrequency,
-			)
-		}()
-		wg.Wait()
+		sourceWorkers, destinationWorkers := service.SideParallelism()
+		matcher := service.NewDestMatcher(sourceDirPath, sourceFiles, destinationDirPath, destinationFiles, destFS,
+			copyDuplicates, useReflink)
+		var syncErr error
+		actions, syncErr = streamDestinationPhase(matcher, orphansAtSource, candidatesAtDestination,
+			func(chunk []string) (map[string]entity.FileDigest, error) {
+				return service.BatchDigestsWorkers(sourceFS, sourceDirPath, chunk, &sourceCounter, sourceWorkers), nil
+			},
+			func(chunk []string) (map[string]entity.FileDigest, error) {
+				return service.BatchDigestsWorkers(destFS, destinationDirPath, chunk, &destinationCounter, destinationWorkers), nil
+			},
+			&sourceCounter, &destinationCounter, applier, progressFrequency)
 		end = time.Now()
 		if syncErr != nil {
 			return nil, fmt.Errorf("error while computing sync actions: %+v", syncErr)
 		}
+		knownOrphanDigests = matcher.OrphanDigests()
 		fmte.Printf("Completed in %.1fs\n", end.Sub(start).Seconds())
 		if len(actions) > 0 {
 			fmte.Printf("Found %d actions that can save you %s of files transfer!\n",
-				len(actions), bytesutil.BinaryFormat(savings))
+				len(actions), bytesutil.BinaryFormat(matcher.Savings()))
 		}
 	}
 
+	// With an applier the destination actions already ran while hashing.
 	destActions := actions
-	if applyDestActions != nil && len(actions) > 0 {
-		if err := applyDestActions(actions); err != nil {
-			return nil, err
-		}
+	if applier != nil {
 		actions = nil
 	}
 
@@ -280,17 +270,25 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 	return actions, nil
 }
 
-// destActionApplier returns the applyDestActions of a run whose destination is local, or
-// nil where everything has to wait for the end: a script needs the complete list.
-func destActionApplier(outputScriptPath, destDirPath string, dryRun, verbose bool,
-	progressFrequency time.Duration, moved movedFiles,
-) func([]action.SyncAction) error {
-	if outputScriptPath != "" {
-		return nil
+// streamDestinationPhase hashes orphans and candidates chunk by chunk, both sides at once,
+// and hands each chunk's actions to applier right away (when there is one).
+func streamDestinationPhase(matcher *service.DestMatcher, orphans, candidates []string,
+	hashOrphans, hashCandidates service.ChunkDigestFunc, sourceDone, destinationDone *int32,
+	applier destApplier, progressFrequency time.Duration,
+) ([]action.SyncAction, error) {
+	stop := make(chan struct{})
+	go reportHashProgress(stop, sourceDone, int32(len(orphans)), destinationDone, int32(len(candidates)),
+		progressFrequency)
+	var onActions func([]action.SyncAction) error
+	if applier != nil {
+		onActions = applier.apply
 	}
-	return func(actions []action.SyncAction) error {
-		return performActionsTracked(actions, destDirPath, dryRun, verbose, progressFrequency, moved)
+	actions, err := service.StreamSyncActions(matcher, orphans, candidates, hashOrphans, hashCandidates, onActions)
+	close(stop)
+	if applier != nil {
+		applier.report()
 	}
+	return actions, err
 }
 
 func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string], destinationDirPath string,
@@ -307,7 +305,7 @@ func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string
 	}
 	actions, err := getSyncActionsWithProgressFS(runID, sourceDirPath, nil, exclusions, destinationDirPath, nil,
 		verbose, progressFrequency, copyDuplicates, useReflink, archivePaths, onArchiveAction,
-		destActionApplier(outputScriptPath, destinationDirPath, dryRun, verbose, progressFrequency, moved), moved)
+		newDestApplier(outputScriptPath, destinationDirPath, dryRun, verbose, moved), moved)
 	if appliedArchiveActions > 0 {
 		fmte.Printf("Applied %d actions from archive paths while scanning\n", appliedArchiveActions)
 	}
@@ -396,16 +394,16 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 	moved := movedFiles{}
 	var appliedArchiveActions int
 	var onArchiveAction service.ArchiveActionFunc
-	var applyDestActions func([]action.SyncAction) error
+	var applier destApplier
 	if destFS == nil {
 		if outputScriptPath == "" && !dryRun {
 			onArchiveAction = newLocalArchiveActionStreamer(&appliedArchiveActions, moved)
 		}
-		applyDestActions = destActionApplier(outputScriptPath, destDirPath, dryRun, verbose, progressFrequency, moved)
+		applier = newDestApplier(outputScriptPath, destDirPath, dryRun, verbose, moved)
 	}
 	actions, actionsErr := getSyncActionsWithProgressFS(runID, sourceDirPath, sourceFS,
 		exclusions, destDirPath, destFS, verbose, progressFrequency,
-		copyDuplicates, useReflink, archivePaths, onArchiveAction, applyDestActions, moved)
+		copyDuplicates, useReflink, archivePaths, onArchiveAction, applier, moved)
 	if appliedArchiveActions > 0 {
 		fmte.Printf("Applied %d actions from archive paths while scanning\n", appliedArchiveActions)
 	}
@@ -600,6 +598,8 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 	// Digests computed while matching moves; reused by the archive scan below. Empty when
 	// there were no candidates at destination, in which case that phase never ran.
 	var knownOrphanDigests map[string]entity.FileDigest
+	moved := movedFiles{}
+	destActionsApplied := false
 	if len(orphansAtSource) == 0 {
 		fmte.Printf("All files at source directory have counterparts.\n")
 	} else {
@@ -614,134 +614,63 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			sort.Strings(candidatesAtDestination)
 			fmte.Printf("Found %d candidates.\n", len(candidatesAtDestination))
 
-			// Compute digests via agent for the remote side
 			fmte.Printf("Identifying file renames/movements and timestamp changes...\n")
 			start = time.Now()
 
-			var remoteOrphans, remoteCandiates []string
-			var localOrphans, localCandidates []string
-			if sourceIsRemote {
-				remoteOrphans = orphansAtSource
-				localCandidates = candidatesAtDestination
-			} else {
-				localOrphans = orphansAtSource
-				remoteCandiates = candidatesAtDestination
-			}
-
-			// Hash remote files via agent, local files locally
-			var remoteDigests, localDigests map[string]entity.FileDigest
-			var remoteDigestErr, localDigestErr error
-			var localCounter, remoteCounter int32
-			var localTotal, remoteTotal int32
-			if sourceIsRemote {
-				remoteTotal = int32(len(remoteOrphans))
-				localTotal = int32(len(localCandidates))
-			} else {
-				localTotal = int32(len(localOrphans))
-				remoteTotal = int32(len(remoteCandiates))
-			}
-			var wgDigest sync.WaitGroup
-			wgDigest.Add(2)
-
-			go func() {
-				defer wgDigest.Done()
-				if sourceIsRemote && len(remoteOrphans) > 0 {
-					remoteDigests, remoteDigestErr = agentClient.BatchDigest(sourceDirPath, remoteOrphans, &remoteCounter, intervalMs)
-				} else if !sourceIsRemote && len(remoteCandiates) > 0 {
-					remoteDigests, remoteDigestErr = agentClient.BatchDigest(destDirPath, remoteCandiates, &remoteCounter, intervalMs)
+			// Remote files are hashed by the agent, one request per chunk; local files here.
+			var sourceDone, destinationDone int32
+			remoteHash := func(basePath string, done *int32) service.ChunkDigestFunc {
+				return func(chunk []string) (map[string]entity.FileDigest, error) {
+					digests, err := agentClient.BatchDigest(basePath, chunk, nil, intervalMs)
+					atomic.AddInt32(done, int32(len(chunk)))
+					return digests, err
 				}
-			}()
-			go func() {
-				defer wgDigest.Done()
-				if sourceIsRemote && len(localCandidates) > 0 {
-					localDigests, localDigestErr = batchDigestLocal(destDirPath, localCandidates, &localCounter)
-				} else if !sourceIsRemote && len(localOrphans) > 0 {
-					localDigests, localDigestErr = batchDigestLocal(sourceDirPath, localOrphans, &localCounter)
+			}
+			localHash := func(basePath string, done *int32) service.ChunkDigestFunc {
+				return func(chunk []string) (map[string]entity.FileDigest, error) {
+					return service.BatchDigestsParallel(nil, basePath, chunk, done), nil
 				}
-			}()
-			if localTotal > 0 && remoteTotal > 0 {
-				wgDigest.Add(1)
-				go func() {
-					defer wgDigest.Done()
-					if sourceIsRemote {
-						// remote = orphans (source), local = candidates (destination)
-						reportProgress(&remoteCounter, remoteTotal, &localCounter, localTotal, progressFrequency)
-					} else {
-						// local = orphans (source), remote = candidates (destination)
-						reportProgress(&localCounter, localTotal, &remoteCounter, remoteTotal, progressFrequency)
-					}
-				}()
 			}
-			wgDigest.Wait()
-
-			if remoteDigestErr != nil {
-				return fmt.Errorf("error computing remote digests: %+v", remoteDigestErr)
+			hashOrphans, hashCandidates := remoteHash(sourceDirPath, &sourceDone), localHash(destDirPath, &destinationDone)
+			if !sourceIsRemote {
+				hashOrphans, hashCandidates = localHash(sourceDirPath, &sourceDone), remoteHash(destDirPath, &destinationDone)
 			}
-			if localDigestErr != nil {
-				return fmt.Errorf("error computing local digests: %+v", localDigestErr)
-			}
-
-			// Build the orphan and candidate digest maps
-			var orphanDigests, candidateDigests map[string]entity.FileDigest
-			if sourceIsRemote {
-				orphanDigests = remoteDigests
-				candidateDigests = localDigests
-			} else {
-				orphanDigests = localDigests
-				candidateDigests = remoteDigests
-			}
-			knownOrphanDigests = orphanDigests
-
-			// Match digests and build actions
-			actions = matchAndBuildActions(sourceDirPath, sourceFiles, orphansAtSource, orphanDigests,
-				destDirPath, destinationFiles, candidatesAtDestination, candidateDigests,
+			matcher := service.NewDestMatcher(sourceDirPath, sourceFiles, destDirPath, destinationFiles, nil,
 				copyDuplicates, useReflink)
+			var applier destApplier
+			if sourceIsRemote {
+				applier = newDestApplier(outputScriptPath, destDirPath, dryRun, verbose, moved)
+			} else {
+				// The destination's directories can't be checked from here.
+				matcher.AlwaysCreateParentDirs()
+			}
+			var streamErr error
+			actions, streamErr = streamDestinationPhase(matcher, orphansAtSource, candidatesAtDestination,
+				hashOrphans, hashCandidates, &sourceDone, &destinationDone, applier, progressFrequency)
+			if streamErr != nil {
+				return streamErr
+			}
+			knownOrphanDigests = matcher.OrphanDigests()
+			if applier != nil {
+				destActionsApplied = true
+			}
 
 			end = time.Now()
 			fmte.Printf("Completed in %.1fs\n", end.Sub(start).Seconds())
-
 			if len(actions) == 0 {
 				fmte.Printf("No sync actions found. You may run rsync.\n")
 			} else {
-				savings := int64(0)
-				for _, a := range actions {
-					if mfa, ok := a.(action.MoveFileAction); ok {
-						if fm, exists := sourceFiles[mfa.RelativeToPath]; exists {
-							savings += fm.Size
-						}
-					}
-					if pta, ok := a.(action.PropagateTimestampAction); ok {
-						if fm, exists := sourceFiles[pta.SourceFileRelativePath]; exists {
-							savings += fm.Size
-						}
-					}
-					if cfa, ok := a.(action.CopyFileAction); ok {
-						// Extract relative path from absolute dest path
-						if len(cfa.AbsDestPath) > len(destDirPath)+1 {
-							relPath := cfa.AbsDestPath[len(destDirPath)+1:]
-							if fm, exists := sourceFiles[relPath]; exists {
-								savings += fm.Size
-							}
-						}
-					}
-				}
 				fmte.Printf("Found %d actions that can save you %s of files transfer!\n",
-					len(actions), bytesutil.BinaryFormat(savings))
+					len(actions), bytesutil.BinaryFormat(matcher.Savings()))
 			}
 		}
 	}
 
-	// With a local destination the moves and copies found so far are applied now, before the
-	// archive scan: whatever is done stays done if the run is interrupted.
-	moved := movedFiles{}
+	// With a local destination the moves and copies already ran while hashing; they are
+	// still needed to know which orphans are taken care of.
 	destActions := actions
-	if sourceIsRemote && len(actions) > 0 {
-		if apply := destActionApplier(outputScriptPath, destDirPath, dryRun, verbose, progressFrequency, moved); apply != nil {
-			if err := apply(actions); err != nil {
-				return err
-			}
-			actions = nil
-		}
+	if destActionsApplied {
+		actions = nil
 	}
 
 	// Archive scanning — archives are on the destination side
@@ -983,12 +912,6 @@ func withDigestProgress(count int, progressFrequency time.Duration,
 	return digests, err
 }
 
-// batchDigestLocal hashes the local side of a remote-exec run. It mirrors what the agent
-// does for the remote side, so neither direction of a sync is slower than the other.
-func batchDigestLocal(basePath string, files []string, counter *int32) (map[string]entity.FileDigest, error) {
-	return service.BatchDigestsParallel(nil, basePath, files, counter), nil
-}
-
 // walkArchivesViaAgent walks archive paths on the remote destination, the counterpart of
 // service.WalkArchives for a remote destination.
 //
@@ -1204,101 +1127,6 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archiveWalks []servic
 	return actions, nil
 }
 
-func matchAndBuildActions(
-	sourceDirPath string, sourceFiles map[string]entity.FileMeta,
-	orphansAtSource []string, orphanDigests map[string]entity.FileDigest,
-	destDirPath string, destinationFiles map[string]entity.FileMeta,
-	candidatesAtDestination []string, candidateDigests map[string]entity.FileDigest,
-	copyDuplicates bool, useReflink bool,
-) []action.SyncAction {
-	// Build reverse map: digest → candidate files
-	candidateDigestToFiles := make(map[entity.FileDigest][]string)
-	for _, f := range candidatesAtDestination {
-		if d, ok := candidateDigests[f]; ok {
-			candidateDigestToFiles[d] = append(candidateDigestToFiles[d], f)
-		}
-	}
-
-	actions := make([]action.SyncAction, 0)
-	uniqueness := set.NewSet[string]()
-	usedCandidates := set.NewSet[string]()
-
-	for _, orphanAtSource := range orphansAtSource {
-		orphanDigest, ok := orphanDigests[orphanAtSource]
-		if !ok {
-			continue
-		}
-		candidates, hasCandidates := candidateDigestToFiles[orphanDigest]
-		if !hasCandidates {
-			continue
-		}
-		candidateAtDestination := service.PickBestCandidate(candidates, orphanAtSource, sourceFiles)
-		if candidateAtDestination == "" {
-			continue
-		}
-		_, candidateExistsAtSource := sourceFiles[candidateAtDestination]
-		if destinationFiles[candidateAtDestination].ModifiedTimestamp != sourceFiles[orphanAtSource].ModifiedTimestamp {
-			if srcMetaForCandidate, existsAtSourceForCandidate := sourceFiles[candidateAtDestination]; !(existsAtSourceForCandidate && srcMetaForCandidate == destinationFiles[candidateAtDestination]) {
-				timestampAction := action.PropagateTimestampAction{
-					SourceBaseDirPath:           sourceDirPath,
-					DestinationBaseDirPath:      destDirPath,
-					SourceFileRelativePath:      orphanAtSource,
-					DestinationFileRelativePath: candidateAtDestination,
-					SourceModTime:               time.Unix(sourceFiles[orphanAtSource].ModifiedTimestamp, 0),
-				}
-				if !uniqueness.Contains(timestampAction.Uniqueness()) {
-					actions = append(actions, timestampAction)
-					uniqueness.Add(timestampAction.Uniqueness())
-				}
-			}
-		}
-		if !candidateExistsAtSource && candidateAtDestination != orphanAtSource {
-			// Move: candidate doesn't exist at source, safe to move
-			usedCandidates.Add(candidateAtDestination)
-			parentDir := destDirPath + "/" + parentPath(orphanAtSource)
-			directoryAction := action.MakeDirectoryAction{
-				AbsoluteDirPath: parentDir,
-			}
-			if !uniqueness.Contains(directoryAction.Uniqueness()) {
-				actions = append(actions, directoryAction)
-				uniqueness.Add(directoryAction.Uniqueness())
-			}
-			moveFileAction := action.MoveFileAction{
-				BasePath:         destDirPath,
-				RelativeFromPath: candidateAtDestination,
-				RelativeToPath:   orphanAtSource,
-			}
-			if !uniqueness.Contains(moveFileAction.Uniqueness()) {
-				actions = append(actions, moveFileAction)
-				uniqueness.Add(moveFileAction.Uniqueness())
-			}
-		} else if copyDuplicates && candidateExistsAtSource && candidateAtDestination != orphanAtSource {
-			// Copy: candidate exists at source too, so we can't move it — copy instead
-			absSource := destDirPath + "/" + candidateAtDestination
-			absDest := destDirPath + "/" + orphanAtSource
-			parentDir := destDirPath + "/" + parentPath(orphanAtSource)
-			directoryAction := action.MakeDirectoryAction{
-				AbsoluteDirPath: parentDir,
-			}
-			if !uniqueness.Contains(directoryAction.Uniqueness()) {
-				actions = append(actions, directoryAction)
-				uniqueness.Add(directoryAction.Uniqueness())
-			}
-			copyAction := action.CopyFileAction{
-				AbsSourcePath: absSource,
-				AbsDestPath:   absDest,
-				SourceModTime: time.Unix(sourceFiles[orphanAtSource].ModifiedTimestamp, 0),
-				UseReflink:    useReflink,
-			}
-			if !uniqueness.Contains(copyAction.Uniqueness()) {
-				actions = append(actions, copyAction)
-				uniqueness.Add(copyAction.Uniqueness())
-			}
-		}
-	}
-	return actions
-}
-
 // computeDirTimestampActions scans source and destination for directories and
 // returns PropagateTimestampActions for directories that exist at both sides
 // but have different modification times.
@@ -1454,6 +1282,8 @@ func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.Sy
 		fmte.Printf("Applying sync actions at destination via remote agent...\n")
 	}
 
+	// The agent runs the actions in the order given and knows nothing of earlier moves.
+	redirectInOrder(actions)
 	specs := actionSpecs(actions)
 
 	start := time.Now()
@@ -1626,17 +1456,6 @@ func generateScript(actions []action.SyncAction, shellScriptFileName string, rem
 	}
 	fmte.Printf("Done. You may run it now.\n")
 	return nil
-}
-
-func reportProgress(sourceActual *int32, sourceExpected int32, destinationActual *int32, destinationExpected int32, reportingFrequency time.Duration) {
-	var sourceProgress, destinationProgress float64
-	time.Sleep(100 * time.Millisecond)
-	for atomic.LoadInt32(sourceActual) < sourceExpected || atomic.LoadInt32(destinationActual) < destinationExpected {
-		time.Sleep(reportingFrequency)
-		sourceProgress = 100.0 * float64(atomic.LoadInt32(sourceActual)) / float64(sourceExpected)
-		destinationProgress = 100.0 * float64(*destinationActual) / float64(destinationExpected)
-		fmte.Printf("%.0f%% done at source and %.0f%% done at destination\n", sourceProgress, destinationProgress)
-	}
 }
 
 func findCandidatesAtDestination(sourceFiles, destinationFiles map[string]entity.FileMeta, orphansAtSource []string) []string {

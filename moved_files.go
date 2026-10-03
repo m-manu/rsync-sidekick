@@ -21,6 +21,17 @@ func (m movedFiles) record(a action.SyncAction) {
 	}
 }
 
+// redirectInOrder points copies and timestamp fixes at where the moves before them in the
+// list put their files — for actions run in this order by someone who doesn't track
+// moves, like the remote agent.
+func redirectInOrder(actions []action.SyncAction) {
+	moved := movedFiles{}
+	for i, a := range actions {
+		actions[i] = moved.redirect(a)
+		moved.record(actions[i])
+	}
+}
+
 // rebaseWalks updates archive file lists taken before the moves: an entry that was moved
 // within the archive path is listed at its new path, one moved out of it is dropped.
 // Walks without such entries are returned as they are; the others get a fresh map, since

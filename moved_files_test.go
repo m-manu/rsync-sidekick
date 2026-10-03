@@ -24,6 +24,21 @@ func TestMovedFiles_RedirectsCopiesFromMovedSources(t *testing.T) {
 	assert.Equal(t, "/arch/y", untouched.(action.CopyFileAction).AbsSourcePath)
 }
 
+func TestRedirectInOrder_FollowsOnlyMovesThatComeEarlier(t *testing.T) {
+	actions := []action.SyncAction{
+		action.CopyFileAction{AbsSourcePath: "/dst/x", AbsDestPath: "/dst/before"},
+		action.MoveFileAction{BasePath: "/dst", RelativeFromPath: "x", RelativeToPath: "a"},
+		action.CopyFileAction{AbsSourcePath: "/dst/x", AbsDestPath: "/dst/b"},
+		action.PropagateTimestampAction{DestinationBaseDirPath: "/dst", DestinationFileRelativePath: "x"},
+	}
+
+	redirectInOrder(actions)
+
+	assert.Equal(t, "/dst/x", actions[0].(action.CopyFileAction).AbsSourcePath, "x is still there at that point")
+	assert.Equal(t, "/dst/a", actions[2].(action.CopyFileAction).AbsSourcePath)
+	assert.Equal(t, "a", actions[3].(action.PropagateTimestampAction).DestinationFileRelativePath)
+}
+
 func TestMovedFiles_RebaseWalksFollowsMovesWithoutTouchingSharedMaps(t *testing.T) {
 	moved := movedFiles{}
 	moved.record(action.MoveFileAction{BasePath: "/dst", RelativeFromPath: "x.bin", RelativeToPath: "sub/a.bin"})
@@ -44,6 +59,19 @@ func TestMovedFiles_RebaseWalksFollowsMovesWithoutTouchingSharedMaps(t *testing.
 	assert.Contains(t, shared, "x.bin", "the original map, possibly the destination's list, stays as it was")
 }
 
+// recordingApplier notes in order when destination actions are applied.
+type recordingApplier struct {
+	inner destApplier
+	order *[]string
+}
+
+func (r *recordingApplier) apply(actions []action.SyncAction) error {
+	*r.order = append(*r.order, "destination")
+	return r.inner.apply(actions)
+}
+
+func (r *recordingApplier) report() { r.inner.report() }
+
 // writeSame writes the same content to every path.
 func writeSame(t *testing.T, content string, paths ...string) {
 	t.Helper()
@@ -61,10 +89,7 @@ func TestDestinationActionsRunBeforeTheArchiveScan(t *testing.T) {
 
 	var order []string
 	moved := movedFiles{}
-	applyDest := func(actions []action.SyncAction) error {
-		order = append(order, "destination")
-		return performActionsTracked(actions, dst, false, false, 0, moved)
-	}
+	applyDest := &recordingApplier{inner: newDestApplier("", dst, false, false, moved), order: &order}
 	var applied int
 	streamer := newLocalArchiveActionStreamer(&applied, moved)
 	onArchive := func(a action.SyncAction) error {

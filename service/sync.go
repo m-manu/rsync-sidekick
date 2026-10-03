@@ -164,109 +164,17 @@ func ComputeSyncActionsWithFS(sourceFS, destFS rsfs.FileSystem,
 			orphanDigests[orphanAtSource] = orphanDigest
 		}
 	}
-	actions = make([]action.SyncAction, 0, orphanFilesToDigests.Len())
-	uniqueness := set.NewSetWithSize[string](orphanFilesToDigests.Len())
-	movedCandidates := set.NewSet[string]() // prevents double-moves; copies still allowed
-	for orphanAtSource, orphanDigest := range orphanFilesToDigests.ForEach() {
-		if !candidateDigestsToFiles.Exists(orphanDigest) {
-			// let rsync handle this
-			continue
-		}
-		matchesAtDestination := candidateDigestsToFiles.Get(orphanDigest)
-		candidateAtDestination := PickBestCandidate(matchesAtDestination, orphanAtSource, sourceFiles)
-		if candidateAtDestination == "" {
-			continue
-		}
-		_, candidateExistsAtSource := sourceFiles[candidateAtDestination]
-		// Timestamp propagation — skip for already-moved candidates (file no longer at original path)
-		if !movedCandidates.Contains(candidateAtDestination) {
-			if destinationFiles[candidateAtDestination].ModifiedTimestamp != sourceFiles[orphanAtSource].ModifiedTimestamp {
-				// Avoid propagating timestamp to a destination file that already matches its counterpart at source
-				if srcMetaForCandidate, existsAtSourceForCandidate := sourceFiles[candidateAtDestination]; !(existsAtSourceForCandidate && srcMetaForCandidate == destinationFiles[candidateAtDestination]) {
-					timestampAction := action.PropagateTimestampAction{
-						SourceBaseDirPath:           sourceDirPath,
-						DestinationBaseDirPath:      destinationDirPath,
-						SourceFileRelativePath:      orphanAtSource,
-						DestinationFileRelativePath: candidateAtDestination,
-						SourceModTime:               time.Unix(sourceFiles[orphanAtSource].ModifiedTimestamp, 0),
-						FS:                          destFS,
-					}
-					if !uniqueness.Contains(timestampAction.Uniqueness()) {
-						actions = append(actions, timestampAction)
-						uniqueness.Add(timestampAction.Uniqueness())
-						savings += sourceFiles[orphanAtSource].Size
-					}
-				}
-			}
-		}
-		shouldMove := !candidateExistsAtSource && !movedCandidates.Contains(candidateAtDestination) && candidateAtDestination != orphanAtSource
-		if shouldMove {
-			// Move: candidate doesn't exist at source and hasn't been moved yet
-			movedCandidates.Add(candidateAtDestination)
-			parentDir := filepath.Dir(filepath.Join(destinationDirPath, orphanAtSource))
-			isReadable := false
-			if destFS != nil {
-				isReadable = destFS.IsReadableDirectory(parentDir)
-			} else {
-				isReadable = lib.IsReadableDirectory(parentDir)
-			}
-			if !isReadable {
-				directoryAction := action.MakeDirectoryAction{
-					AbsoluteDirPath: parentDir,
-					FS:              destFS,
-				}
-				if !uniqueness.Contains(directoryAction.Uniqueness()) {
-					actions = append(actions, directoryAction)
-					uniqueness.Add(directoryAction.Uniqueness())
-				}
-			}
-			moveFileAction := action.MoveFileAction{
-				BasePath:         destinationDirPath,
-				RelativeFromPath: candidateAtDestination,
-				RelativeToPath:   orphanAtSource,
-				FS:               destFS,
-			}
-			if !uniqueness.Contains(moveFileAction.Uniqueness()) {
-				actions = append(actions, moveFileAction)
-				uniqueness.Add(moveFileAction.Uniqueness())
-				savings += sourceFiles[orphanAtSource].Size
-			}
-		} else if copyDuplicates && candidateAtDestination != orphanAtSource {
-			// Copy: candidate exists at source (can't move) or was already moved.
-			// Uses original candidate path; performActions redirect handles ordering.
-			absSource := filepath.Join(destinationDirPath, candidateAtDestination)
-			absDest := filepath.Join(destinationDirPath, orphanAtSource)
-			parentDir := filepath.Dir(absDest)
-			isReadable := false
-			if destFS != nil {
-				isReadable = destFS.IsReadableDirectory(parentDir)
-			} else {
-				isReadable = lib.IsReadableDirectory(parentDir)
-			}
-			if !isReadable {
-				directoryAction := action.MakeDirectoryAction{
-					AbsoluteDirPath: parentDir,
-					FS:              destFS,
-				}
-				if !uniqueness.Contains(directoryAction.Uniqueness()) {
-					actions = append(actions, directoryAction)
-					uniqueness.Add(directoryAction.Uniqueness())
-				}
-			}
-			copyAction := action.CopyFileAction{
-				AbsSourcePath: absSource,
-				AbsDestPath:   absDest,
-				SourceModTime: time.Unix(sourceFiles[orphanAtSource].ModifiedTimestamp, 0),
-				UseReflink:    useReflink,
-			}
-			if !uniqueness.Contains(copyAction.Uniqueness()) {
-				actions = append(actions, copyAction)
-				uniqueness.Add(copyAction.Uniqueness())
-				savings += sourceFiles[orphanAtSource].Size
-			}
-		}
+	matcher := NewDestMatcher(sourceDirPath, sourceFiles, destinationDirPath, destinationFiles, destFS,
+		copyDuplicates, useReflink)
+	candidateDigests := make(map[string]entity.FileDigest, candidateFilesToDigests.Len())
+	for candidate, digest := range candidateFilesToDigests.ForEach() {
+		candidateDigests[candidate] = digest
 	}
-	return
+	actions = append(matcher.AddCandidates(candidateDigests), matcher.AddOrphans(orphanDigests)...)
+	if actions == nil {
+		actions = []action.SyncAction{}
+	}
+	return actions, matcher.Savings(), orphanDigests, nil
 }
 
 // PickBestCandidate selects the best candidate from a list of destination paths.
@@ -424,11 +332,24 @@ type OrphanDigestFunc func(orphans []string) (map[string]entity.FileDigest, erro
 // otherwise local OS calls are made. Files that cannot be hashed are skipped (they
 // simply end up absent from the returned map), mirroring index building.
 func BatchDigestsParallel(fsys rsfs.FileSystem, baseDirPath string, relPaths []string, counter *int32) map[string]entity.FileDigest {
+	a, b := getParallelism(runtime.NumCPU())
+	return BatchDigestsWorkers(fsys, baseDirPath, relPaths, counter, a+b)
+}
+
+// SideParallelism splits the hashing workers between source and destination, for when
+// both sides are hashed at the same time.
+func SideParallelism() (source, destination int) {
+	return getParallelism(runtime.NumCPU())
+}
+
+// BatchDigestsWorkers is BatchDigestsParallel with a given number of workers.
+func BatchDigestsWorkers(fsys rsfs.FileSystem, baseDirPath string, relPaths []string, counter *int32,
+	workers int,
+) map[string]entity.FileDigest {
 	if len(relPaths) == 0 {
 		return map[string]entity.FileDigest{}
 	}
-	a, b := getParallelism(runtime.NumCPU())
-	workers := min(a+b, len(relPaths))
+	workers = max(1, min(workers, len(relPaths)))
 	digests := lib.NewSafeMap[string, entity.FileDigest]()
 	var wg sync.WaitGroup
 	wg.Add(workers)
