@@ -1,9 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -27,16 +27,22 @@ const unixCommandLengthGuess = 200
 func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions set.Set[string],
 	destinationDirPath string, verbose bool, progressFrequency time.Duration,
 	copyDuplicates bool, useReflink bool, archivePaths []string,
+	onArchiveAction service.ArchiveActionFunc,
 ) ([]action.SyncAction, error) {
 	return getSyncActionsWithProgressFS(runID, sourceDirPath, nil, exclusions,
 		destinationDirPath, nil, verbose, progressFrequency,
-		copyDuplicates, useReflink, archivePaths)
+		copyDuplicates, useReflink, archivePaths, onArchiveAction, nil, nil)
 }
 
+// getSyncActionsWithProgressFS computes the sync actions. With an applier, the moves and
+// copies found within the destination are applied chunk by chunk while hashing goes on —
+// long before the archive scan — and are not returned again. moved is where the applier
+// records its moves; the archive file lists, taken before, are updated from it.
 func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS rsfs.FileSystem,
 	exclusions set.Set[string], destinationDirPath string, destFS rsfs.FileSystem,
 	verbose bool, progressFrequency time.Duration,
 	copyDuplicates bool, useReflink bool, archivePaths []string,
+	onArchiveAction service.ArchiveActionFunc, applier destApplier, moved movedFiles,
 ) ([]action.SyncAction, error) {
 	if verbose {
 		fmte.VerboseOn()
@@ -47,55 +53,66 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 	var sourceFiles, destinationFiles map[string]entity.FileMeta
 	var sourceSize, destinationSize int64
 	var sourceFilesErr, destinationFilesErr error
+	sourceWhere, destWhere := sideLocations(sourceFS != nil, destFS != nil)
 	var scanSourceCounter, scanDestCounter int32
 	var sourceScanDone, destScanDone int32
 	var wgDirScan sync.WaitGroup
 	wgDirScan.Add(2)
 	go func() {
 		defer wgDirScan.Done()
-		if sourceFS != nil {
-			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectoryWithFS(sourceFS, sourceDirPath, exclusions, &scanSourceCounter)
-		} else {
-			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions, &scanSourceCounter)
-		}
+		sourceFiles, _, sourceSize, sourceFilesErr = walkIncluded(sourceDirPath, nil,
+			filesWalk(sourceFS, exclusions, &scanSourceCounter, false))
 		atomic.StoreInt32(&sourceScanDone, 1)
 	}()
+	destWalkDone := make(chan struct{})
 	go func() {
 		defer wgDirScan.Done()
-		if destFS != nil {
-			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectoryWithFS(destFS, destinationDirPath, exclusions, &scanDestCounter)
-		} else {
-			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectory(destinationDirPath, exclusions, &scanDestCounter)
-		}
+		defer close(destWalkDone)
+		destinationFiles, _, destinationSize, destinationFilesErr = walkIncluded(destinationDirPath,
+			missingLocally(destFS), filesWalk(destFS, exclusions, &scanDestCounter, false))
 		atomic.StoreInt32(&destScanDone, 1)
 	}()
-	scanDone := make(chan struct{})
-	if progressFrequency > 0 {
+
+	// Archive paths sit on the destination side, so walking them competes with the
+	// destination scan but not with the source scan. Start as soon as the destination is
+	// done and let it run alongside the (often much longer) source scan.
+	var archiveWalks []service.ArchiveWalk
+	var archiveWalkErr error
+	var scanArchiveCounter, archiveScanDone int32
+	var wgArchiveWalk sync.WaitGroup
+	if len(archivePaths) > 0 {
+		wgArchiveWalk.Add(1)
 		go func() {
-			ticker := time.NewTicker(progressFrequency)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-scanDone:
-					return
-				case <-ticker.C:
-					srcFinished := ""
-					if atomic.LoadInt32(&sourceScanDone) == 1 {
-						srcFinished = " [FINISHED]"
-					}
-					dstFinished := ""
-					if atomic.LoadInt32(&destScanDone) == 1 {
-						dstFinished = " [FINISHED]"
-					}
-					fmte.Printf("Scanning files: %d at source%s, %d at destination%s...\n",
-						atomic.LoadInt32(&scanSourceCounter), srcFinished,
-						atomic.LoadInt32(&scanDestCounter), dstFinished)
-				}
+			defer wgArchiveWalk.Done()
+			<-destWalkDone
+			if destinationFilesErr == nil {
+				archiveWalks, archiveWalkErr = service.WalkArchivesKnowing(archivePaths, exclusions, destFS,
+					&scanArchiveCounter, knownDestinationTree(destinationDirPath, destinationFiles))
 			}
+			atomic.StoreInt32(&archiveScanDone, 1)
 		}()
 	}
+	stopScanProgress := progressBoard.Track(progressFrequency, "Scanning", func() []lib.ProgressPart {
+		parts := []lib.ProgressPart{
+			{Count: int64(atomic.LoadInt32(&scanSourceCounter)), Label: "src", Where: sourceWhere,
+				Done: atomic.LoadInt32(&sourceScanDone) == 1},
+			{Count: int64(atomic.LoadInt32(&scanDestCounter)), Label: "dst", Where: destWhere,
+				Done: atomic.LoadInt32(&destScanDone) == 1},
+		}
+		if len(archivePaths) > 0 {
+			parts = append(parts, lib.ProgressPart{Count: int64(atomic.LoadInt32(&scanArchiveCounter)),
+				Label: "arch", Where: destWhere, Done: atomic.LoadInt32(&archiveScanDone) == 1})
+		}
+		return parts
+	})
+	// Reporting outlives the source and destination scans: the archive walk deliberately
+	// keeps running into the next phase.
+	go func() {
+		wgDirScan.Wait()
+		wgArchiveWalk.Wait()
+		stopScanProgress()
+	}()
 	wgDirScan.Wait()
-	close(scanDone)
 	end = time.Now()
 	if sourceFilesErr != nil {
 		return nil, fmt.Errorf("error scanning source directory: %+v", sourceFilesErr)
@@ -118,8 +135,12 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		lib.WriteSliceToFile(orphansAtSource, fmt.Sprintf("./info_%s_orphans_at_source.txt", runID))
 	}
 	fmte.Printf("Finding candidates at destination...\n")
-	candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, orphansAtSource)
+	hashable := hashableOrphans(orphansAtSource, sourceFiles)
+	candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, hashable)
 	var actions []action.SyncAction
+	// Digests computed while matching moves; reused by the archive scan below. Empty when
+	// there were no candidates at destination, in which case that phase never ran.
+	var knownOrphanDigests map[string]entity.FileDigest
 	if len(candidatesAtDestination) == 0 {
 		fmte.Printf("No candidates found. Looks like all %d files are new.\n", len(orphansAtSource))
 	} else {
@@ -132,42 +153,42 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		fmte.Printf("Found %d candidates.\n", len(candidatesAtDestination))
 		fmte.Printf("Identifying file renames/movements and timestamp changes...\n")
 		start = time.Now()
-		var savings int64
-		var syncErr error
 		var sourceCounter, destinationCounter int32
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			actions, savings, syncErr = service.ComputeSyncActionsWithFS(sourceFS, destFS,
-				sourceDirPath, sourceFiles, orphansAtSource,
-				destinationDirPath, destinationFiles, candidatesAtDestination, &sourceCounter, &destinationCounter,
-				copyDuplicates, useReflink)
-		}()
-		go func() {
-			defer wg.Done()
-			reportProgress(&sourceCounter, int32(len(orphansAtSource)),
-				&destinationCounter, int32(len(candidatesAtDestination)),
-				progressFrequency,
-			)
-		}()
-		wg.Wait()
+		sourceWorkers, destinationWorkers := service.SideParallelism()
+		matcher := service.NewDestMatcher(sourceDirPath, sourceFiles, destinationDirPath, destinationFiles, destFS,
+			copyDuplicates, useReflink)
+		var syncErr error
+		actions, syncErr = streamDestinationPhase(matcher, hashable, candidatesAtDestination,
+			func(chunk []string) (map[string]entity.FileDigest, error) {
+				return service.BatchDigestsWorkers(sourceFS, sourceDirPath, chunk, &sourceCounter, sourceWorkers), nil
+			},
+			func(chunk []string) (map[string]entity.FileDigest, error) {
+				return service.BatchDigestsWorkers(destFS, destinationDirPath, chunk, &destinationCounter, destinationWorkers), nil
+			},
+			&sourceCounter, &destinationCounter, applier, sourceWhere, destWhere, progressFrequency)
 		end = time.Now()
 		if syncErr != nil {
 			return nil, fmt.Errorf("error while computing sync actions: %+v", syncErr)
 		}
+		knownOrphanDigests = matcher.OrphanDigests()
 		fmte.Printf("Completed in %.1fs\n", end.Sub(start).Seconds())
 		if len(actions) > 0 {
 			fmte.Printf("Found %d actions that can save you %s of files transfer!\n",
-				len(actions), bytesutil.BinaryFormat(savings))
+				len(actions), bytesutil.BinaryFormat(matcher.Savings()))
 		}
+	}
+
+	// With an applier the destination actions already ran while hashing.
+	destActions := actions
+	if applier != nil {
+		actions = nil
 	}
 
 	// Archive scanning (independent of --copy-duplicates)
 	if len(archivePaths) > 0 {
 		// Determine which orphans are still unmatched
 		resolvedOrphans := set.NewSet[string]()
-		for _, a := range actions {
+		for _, a := range destActions {
 			switch act := a.(type) {
 			case action.MoveFileAction:
 				resolvedOrphans.Add(act.RelativeToPath)
@@ -179,7 +200,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 			}
 		}
 		var unmatchedOrphans []string
-		for _, o := range orphansAtSource {
+		for _, o := range hashable {
 			if !resolvedOrphans.Contains(o) {
 				unmatchedOrphans = append(unmatchedOrphans, o)
 			}
@@ -187,63 +208,28 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		if len(unmatchedOrphans) > 0 {
 			fmte.Printf("Scanning %d archive path(s) for %d unmatched orphans...\n",
 				len(archivePaths), len(unmatchedOrphans))
-			// Compute digests for unmatched orphans at source
-			var orphanDigestCounter int32
-			orphanDigests := make(map[string]entity.FileDigest)
-			orphanDigestDone := make(chan struct{})
-			if progressFrequency > 0 {
-				go func() {
-					ticker := time.NewTicker(progressFrequency)
-					defer ticker.Stop()
-					for {
-						select {
-						case <-orphanDigestDone:
-							return
-						case <-ticker.C:
-							fmte.Printf("Computing orphan digests: %d / %d...\n",
-								atomic.LoadInt32(&orphanDigestCounter), len(unmatchedOrphans))
-						}
-					}
-				}()
+			// Digests of unmatched orphans at source, computed on demand: only orphans
+			// that some archive file matches on extension and size are ever hashed.
+			digestFn := func(orphans []string) (map[string]entity.FileDigest, error) {
+				return withDigestProgress(len(orphans), sourceWhere, progressFrequency,
+					func(counter *int32) (map[string]entity.FileDigest, error) {
+						return service.BatchDigestsParallel(sourceFS, sourceDirPath, orphans, counter), nil
+					})
 			}
-			for _, o := range unmatchedOrphans {
-				absPath := sourceDirPath + "/" + o
-				var digest entity.FileDigest
-				var err error
-				if sourceFS != nil {
-					digest, err = service.GetDigestWithFS(sourceFS, absPath)
-				} else {
-					digest, err = service.GetDigest(absPath)
-				}
-				if err == nil {
-					orphanDigests[o] = digest
-				}
-				atomic.AddInt32(&orphanDigestCounter, 1)
+			// The walk started back during the destination scan; collect it now.
+			wgArchiveWalk.Wait()
+			if archiveWalkErr != nil {
+				return nil, fmt.Errorf("error scanning archive paths: %+v", archiveWalkErr)
 			}
-			close(orphanDigestDone)
-			var archiveScanCounter, archiveMatchCounter int32
-			archiveScanDone := make(chan struct{})
-			if progressFrequency > 0 {
-				go func() {
-					ticker := time.NewTicker(progressFrequency)
-					defer ticker.Stop()
-					for {
-						select {
-						case <-archiveScanDone:
-							return
-						case <-ticker.C:
-							fmte.Printf("Scanning archive files: %d scanned, %d matched...\n",
-								atomic.LoadInt32(&archiveScanCounter),
-								atomic.LoadInt32(&archiveMatchCounter))
-						}
-					}
-				}()
-			}
+			archiveWalks = moved.rebaseWalks(archiveWalks)
+			var archiveProgress service.ArchiveScanProgress
+			atomic.StoreInt32(&archiveProgress.FilesFound, atomic.LoadInt32(&scanArchiveCounter))
+			stopArchiveProgress := startArchiveScanProgress(&archiveProgress, destWhere, progressFrequency)
 			archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
-				archivePaths, exclusions, unmatchedOrphans, orphanDigests,
+				archiveWalks, unmatchedOrphans, knownOrphanDigests, digestFn, onArchiveAction,
 				sourceFiles, destinationDirPath, useReflink, destFS,
-				&archiveScanCounter, &archiveMatchCounter)
-			close(archiveScanDone)
+				&archiveProgress)
+			stopArchiveProgress()
 			if archiveErr != nil {
 				return nil, fmt.Errorf("error scanning archives: %+v", archiveErr)
 			}
@@ -255,18 +241,54 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 	}
 
 	if len(actions) == 0 {
-		fmte.Printf("No sync actions found. You may run rsync.\n")
+		if len(destActions) == 0 {
+			fmte.Printf("No sync actions found. You may run rsync.\n")
+		}
 		return []action.SyncAction{}, nil
 	}
 	return actions, nil
+}
+
+// streamDestinationPhase hashes orphans and candidates chunk by chunk, both sides at once,
+// and hands each chunk's actions to applier right away (when there is one).
+func streamDestinationPhase(matcher *service.DestMatcher, orphans, candidates []string,
+	hashOrphans, hashCandidates service.ChunkDigestFunc, sourceDone, destinationDone *int32,
+	applier destApplier, sourceWhere, destWhere string, progressFrequency time.Duration,
+) ([]action.SyncAction, error) {
+	stop := trackHashProgress(
+		hashSide{done: sourceDone, total: len(orphans), label: "src", where: sourceWhere},
+		hashSide{done: destinationDone, total: len(candidates), label: "dst", where: destWhere},
+		progressFrequency)
+	var onActions func([]action.SyncAction) error
+	if applier != nil {
+		onActions = applier.apply
+	}
+	actions, err := service.StreamSyncActions(matcher, orphans, candidates, hashOrphans, hashCandidates, onActions)
+	stop()
+	if applier != nil {
+		applier.report()
+	}
+	return actions, err
 }
 
 func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string], destinationDirPath string,
 	outputScriptPath string, verbose bool, dryRun bool, syncDirTimestamps bool, progressFrequency time.Duration,
 	copyDuplicates bool, useReflink bool, archivePaths []string,
 ) error {
-	actions, err := getSyncActionsWithProgress(runID, sourceDirPath, exclusions, destinationDirPath, verbose, progressFrequency,
-		copyDuplicates, useReflink, archivePaths)
+	// Archive matches are applied as they are found, so an interrupted run keeps them.
+	// Not in script mode, which needs the complete list, and not for a dry run.
+	moved := movedFiles{}
+	var appliedArchiveActions int
+	var onArchiveAction service.ArchiveActionFunc
+	if outputScriptPath == "" && !dryRun {
+		onArchiveAction = newLocalArchiveActionStreamer(&appliedArchiveActions, moved)
+	}
+	actions, err := getSyncActionsWithProgressFS(runID, sourceDirPath, nil, exclusions, destinationDirPath, nil,
+		verbose, progressFrequency, copyDuplicates, useReflink, archivePaths, onArchiveAction,
+		newDestApplier(outputScriptPath, destinationDirPath, dryRun, verbose, moved), moved)
+	if appliedArchiveActions > 0 {
+		fmte.Printf("Applied %d actions from archive paths while scanning\n", appliedArchiveActions)
+	}
 	if err != nil {
 		return err // no extra info needed
 	}
@@ -283,7 +305,7 @@ func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string
 	if outputScriptPath != "" {
 		return generateScript(actions, outputScriptPath, nil)
 	} else {
-		return performActions(actions, destinationDirPath, dryRun)
+		return performActionsTracked(actions, destinationDirPath, dryRun, verbose, progressFrequency, moved)
 	}
 }
 
@@ -293,12 +315,15 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 	sourceIsRemote bool, sshKeyPath string, agentClient *remote.AgentClient,
 	exclusions set.Set[string], outputScriptPath string,
 	verbose bool, dryRun bool, syncDirTimestamps bool, progressFrequency time.Duration,
-	copyDuplicates bool, useReflink bool, archivePaths []string,
+	copyDuplicates bool, useReflink bool, archivePaths []string, plan copyPlanOutput,
 ) error {
 	remotePath := remoteLoc.Path
 
 	if agentClient != nil {
-		return rsyncSidekickRemoteExec(remoteLoc, remotePath, localPath, sourceIsRemote, agentClient, exclusions, outputScriptPath, verbose, dryRun, syncDirTimestamps, progressFrequency, copyDuplicates, useReflink, archivePaths)
+		return rsyncSidekickRemoteExec(remoteLoc, remotePath, localPath, sourceIsRemote, agentClient, exclusions, outputScriptPath, verbose, dryRun, syncDirTimestamps, progressFrequency, copyDuplicates, useReflink, archivePaths, plan)
+	}
+	if plan.enabled() {
+		return fmt.Errorf("--copy-list and --plan-out need remote-execution mode (not SFTP)")
 	}
 
 	// SFTP mode: launch ssh with -s sftp subsystem and pipe through sftp client
@@ -344,9 +369,24 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 		destDirPath = remotePath
 	}
 
+	// Stream archive matches only when the destination is local; over SFTP each action
+	// would be its own round-trip.
+	moved := movedFiles{}
+	var appliedArchiveActions int
+	var onArchiveAction service.ArchiveActionFunc
+	var applier destApplier
+	if destFS == nil {
+		if outputScriptPath == "" && !dryRun {
+			onArchiveAction = newLocalArchiveActionStreamer(&appliedArchiveActions, moved)
+		}
+		applier = newDestApplier(outputScriptPath, destDirPath, dryRun, verbose, moved)
+	}
 	actions, actionsErr := getSyncActionsWithProgressFS(runID, sourceDirPath, sourceFS,
 		exclusions, destDirPath, destFS, verbose, progressFrequency,
-		copyDuplicates, useReflink, archivePaths)
+		copyDuplicates, useReflink, archivePaths, onArchiveAction, applier, moved)
+	if appliedArchiveActions > 0 {
+		fmte.Printf("Applied %d actions from archive paths while scanning\n", appliedArchiveActions)
+	}
 	if actionsErr != nil {
 		return actionsErr
 	}
@@ -368,15 +408,20 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 		}
 		return generateScript(actions, outputScriptPath, sshSpec)
 	}
-	return performActions(actions, destDirPath, dryRun)
+	return performActionsTracked(actions, destDirPath, dryRun, verbose, progressFrequency, moved)
 }
 
 // rsyncSidekickRemoteExec handles the remote-execution mode where the agent
 // runs on the remote side.
-func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath string, sourceIsRemote bool, agentClient *remote.AgentClient, exclusions set.Set[string], outputScriptPath string, verbose, dryRun, syncDirTimestamps bool, progressFrequency time.Duration, copyDuplicates, useReflink bool, archivePaths []string) error {
+func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath string, sourceIsRemote bool, agentClient *remote.AgentClient, exclusions set.Set[string], outputScriptPath string, verbose, dryRun, syncDirTimestamps bool, progressFrequency time.Duration, copyDuplicates, useReflink bool, archivePaths []string, plan copyPlanOutput) error {
 	if verbose {
 		fmte.VerboseOn()
 	}
+	if plan.enabled() && !sourceIsRemote {
+		return fmt.Errorf("--copy-list and --plan-out need the source to be the remote side")
+	}
+	// Orphans that archive matches applied while scanning; those never come back as actions.
+	archiveResolved := set.NewSet[string]()
 
 	// Convert exclusions to slice
 	excludedNames := make([]string, 0, exclusions.Cardinality())
@@ -402,6 +447,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 	var sourceDirs, destDirs map[string]int64
 	var sourceSize, destinationSize int64
 	var sourceFilesErr, destinationFilesErr error
+	sourceWhere, destWhere := sideLocations(sourceIsRemote, !sourceIsRemote)
 	var localScanCounter, remoteScanCounter int32
 	var localScanDone, remoteScanDone int32
 	intervalMs := progressFrequency.Milliseconds()
@@ -411,62 +457,84 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 	go func() {
 		defer wgDirScan.Done()
 		if sourceIsRemote {
-			sourceFiles, sourceDirs, sourceSize, sourceFilesErr = agentClient.Walk(sourceDirPath, excludedNames, &remoteScanCounter, intervalMs, rsfs.DefaultOneFileSystem)
+			sourceFiles, sourceDirs, sourceSize, sourceFilesErr = walkIncluded(sourceDirPath, nil,
+				agentWalk(agentClient, excludedNames, &remoteScanCounter, intervalMs))
 			atomic.StoreInt32(&remoteScanDone, 1)
 		} else {
-			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions, &localScanCounter)
-			if sourceFilesErr == nil && syncDirTimestamps {
-				sourceDirs, sourceFilesErr = service.FindDirsFromDirectory(sourceDirPath, exclusions)
-			}
+			sourceFiles, sourceDirs, sourceSize, sourceFilesErr = walkIncluded(sourceDirPath, nil,
+				filesWalk(nil, exclusions, &localScanCounter, syncDirTimestamps))
 			atomic.StoreInt32(&localScanDone, 1)
 		}
 	}()
+	destWalkDone := make(chan struct{})
 	go func() {
 		defer wgDirScan.Done()
+		defer close(destWalkDone)
 		if sourceIsRemote {
-			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectory(destDirPath, exclusions, &localScanCounter)
-			if destinationFilesErr == nil && syncDirTimestamps {
-				destDirs, destinationFilesErr = service.FindDirsFromDirectory(destDirPath, exclusions)
-			}
+			destinationFiles, destDirs, destinationSize, destinationFilesErr = walkIncluded(destDirPath,
+				localDirMissing, filesWalk(nil, exclusions, &localScanCounter, syncDirTimestamps))
 			atomic.StoreInt32(&localScanDone, 1)
 		} else {
-			destinationFiles, destDirs, destinationSize, destinationFilesErr = agentClient.Walk(destDirPath, excludedNames, &remoteScanCounter, intervalMs, rsfs.DefaultOneFileSystem)
+			destinationFiles, destDirs, destinationSize, destinationFilesErr = walkIncluded(destDirPath, nil,
+				agentWalk(agentClient, excludedNames, &remoteScanCounter, intervalMs))
 			atomic.StoreInt32(&remoteScanDone, 1)
 		}
 	}()
-	scanDone := make(chan struct{})
-	if progressFrequency > 0 {
+
+	// Archive paths are on the destination side, so their walk competes with the
+	// destination scan but not with the source scan: start it as soon as the destination
+	// is done and let it overlap the source scan, which is usually the long one.
+	//
+	// With a remote destination the walk goes through the agent and can still be running
+	// when the next phase sends its digest requests. That only works on a connection that
+	// correlates messages by request ID.
+	archivesAreLocal := sourceIsRemote
+	prewalkArchives := len(archivePaths) > 0 && (archivesAreLocal || agentClient.IsConcurrent())
+	var archiveWalks []service.ArchiveWalk
+	var archiveWalkErr error
+	var scanArchiveCounter, archiveScanDone int32
+	var wgArchiveWalk sync.WaitGroup
+	if prewalkArchives {
+		wgArchiveWalk.Add(1)
 		go func() {
-			ticker := time.NewTicker(progressFrequency)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-scanDone:
-					return
-				case <-ticker.C:
-					localFinished := ""
-					if atomic.LoadInt32(&localScanDone) == 1 {
-						localFinished = " [FINISHED]"
-					}
-					remoteFinished := ""
-					if atomic.LoadInt32(&remoteScanDone) == 1 {
-						remoteFinished = " [FINISHED]"
-					}
-					if sourceIsRemote {
-						fmte.Printf("Scanning files: %d at source (remote)%s, %d at destination (local)%s...\n",
-							atomic.LoadInt32(&remoteScanCounter), remoteFinished,
-							atomic.LoadInt32(&localScanCounter), localFinished)
-					} else {
-						fmte.Printf("Scanning files: %d at source (local)%s, %d at destination (remote)%s...\n",
-							atomic.LoadInt32(&localScanCounter), localFinished,
-							atomic.LoadInt32(&remoteScanCounter), remoteFinished)
-					}
+			defer wgArchiveWalk.Done()
+			<-destWalkDone
+			if destinationFilesErr == nil {
+				if archivesAreLocal {
+					archiveWalks, archiveWalkErr = service.WalkArchivesKnowing(archivePaths, exclusions, nil,
+						&scanArchiveCounter, knownDestinationTree(destDirPath, destinationFiles))
+				} else {
+					archiveWalks, archiveWalkErr = walkArchivesViaAgent(agentClient, archivePaths,
+						excludedNames, &scanArchiveCounter, intervalMs)
 				}
 			}
+			atomic.StoreInt32(&archiveScanDone, 1)
 		}()
 	}
+	stopScanProgress := progressBoard.Track(progressFrequency, "Scanning", func() []lib.ProgressPart {
+		local := lib.ProgressPart{Count: int64(atomic.LoadInt32(&localScanCounter)), Label: "src",
+			Where: "local", Done: atomic.LoadInt32(&localScanDone) == 1}
+		remote := lib.ProgressPart{Count: int64(atomic.LoadInt32(&remoteScanCounter)), Label: "dst",
+			Where: "remote", Done: atomic.LoadInt32(&remoteScanDone) == 1}
+		parts := []lib.ProgressPart{local, remote}
+		if sourceIsRemote {
+			local.Label, remote.Label = "dst", "src"
+			parts = []lib.ProgressPart{remote, local}
+		}
+		if prewalkArchives {
+			parts = append(parts, lib.ProgressPart{Count: int64(atomic.LoadInt32(&scanArchiveCounter)),
+				Label: "arch", Where: parts[1].Where, Done: atomic.LoadInt32(&archiveScanDone) == 1})
+		}
+		return parts
+	})
+	// Reporting outlives the source and destination scans: the archive walk deliberately
+	// keeps running into the next phase.
+	go func() {
+		wgDirScan.Wait()
+		wgArchiveWalk.Wait()
+		stopScanProgress()
+	}()
 	wgDirScan.Wait()
-	close(scanDone)
 	end = time.Now()
 
 	if sourceFilesErr != nil {
@@ -482,8 +550,14 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 
 	fmte.Printf("Finding files at source that don't have counterparts at destination...\n")
 	orphansAtSource := service.FindOrphans(sourceFiles, destinationFiles)
+	hashable := hashableOrphans(orphansAtSource, sourceFiles)
 
 	var actions []action.SyncAction
+	// Digests computed while matching moves; reused by the archive scan below. Empty when
+	// there were no candidates at destination, in which case that phase never ran.
+	var knownOrphanDigests map[string]entity.FileDigest
+	moved := movedFiles{}
+	destActionsApplied := false
 	if len(orphansAtSource) == 0 {
 		fmte.Printf("All files at source directory have counterparts.\n")
 	} else {
@@ -491,141 +565,77 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 		fmte.Printf("Found %d files\n", len(orphansAtSource))
 
 		fmte.Printf("Finding candidates at destination...\n")
-		candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, orphansAtSource)
+		candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, hashable)
 		if len(candidatesAtDestination) == 0 {
 			fmte.Printf("No candidates found. Looks like all %d files are new. rsync will do the rest.\n", len(orphansAtSource))
 		} else {
 			sort.Strings(candidatesAtDestination)
 			fmte.Printf("Found %d candidates.\n", len(candidatesAtDestination))
 
-			// Compute digests via agent for the remote side
 			fmte.Printf("Identifying file renames/movements and timestamp changes...\n")
 			start = time.Now()
 
-			var remoteOrphans, remoteCandiates []string
-			var localOrphans, localCandidates []string
-			if sourceIsRemote {
-				remoteOrphans = orphansAtSource
-				localCandidates = candidatesAtDestination
-			} else {
-				localOrphans = orphansAtSource
-				remoteCandiates = candidatesAtDestination
-			}
-
-			// Hash remote files via agent, local files locally
-			var remoteDigests, localDigests map[string]entity.FileDigest
-			var remoteDigestErr, localDigestErr error
-			var localCounter, remoteCounter int32
-			var localTotal, remoteTotal int32
-			if sourceIsRemote {
-				remoteTotal = int32(len(remoteOrphans))
-				localTotal = int32(len(localCandidates))
-			} else {
-				localTotal = int32(len(localOrphans))
-				remoteTotal = int32(len(remoteCandiates))
-			}
-			var wgDigest sync.WaitGroup
-			wgDigest.Add(2)
-
-			go func() {
-				defer wgDigest.Done()
-				if sourceIsRemote && len(remoteOrphans) > 0 {
-					remoteDigests, remoteDigestErr = agentClient.BatchDigest(sourceDirPath, remoteOrphans, &remoteCounter)
-				} else if !sourceIsRemote && len(remoteCandiates) > 0 {
-					remoteDigests, remoteDigestErr = agentClient.BatchDigest(destDirPath, remoteCandiates, &remoteCounter)
+			// Remote files are hashed by the agent, one request per chunk; local files here.
+			var sourceDone, destinationDone int32
+			remoteHash := func(basePath string, done *int32) service.ChunkDigestFunc {
+				return func(chunk []string) (map[string]entity.FileDigest, error) {
+					digests, err := agentClient.BatchDigest(basePath, chunk, nil, intervalMs)
+					atomic.AddInt32(done, int32(len(chunk)))
+					return digests, err
 				}
-			}()
-			go func() {
-				defer wgDigest.Done()
-				if sourceIsRemote && len(localCandidates) > 0 {
-					localDigests, localDigestErr = batchDigestLocal(destDirPath, localCandidates, &localCounter)
-				} else if !sourceIsRemote && len(localOrphans) > 0 {
-					localDigests, localDigestErr = batchDigestLocal(sourceDirPath, localOrphans, &localCounter)
+			}
+			localHash := func(basePath string, done *int32) service.ChunkDigestFunc {
+				return func(chunk []string) (map[string]entity.FileDigest, error) {
+					return service.BatchDigestsParallel(nil, basePath, chunk, done), nil
 				}
-			}()
-			if localTotal > 0 && remoteTotal > 0 {
-				wgDigest.Add(1)
-				go func() {
-					defer wgDigest.Done()
-					if sourceIsRemote {
-						// remote = orphans (source), local = candidates (destination)
-						reportProgress(&remoteCounter, remoteTotal, &localCounter, localTotal, progressFrequency)
-					} else {
-						// local = orphans (source), remote = candidates (destination)
-						reportProgress(&localCounter, localTotal, &remoteCounter, remoteTotal, progressFrequency)
-					}
-				}()
 			}
-			wgDigest.Wait()
-
-			if remoteDigestErr != nil {
-				return fmt.Errorf("error computing remote digests: %+v", remoteDigestErr)
+			hashOrphans, hashCandidates := remoteHash(sourceDirPath, &sourceDone), localHash(destDirPath, &destinationDone)
+			if !sourceIsRemote {
+				hashOrphans, hashCandidates = localHash(sourceDirPath, &sourceDone), remoteHash(destDirPath, &destinationDone)
 			}
-			if localDigestErr != nil {
-				return fmt.Errorf("error computing local digests: %+v", localDigestErr)
-			}
-
-			// Build the orphan and candidate digest maps
-			var orphanDigests, candidateDigests map[string]entity.FileDigest
-			if sourceIsRemote {
-				orphanDigests = remoteDigests
-				candidateDigests = localDigests
-			} else {
-				orphanDigests = localDigests
-				candidateDigests = remoteDigests
-			}
-
-			// Match digests and build actions
-			actions = matchAndBuildActions(sourceDirPath, sourceFiles, orphansAtSource, orphanDigests,
-				destDirPath, destinationFiles, candidatesAtDestination, candidateDigests,
+			matcher := service.NewDestMatcher(sourceDirPath, sourceFiles, destDirPath, destinationFiles, nil,
 				copyDuplicates, useReflink)
+			var applier destApplier
+			if sourceIsRemote {
+				applier = newDestApplier(outputScriptPath, destDirPath, dryRun, verbose, moved)
+			} else {
+				// The destination's directories can't be checked from here.
+				matcher.AlwaysCreateParentDirs()
+			}
+			var streamErr error
+			actions, streamErr = streamDestinationPhase(matcher, hashable, candidatesAtDestination,
+				hashOrphans, hashCandidates, &sourceDone, &destinationDone, applier,
+				sourceWhere, destWhere, progressFrequency)
+			if streamErr != nil {
+				return streamErr
+			}
+			knownOrphanDigests = matcher.OrphanDigests()
+			if applier != nil {
+				destActionsApplied = true
+			}
 
 			end = time.Now()
 			fmte.Printf("Completed in %.1fs\n", end.Sub(start).Seconds())
-
 			if len(actions) == 0 {
 				fmte.Printf("No sync actions found. You may run rsync.\n")
 			} else {
-				savings := int64(0)
-				for _, a := range actions {
-					if mfa, ok := a.(action.MoveFileAction); ok {
-						if fm, exists := sourceFiles[mfa.RelativeToPath]; exists {
-							savings += fm.Size
-						}
-					}
-					if pta, ok := a.(action.PropagateTimestampAction); ok {
-						if fm, exists := sourceFiles[pta.SourceFileRelativePath]; exists {
-							savings += fm.Size
-						}
-					}
-					if cfa, ok := a.(action.CopyFileAction); ok {
-						// Extract relative path from absolute dest path
-						if len(cfa.AbsDestPath) > len(destDirPath)+1 {
-							relPath := cfa.AbsDestPath[len(destDirPath)+1:]
-							if fm, exists := sourceFiles[relPath]; exists {
-								savings += fm.Size
-							}
-						}
-					}
-				}
 				fmte.Printf("Found %d actions that can save you %s of files transfer!\n",
-					len(actions), bytesutil.BinaryFormat(savings))
+					len(actions), bytesutil.BinaryFormat(matcher.Savings()))
 			}
 		}
 	}
 
-	if syncDirTimestamps && sourceDirs != nil && destDirs != nil {
-		dirActions := computeDirTimestampActionsFromMaps(sourceDirPath, sourceDirs, destDirPath, destDirs)
-		if len(dirActions) > 0 {
-			fmte.Printf("Found %d directory timestamp actions\n", len(dirActions))
-			actions = append(actions, dirActions...)
-		}
+	// With a local destination the moves and copies already ran while hashing; they are
+	// still needed to know which orphans are taken care of.
+	destActions := actions
+	if destActionsApplied {
+		actions = nil
 	}
 
 	// Archive scanning — archives are on the destination side
 	if len(archivePaths) > 0 && len(orphansAtSource) > 0 {
 		resolvedOrphans := set.NewSet[string]()
-		for _, a := range actions {
+		for _, a := range destActions {
 			switch act := a.(type) {
 			case action.MoveFileAction:
 				resolvedOrphans.Add(act.RelativeToPath)
@@ -636,7 +646,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			}
 		}
 		var unmatchedOrphans []string
-		for _, o := range orphansAtSource {
+		for _, o := range hashable {
 			if !resolvedOrphans.Contains(o) {
 				unmatchedOrphans = append(unmatchedOrphans, o)
 			}
@@ -644,42 +654,42 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 		if len(unmatchedOrphans) > 0 {
 			fmte.Printf("Scanning %d archive path(s) for %d unmatched orphans...\n",
 				len(archivePaths), len(unmatchedOrphans))
-			// Compute digests for unmatched orphans at source
-			var unmatchedDigests map[string]entity.FileDigest
-			var digestErr error
-			if sourceIsRemote {
-				unmatchedDigests, digestErr = agentClient.BatchDigest(sourceDirPath, unmatchedOrphans, nil)
-			} else {
-				unmatchedDigests, digestErr = batchDigestLocal(sourceDirPath, unmatchedOrphans, nil)
-			}
-			if digestErr != nil {
-				return fmt.Errorf("error computing orphan digests for archive scan: %+v", digestErr)
-			}
-			if sourceIsRemote {
-				// Dest is local: scan archives locally
-				var archiveScanCounter, archiveMatchCounter int32
-				archiveScanDone := make(chan struct{})
-				if progressFrequency > 0 {
-					go func() {
-						ticker := time.NewTicker(progressFrequency)
-						defer ticker.Stop()
-						for {
-							select {
-							case <-archiveScanDone:
-								return
-							case <-ticker.C:
-								fmte.Printf("Scanning archive files: %d scanned, %d matched...\n",
-									atomic.LoadInt32(&archiveScanCounter),
-									atomic.LoadInt32(&archiveMatchCounter))
-							}
+			// Digests of unmatched orphans at source, computed on demand: only orphans
+			// that some archive file matches on extension and size are ever hashed.
+			digestFn := func(orphans []string) (map[string]entity.FileDigest, error) {
+				return withDigestProgress(len(orphans), sourceWhere, progressFrequency,
+					func(counter *int32) (map[string]entity.FileDigest, error) {
+						if sourceIsRemote {
+							return agentClient.BatchDigest(sourceDirPath, orphans, counter, progressFrequency.Milliseconds())
 						}
-					}()
+						return service.BatchDigestsParallel(nil, sourceDirPath, orphans, counter), nil
+					})
+			}
+			if sourceIsRemote {
+				// Dest is local: the walk already ran alongside the source scan.
+				wgArchiveWalk.Wait()
+				if archiveWalkErr != nil {
+					return fmt.Errorf("error scanning archive paths: %+v", archiveWalkErr)
 				}
+				archiveWalks = moved.rebaseWalks(archiveWalks)
+				// The destination is local, so matches can be applied as they are found.
+				var appliedArchiveActions int
+				var onArchiveAction service.ArchiveActionFunc
+				if outputScriptPath == "" && !dryRun {
+					onArchiveAction = recordResolvedOrphans(newLocalArchiveActionStreamer(&appliedArchiveActions, moved),
+						destDirPath, archiveResolved)
+				}
+				var archiveProgress service.ArchiveScanProgress
+				atomic.StoreInt32(&archiveProgress.FilesFound, atomic.LoadInt32(&scanArchiveCounter))
+				stopArchiveProgress := startArchiveScanProgress(&archiveProgress, destWhere, progressFrequency)
 				archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
-					archivePaths, exclusions, unmatchedOrphans, unmatchedDigests,
+					archiveWalks, unmatchedOrphans, knownOrphanDigests, digestFn, onArchiveAction,
 					sourceFiles, destDirPath, useReflink, nil,
-					&archiveScanCounter, &archiveMatchCounter)
-				close(archiveScanDone)
+					&archiveProgress)
+				stopArchiveProgress()
+				if appliedArchiveActions > 0 {
+					fmte.Printf("Applied %d actions from archive paths while scanning\n", appliedArchiveActions)
+				}
 				if archiveErr != nil {
 					return fmt.Errorf("error scanning archives: %+v", archiveErr)
 				}
@@ -688,9 +698,37 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 					actions = append(actions, archiveActions...)
 				}
 			} else {
-				// Dest is remote: scan archives via agent
-				archiveActions, archiveErr := scanArchivesViaAgent(agentClient, archivePaths, excludedNames,
-					unmatchedOrphans, unmatchedDigests, sourceFiles, destDirPath, useReflink)
+				// Dest is remote: scan archives via agent. The walk either already ran
+				// alongside the source scan, or has to happen now.
+				wgArchiveWalk.Wait()
+				if archiveWalkErr != nil {
+					return fmt.Errorf("error scanning archive paths: %+v", archiveWalkErr)
+				}
+				if !prewalkArchives {
+					archiveWalks, archiveWalkErr = walkArchivesViaAgent(agentClient, archivePaths,
+						excludedNames, &scanArchiveCounter, intervalMs)
+					if archiveWalkErr != nil {
+						return fmt.Errorf("error scanning archive paths: %+v", archiveWalkErr)
+					}
+				}
+				// Matches can be applied while the scan continues, as long as the connection
+				// can carry the perform requests alongside the hashing ones.
+				var appliedArchiveActions int
+				var onArchiveAction service.ArchiveActionFunc
+				flushArchiveActions := func() error { return nil }
+				if outputScriptPath == "" && !dryRun && agentClient.IsConcurrent() {
+					onArchiveAction, flushArchiveActions = newRemoteArchiveActionStreamer(
+						agentClient.Perform, dryRun, &appliedArchiveActions)
+				}
+				archiveActions, archiveErr := scanArchivesViaAgent(agentClient, archiveWalks,
+					unmatchedOrphans, knownOrphanDigests, digestFn, onArchiveAction,
+					sourceFiles, destDirPath, useReflink, progressFrequency)
+				if archiveErr == nil {
+					archiveErr = flushArchiveActions()
+				}
+				if appliedArchiveActions > 0 {
+					fmte.Printf("Applied %d actions from archive paths while scanning\n", appliedArchiveActions)
+				}
 				if archiveErr != nil {
 					return fmt.Errorf("error scanning archives via agent: %+v", archiveErr)
 				}
@@ -699,6 +737,29 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 					actions = append(actions, archiveActions...)
 				}
 			}
+		}
+	}
+
+	if plan.enabled() {
+		digestFn := func(orphans []string) (map[string]entity.FileDigest, error) {
+			return withDigestProgress(len(orphans), sourceWhere, progressFrequency,
+				func(counter *int32) (map[string]entity.FileDigest, error) {
+					return agentClient.BatchDigest(sourceDirPath, orphans, counter, progressFrequency.Milliseconds())
+				})
+		}
+		resolvingActions := append(append([]action.SyncAction{}, destActions...), actions...)
+		if err := writeCopyPlan(plan, orphansAtSource, resolvingActions, archiveResolved, destDirPath,
+			sourceFiles, knownOrphanDigests, digestFn); err != nil {
+			return err
+		}
+	}
+
+	// Directory timestamps go last: every file written below a directory changes its mtime.
+	if syncDirTimestamps && sourceDirs != nil && destDirs != nil {
+		dirActions := computeDirTimestampActionsFromMaps(sourceDirPath, sourceDirs, destDirPath, destDirs)
+		if len(dirActions) > 0 {
+			fmte.Printf("Found %d directory timestamp actions\n", len(dirActions))
+			actions = append(actions, dirActions...)
 		}
 	}
 
@@ -718,34 +779,123 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 	// For remote-execution: actions on the remote side go through the agent
 	if !sourceIsRemote {
 		// Destination is remote: send actions to agent
-		return performActionsViaAgent(agentClient, actions, destDirPath, dryRun)
+		return performActionsViaAgent(agentClient, actions, destDirPath, dryRun, verbose)
 	}
 
 	// Source is remote, destination is local: perform locally
-	return performActions(actions, destDirPath, dryRun)
+	return performActionsTracked(actions, destDirPath, dryRun, verbose, progressFrequency, moved)
 }
 
-func batchDigestLocal(basePath string, files []string, counter *int32) (map[string]entity.FileDigest, error) {
-	digests := make(map[string]entity.FileDigest, len(files))
-	for _, relPath := range files {
-		absPath := fmt.Sprintf("%s/%s", basePath, relPath)
-		digest, err := service.GetDigest(absPath)
-		if counter != nil {
-			atomic.AddInt32(counter, 1)
+// newLocalArchiveActionStreamer applies each archive match immediately instead of
+// collecting it for the end, so an interrupted run keeps every copy it already made. The
+// count of applied actions is reported through applied.
+//
+// Only for a local destination: there a copy is a reflink or a plain local write, cheap
+// enough to do one at a time. With a remote destination each action would be its own
+// round-trip over the agent connection, where batching at the end is the better trade.
+func newLocalArchiveActionStreamer(applied *int, moved movedFiles) service.ArchiveActionFunc {
+	return func(a action.SyncAction) error {
+		a = moved.redirect(a)
+		if err := a.Perform(); err != nil {
+			fmte.PrintfErr("skipping %s: %+v\n", a, err)
+			return fmt.Errorf("%w: %v", service.ErrActionSkipped, err)
 		}
+		*applied++
+		fmte.PrintfV("Performed: %s\n", a.UnixCommand())
+		return nil
+	}
+}
+
+// sideLocations names where source and destination are for progress lines; both stay
+// empty when everything is local.
+func sideLocations(sourceRemote, destRemote bool) (sourceWhere, destWhere string) {
+	switch {
+	case sourceRemote:
+		return "remote", "local"
+	case destRemote:
+		return "local", "remote"
+	}
+	return "", ""
+}
+
+// startArchiveScanProgress reports the archive scan counters until the returned stop
+// function is called.
+func startArchiveScanProgress(progress *service.ArchiveScanProgress, where string,
+	progressFrequency time.Duration,
+) (stop func()) {
+	return progressBoard.Track(progressFrequency, "Archives", func() []lib.ProgressPart {
+		return []lib.ProgressPart{
+			{Count: int64(atomic.LoadInt32(&progress.FilesChecked)), Total: int64(atomic.LoadInt32(&progress.FilesFound)),
+				Label: "checked", Where: where},
+			{Count: int64(atomic.LoadInt32(&progress.DigestsDone)),
+				Total: int64(atomic.LoadInt32(&progress.DigestsNeeded)), Label: "hashed", Where: where},
+			{Count: int64(atomic.LoadInt32(&progress.Matches)), Label: "matched"},
+		}
+	})
+}
+
+// withDigestProgress runs compute, reporting how many of count digests are done so far.
+// The counter it hands to compute is what drives that output.
+func withDigestProgress(count int, where string, progressFrequency time.Duration,
+	compute func(counter *int32) (map[string]entity.FileDigest, error),
+) (map[string]entity.FileDigest, error) {
+	fmte.Printf("Hashing %s orphan candidate(s) at source...\n", lib.GroupThousands(int64(count)))
+	var counter int32
+	stop := progressBoard.Track(progressFrequency, "Hashing orphans", func() []lib.ProgressPart {
+		return []lib.ProgressPart{{Count: int64(atomic.LoadInt32(&counter)), Total: int64(count), Label: "src",
+			Where: where}}
+	})
+	digests, err := compute(&counter)
+	stop()
+	return digests, err
+}
+
+// walkArchivesViaAgent walks archive paths on the remote destination, the counterpart of
+// service.WalkArchives for a remote destination.
+//
+// counter keeps growing across the archive paths: the client adds each walk's count to
+// what the counter held before.
+func walkArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string,
+	excludedNames []string, counter *int32, intervalMs int64,
+) ([]service.ArchiveWalk, error) {
+	walks := make([]service.ArchiveWalk, 0, len(archivePaths))
+	for _, archivePath := range archivePaths {
+		files, _, _, err := agentClient.Walk(archivePath, excludedNames, counter, intervalMs,
+			rsfs.DefaultArchiveOneFileSystem)
 		if err != nil {
+			return nil, fmt.Errorf("error scanning archive %s via agent: %w", archivePath, err)
+		}
+		if len(files) == 0 {
+			// Most likely a mistyped or unmounted path on the remote: worth saying out loud
+			// rather than quietly finding no matches.
+			fmte.PrintfErr("warning: archive path \"%s\" on remote holds no files - is the path correct?\n",
+				archivePath)
 			continue
 		}
-		digests[relPath] = digest
+		walks = append(walks, service.ArchiveWalk{Path: archivePath, Files: files})
 	}
-	return digests, nil
+	return walks, nil
 }
 
 // scanArchivesViaAgent scans archive paths on the remote destination via the agent,
 // matching archive files against unmatched orphans by digest.
-func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string, excludedNames []string,
-	unmatchedOrphans []string, orphanDigests map[string]entity.FileDigest,
+// emitArchiveAction hands an action to onAction, or collects it when there is none.
+// Mirrors what the local archive scan does, so a streamed action is never also returned.
+func emitArchiveAction(a action.SyncAction, onAction service.ArchiveActionFunc,
+	collected *[]action.SyncAction,
+) error {
+	if onAction == nil {
+		*collected = append(*collected, a)
+		return nil
+	}
+	return onAction(a)
+}
+
+func scanArchivesViaAgent(agentClient *remote.AgentClient, archiveWalks []service.ArchiveWalk,
+	unmatchedOrphans []string, knownOrphanDigests map[string]entity.FileDigest,
+	digestFn service.OrphanDigestFunc, onAction service.ArchiveActionFunc,
 	sourceFiles map[string]entity.FileMeta, destDirPath string, useReflink bool,
+	progressFrequency time.Duration,
 ) ([]action.SyncAction, error) {
 	// Build ext+size set from unmatched orphans
 	type orphanKey struct {
@@ -759,33 +909,100 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 		orphansByKey[k] = append(orphansByKey[k], o)
 	}
 
+	// Local copy plus a cache of lazily computed digests; see ScanArchivesForCopiesWithDigests.
+	orphanDigests := make(map[string]entity.FileDigest, len(knownOrphanDigests))
+	for orphan, digest := range knownOrphanDigests {
+		orphanDigests[orphan] = digest
+	}
+	requestedDigests := set.NewSet[string]()
+
 	matchedOrphans := set.NewSet[string]()
 	var actions []action.SyncAction
 	uniqueness := set.NewSet[string]()
 
-	for _, archivePath := range archivePaths {
-		// Walk archive via agent
-		archiveFiles, _, _, walkErr := agentClient.Walk(archivePath, excludedNames, nil, 0, rsfs.DefaultArchiveOneFileSystem)
-		if walkErr != nil {
-			return nil, fmt.Errorf("error scanning archive %s via agent: %w", archivePath, walkErr)
+	// Progress counters: walk and hashing happen on the remote via the agent, while the
+	// ext+size check and the orphan digests are local.
+	var archiveWalkCounter, archiveCheckCounter, archiveDigestCounter int32
+	intervalMs := progressFrequency.Milliseconds()
+	stopProgress := progressBoard.Track(progressFrequency, "Archives", func() []lib.ProgressPart {
+		return []lib.ProgressPart{
+			{Count: int64(atomic.LoadInt32(&archiveCheckCounter)),
+				Total: int64(atomic.LoadInt32(&archiveWalkCounter)), Label: "checked", Where: "local"},
+			{Count: int64(atomic.LoadInt32(&archiveDigestCounter)), Label: "hashed", Where: "remote"},
 		}
+	})
+	defer stopProgress()
 
-		// Filter archive files by ext+size match with orphans
+	// This function only runs when the destination is the remote side, so digestFn hashes
+	// the local source and can run alongside the agent requests below.
+
+	for _, archiveWalk := range archiveWalks {
+		archivePath, archiveFiles := archiveWalk.Path, archiveWalk.Files
+		atomic.StoreInt32(&archiveWalkCounter, int32(len(archiveFiles)))
+
+		// An archive file is only worth hashing if its extension and size match an orphan
+		// that is still unmatched, and only those orphans need a digest.
 		var candidates []string
+		var neededOrphans []string
 		for relPath, meta := range archiveFiles {
+			atomic.AddInt32(&archiveCheckCounter, 1)
 			k := orphanKey{ext: lib.GetFileExt(relPath), size: meta.Size}
-			if _, ok := orphansByKey[k]; ok {
+			orphans, ok := orphansByKey[k]
+			if !ok {
+				continue
+			}
+			stillPending := false
+			for _, orphan := range orphans {
+				if matchedOrphans.Contains(orphan) {
+					continue
+				}
+				stillPending = true
+				if digestFn == nil || requestedDigests.Contains(orphan) {
+					continue
+				}
+				if _, known := orphanDigests[orphan]; known {
+					continue
+				}
+				requestedDigests.Add(orphan)
+				neededOrphans = append(neededOrphans, orphan)
+			}
+			if stillPending {
 				candidates = append(candidates, relPath)
 			}
 		}
 		if len(candidates) == 0 {
 			continue
 		}
+		sort.Strings(candidates)
+		sort.Strings(neededOrphans)
 
-		// Digest archive candidates via agent
-		archiveDigests, digestErr := agentClient.BatchDigest(archivePath, candidates, nil)
-		if digestErr != nil {
-			return nil, fmt.Errorf("error computing archive digests via agent: %w", digestErr)
+		// Both sides are independent, so hash them at the same time: the archive
+		// candidates on the remote via the agent, the orphans wherever they live.
+		var archiveDigests, freshOrphanDigests map[string]entity.FileDigest
+		var archiveDigestErr, orphanDigestErr error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			archiveDigests, archiveDigestErr = agentClient.BatchDigest(archivePath, candidates,
+				&archiveDigestCounter, intervalMs)
+		}()
+		go func() {
+			defer wg.Done()
+			if len(neededOrphans) > 0 {
+				freshOrphanDigests, orphanDigestErr = digestFn(neededOrphans)
+			}
+		}()
+		wg.Wait()
+		if archiveDigestErr != nil {
+			return nil, fmt.Errorf("error computing archive digests via agent: %w", archiveDigestErr)
+		}
+		if orphanDigestErr != nil {
+			return nil, fmt.Errorf("error computing digests of %d orphan candidate(s): %w",
+				len(neededOrphans), orphanDigestErr)
+		}
+		for orphan, digest := range freshOrphanDigests {
+			orphanDigests[orphan] = digest
 		}
 
 		// Match orphans against archive digests
@@ -811,7 +1028,9 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 						AbsoluteDirPath: destDirPath + "/" + parentDir,
 					}
 					if !uniqueness.Contains(mkdirAction.Uniqueness()) {
-						actions = append(actions, mkdirAction)
+						if err := emitArchiveAction(mkdirAction, onAction, &actions); err != nil {
+							return nil, err
+						}
 						uniqueness.Add(mkdirAction.Uniqueness())
 					}
 					copyAction := action.CopyFileAction{
@@ -821,7 +1040,9 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 						UseReflink:    useReflink,
 					}
 					if !uniqueness.Contains(copyAction.Uniqueness()) {
-						actions = append(actions, copyAction)
+						if err := emitArchiveAction(copyAction, onAction, &actions); err != nil {
+							return nil, err
+						}
 						uniqueness.Add(copyAction.Uniqueness())
 						matchedOrphans.Add(orphan)
 					}
@@ -831,101 +1052,6 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string
 	}
 
 	return actions, nil
-}
-
-func matchAndBuildActions(
-	sourceDirPath string, sourceFiles map[string]entity.FileMeta,
-	orphansAtSource []string, orphanDigests map[string]entity.FileDigest,
-	destDirPath string, destinationFiles map[string]entity.FileMeta,
-	candidatesAtDestination []string, candidateDigests map[string]entity.FileDigest,
-	copyDuplicates bool, useReflink bool,
-) []action.SyncAction {
-	// Build reverse map: digest → candidate files
-	candidateDigestToFiles := make(map[entity.FileDigest][]string)
-	for _, f := range candidatesAtDestination {
-		if d, ok := candidateDigests[f]; ok {
-			candidateDigestToFiles[d] = append(candidateDigestToFiles[d], f)
-		}
-	}
-
-	actions := make([]action.SyncAction, 0)
-	uniqueness := set.NewSet[string]()
-	usedCandidates := set.NewSet[string]()
-
-	for _, orphanAtSource := range orphansAtSource {
-		orphanDigest, ok := orphanDigests[orphanAtSource]
-		if !ok {
-			continue
-		}
-		candidates, hasCandidates := candidateDigestToFiles[orphanDigest]
-		if !hasCandidates {
-			continue
-		}
-		candidateAtDestination := service.PickBestCandidate(candidates, orphanAtSource, sourceFiles)
-		if candidateAtDestination == "" {
-			continue
-		}
-		_, candidateExistsAtSource := sourceFiles[candidateAtDestination]
-		if destinationFiles[candidateAtDestination].ModifiedTimestamp != sourceFiles[orphanAtSource].ModifiedTimestamp {
-			if srcMetaForCandidate, existsAtSourceForCandidate := sourceFiles[candidateAtDestination]; !(existsAtSourceForCandidate && srcMetaForCandidate == destinationFiles[candidateAtDestination]) {
-				timestampAction := action.PropagateTimestampAction{
-					SourceBaseDirPath:           sourceDirPath,
-					DestinationBaseDirPath:      destDirPath,
-					SourceFileRelativePath:      orphanAtSource,
-					DestinationFileRelativePath: candidateAtDestination,
-					SourceModTime:               time.Unix(sourceFiles[orphanAtSource].ModifiedTimestamp, 0),
-				}
-				if !uniqueness.Contains(timestampAction.Uniqueness()) {
-					actions = append(actions, timestampAction)
-					uniqueness.Add(timestampAction.Uniqueness())
-				}
-			}
-		}
-		if !candidateExistsAtSource && candidateAtDestination != orphanAtSource {
-			// Move: candidate doesn't exist at source, safe to move
-			usedCandidates.Add(candidateAtDestination)
-			parentDir := destDirPath + "/" + parentPath(orphanAtSource)
-			directoryAction := action.MakeDirectoryAction{
-				AbsoluteDirPath: parentDir,
-			}
-			if !uniqueness.Contains(directoryAction.Uniqueness()) {
-				actions = append(actions, directoryAction)
-				uniqueness.Add(directoryAction.Uniqueness())
-			}
-			moveFileAction := action.MoveFileAction{
-				BasePath:         destDirPath,
-				RelativeFromPath: candidateAtDestination,
-				RelativeToPath:   orphanAtSource,
-			}
-			if !uniqueness.Contains(moveFileAction.Uniqueness()) {
-				actions = append(actions, moveFileAction)
-				uniqueness.Add(moveFileAction.Uniqueness())
-			}
-		} else if copyDuplicates && candidateExistsAtSource && candidateAtDestination != orphanAtSource {
-			// Copy: candidate exists at source too, so we can't move it — copy instead
-			absSource := destDirPath + "/" + candidateAtDestination
-			absDest := destDirPath + "/" + orphanAtSource
-			parentDir := destDirPath + "/" + parentPath(orphanAtSource)
-			directoryAction := action.MakeDirectoryAction{
-				AbsoluteDirPath: parentDir,
-			}
-			if !uniqueness.Contains(directoryAction.Uniqueness()) {
-				actions = append(actions, directoryAction)
-				uniqueness.Add(directoryAction.Uniqueness())
-			}
-			copyAction := action.CopyFileAction{
-				AbsSourcePath: absSource,
-				AbsDestPath:   absDest,
-				SourceModTime: time.Unix(sourceFiles[orphanAtSource].ModifiedTimestamp, 0),
-				UseReflink:    useReflink,
-			}
-			if !uniqueness.Contains(copyAction.Uniqueness()) {
-				actions = append(actions, copyAction)
-				uniqueness.Add(copyAction.Uniqueness())
-			}
-		}
-	}
-	return actions
 }
 
 // computeDirTimestampActions scans source and destination for directories and
@@ -940,19 +1066,11 @@ func computeDirTimestampActions(sourceDirPath string, sourceFS rsfs.FileSystem,
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if sourceFS != nil {
-			sourceDirs, srcErr = service.FindDirsFromDirectoryWithFS(sourceFS, sourceDirPath, exclusions)
-		} else {
-			sourceDirs, srcErr = service.FindDirsFromDirectory(sourceDirPath, exclusions)
-		}
+		_, sourceDirs, _, srcErr = walkIncluded(sourceDirPath, nil, dirsWalk(sourceFS, exclusions))
 	}()
 	go func() {
 		defer wg.Done()
-		if destFS != nil {
-			destDirs, dstErr = service.FindDirsFromDirectoryWithFS(destFS, destDirPath, exclusions)
-		} else {
-			destDirs, dstErr = service.FindDirsFromDirectory(destDirPath, exclusions)
-		}
+		_, destDirs, _, dstErr = walkIncluded(destDirPath, missingLocally(destFS), dirsWalk(destFS, exclusions))
 	}()
 	wg.Wait()
 	if srcErr != nil {
@@ -995,13 +1113,9 @@ func parentPath(relPath string) string {
 	return "."
 }
 
-func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.SyncAction, destDirPath string, dryRun bool) error {
-	if dryRun {
-		fmte.Printf("Simulating sync actions at destination (dry run)...\n")
-	} else {
-		fmte.Printf("Applying sync actions at destination via remote agent...\n")
-	}
-
+// actionSpecs translates actions into what the agent protocol carries. Order is kept:
+// the agent performs them in this order, and a copy may depend on a directory before it.
+func actionSpecs(actions []action.SyncAction) []remote.ActionSpec {
 	specs := make([]remote.ActionSpec, 0, len(actions))
 	for _, a := range actions {
 		switch act := a.(type) {
@@ -1034,6 +1148,70 @@ func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.Sy
 			})
 		}
 	}
+	return specs
+}
+
+// performRemoteFunc executes a batch of actions on the remote side, in the given order.
+type performRemoteFunc func(specs []remote.ActionSpec, dryRun bool) ([]remote.ActionResult, error)
+
+// newRemoteArchiveActionStreamer applies archive matches on a remote destination while the
+// scan is still running, so an interrupted run keeps what it already copied.
+//
+// Unlike the local streamer this batches: every action on its own would be a round-trip
+// over the ssh connection. A batch is sent once it reaches remoteActionBatchSize, and the
+// returned flush sends the remainder. Needs a connection that correlates by request ID,
+// since the hashing requests are in flight at the same time.
+func newRemoteArchiveActionStreamer(perform performRemoteFunc, dryRun bool,
+	applied *int,
+) (onAction service.ArchiveActionFunc, flush func() error) {
+	const remoteActionBatchSize = 64
+	var batch []action.SyncAction
+
+	send := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		results, err := perform(actionSpecs(batch), dryRun)
+		if err != nil {
+			return fmt.Errorf("remote perform failed: %w", err)
+		}
+		for i, result := range results {
+			if !result.Success {
+				return fmt.Errorf("error performing \"%s\": %s", batch[i].UnixCommand(), result.Error)
+			}
+		}
+		*applied += len(batch)
+		batch = batch[:0]
+		return nil
+	}
+
+	return func(a action.SyncAction) error {
+			batch = append(batch, a)
+			if len(batch) < remoteActionBatchSize {
+				return nil
+			}
+			return send()
+		}, func() error {
+			return send()
+		}
+}
+
+// performActionsViaAgent hands the whole action list to the remote agent at once.
+//
+// The reflink count here is by intent: a reflink that the remote filesystem couldn't do
+// fell back to a full copy on that host, and the agent protocol doesn't report it back.
+func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.SyncAction,
+	destDirPath string, dryRun, verbose bool,
+) error {
+	if dryRun {
+		fmte.Printf("Simulating sync actions at destination (dry run)...\n")
+	} else {
+		fmte.Printf("Applying sync actions at destination via remote agent...\n")
+	}
+
+	// The agent runs the actions in the order given and knows nothing of earlier moves.
+	redirectInOrder(actions)
+	specs := actionSpecs(actions)
 
 	start := time.Now()
 	results, err := agentClient.Perform(specs, dryRun)
@@ -1042,30 +1220,37 @@ func performActionsViaAgent(agentClient *remote.AgentClient, actions []action.Sy
 		return fmt.Errorf("remote perform failed: %w", err)
 	}
 
+	// The agent performs the whole batch before answering, so there is nothing to report
+	// while it runs: what is left is the breakdown, plus every failure.
+	var stats actionStats
 	successCount := 0
 	for i, r := range results {
-		fmte.Print(strings.Replace(
+		header := strings.Replace(
 			fmt.Sprintf("%4d/%d %s: ", i+1, len(actions), actions[i]),
 			destDirPath+"/", "", -1,
-		))
+		)
 		if r.Success {
-			if dryRun {
-				fmte.Printf("skipping (dry run)\n")
-			} else {
-				fmte.Printf("done\n")
+			stats.record(actions[i], nil)
+			if verbose {
+				if dryRun {
+					fmte.Printf("%sskipping (dry run)\n", header)
+				} else {
+					fmte.Printf("%sdone\n", header)
+				}
 			}
 			successCount++
 		} else {
-			fmte.Printf("failed due to: %s\n", r.Error)
+			stats.record(actions[i], errors.New(r.Error))
+			fmte.PrintfErr("%sfailed due to: %s\n", header, r.Error)
 		}
 	}
 
 	if dryRun {
-		fmte.Printf("Dry run completed in %.1fs: %d actions would be performed\n",
-			end.Sub(start).Seconds(), successCount)
+		fmte.Printf("Dry run completed in %.1fs: %d actions would be performed (%s)\n",
+			end.Sub(start).Seconds(), successCount, stats.summary())
 	} else {
-		fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded\n",
-			end.Sub(start).Seconds(), successCount, len(actions))
+		fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded (%s)\n",
+			end.Sub(start).Seconds(), successCount, len(actions), stats.summary())
 	}
 	return nil
 }
@@ -1079,21 +1264,34 @@ type actionResult struct {
 	dryRun bool
 }
 
-func performActions(actions []action.SyncAction, destinationDirPath string, dryRun bool) error {
+func performActions(actions []action.SyncAction, destinationDirPath string, dryRun, verbose bool,
+	progressFrequency time.Duration,
+) error {
+	return performActionsTracked(actions, destinationDirPath, dryRun, verbose, progressFrequency, movedFiles{})
+}
+
+// performActionsTracked is performActions sharing movedPaths with other phases of the run,
+// so copies from a file moved by an earlier batch find it at its new path.
+func performActionsTracked(actions []action.SyncAction, destinationDirPath string, dryRun, verbose bool,
+	progressFrequency time.Duration, movedPaths movedFiles,
+) error {
 	if dryRun {
 		fmte.Printf("Simulating sync actions at destination (dry run)...\n")
 	} else {
 		fmte.Printf("Applying sync actions at destination...\n")
 	}
 	successCount := 0
-	movedPaths := make(map[string]string)
 
 	action.SortByDestinationDir(actions)
 
 	total := len(actions)
 	prefixStrip := destinationDirPath + "/"
 
-	// Printer goroutine — does all formatting and stdout I/O
+	var stats actionStats
+	var done atomic.Int64
+
+	// Printer goroutine — does all formatting and stdout I/O. It only sees what is worth
+	// printing: every action under --verbose, and failures always.
 	printCh := make(chan actionResult, 256)
 	var printerDone sync.WaitGroup
 	printerDone.Add(1)
@@ -1104,54 +1302,55 @@ func performActions(actions []action.SyncAction, destinationDirPath string, dryR
 				fmt.Sprintf("%4d/%d %s: ", r.index+1, total, r.action),
 				prefixStrip, "", -1,
 			)
-			if r.dryRun {
+			if r.err != nil {
+				fmte.PrintfErr("%sfailed due to: %+v\n", header, r.err)
+			} else if r.dryRun {
 				fmt.Print(header, "skipping (dry run)\n")
-			} else if r.err == nil {
-				fmt.Print(header, "done\n")
 			} else {
-				fmt.Printf("%sfailed due to: %+v\n", header, r.err)
+				fmt.Print(header, "done\n")
 			}
 		}
 	}()
 
+	stopProgress := func() {}
+	if !verbose {
+		stopProgress = startActionStatsProgress(&stats, &done, total, progressFrequency)
+	}
+
 	// I/O loop — performs actions, sends lightweight results to printer
 	start := time.Now()
 	for i, syncAction := range actions {
-		if copyAct, ok := syncAction.(action.CopyFileAction); ok {
-			if newPath, wasMoved := movedPaths[copyAct.AbsSourcePath]; wasMoved {
-				copyAct.AbsSourcePath = newPath
-				syncAction = copyAct
-			}
-		}
+		syncAction = movedPaths.redirect(syncAction)
 
 		var aErr error
 		if !dryRun {
 			aErr = syncAction.Perform()
 		}
 
-		printCh <- actionResult{index: i, action: syncAction, err: aErr, dryRun: dryRun}
+		stats.record(syncAction, aErr)
+		done.Store(int64(i + 1))
+		if verbose || aErr != nil {
+			printCh <- actionResult{index: i, action: syncAction, err: aErr, dryRun: dryRun}
+		}
 
 		if aErr == nil {
 			successCount++
 			if !dryRun {
-				if moveAct, ok := syncAction.(action.MoveFileAction); ok {
-					oldAbs := filepath.Join(moveAct.BasePath, moveAct.RelativeFromPath)
-					newAbs := filepath.Join(moveAct.BasePath, moveAct.RelativeToPath)
-					movedPaths[oldAbs] = newAbs
-				}
+				movedPaths.record(syncAction)
 			}
 		}
 	}
+	stopProgress()
 	close(printCh)
 	printerDone.Wait()
 	end := time.Now()
 
 	if dryRun {
-		fmte.Printf("Dry run completed in %.1fs: %d actions would be performed\n",
-			end.Sub(start).Seconds(), successCount)
+		fmte.Printf("Dry run completed in %.1fs: %d actions would be performed (%s)\n",
+			end.Sub(start).Seconds(), successCount, stats.summary())
 	} else {
-		fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded\n",
-			end.Sub(start).Seconds(), successCount, total)
+		fmte.Printf("Sync completed in %.1fs: %d out of %d actions succeeded (%s)\n",
+			end.Sub(start).Seconds(), successCount, total, stats.summary())
 	}
 	return nil
 }
@@ -1184,17 +1383,6 @@ func generateScript(actions []action.SyncAction, shellScriptFileName string, rem
 	}
 	fmte.Printf("Done. You may run it now.\n")
 	return nil
-}
-
-func reportProgress(sourceActual *int32, sourceExpected int32, destinationActual *int32, destinationExpected int32, reportingFrequency time.Duration) {
-	var sourceProgress, destinationProgress float64
-	time.Sleep(100 * time.Millisecond)
-	for atomic.LoadInt32(sourceActual) < sourceExpected || atomic.LoadInt32(destinationActual) < destinationExpected {
-		time.Sleep(reportingFrequency)
-		sourceProgress = 100.0 * float64(atomic.LoadInt32(sourceActual)) / float64(sourceExpected)
-		destinationProgress = 100.0 * float64(*destinationActual) / float64(destinationExpected)
-		fmte.Printf("%.0f%% done at source and %.0f%% done at destination\n", sourceProgress, destinationProgress)
-	}
 }
 
 func findCandidatesAtDestination(sourceFiles, destinationFiles map[string]entity.FileMeta, orphansAtSource []string) []string {

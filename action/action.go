@@ -22,16 +22,40 @@ type SyncAction interface {
 	Uniqueness() string
 }
 
-// SortByDestinationDir sorts actions by destination directory path,
-// grouping files in the same directory together for better cache locality.
+// SortByDestinationDir sorts actions by destination directory path, grouping files in the
+// same directory together for better cache locality. Directory creations come first, so a
+// copy or move always finds its target directory in place.
+//
+// The key has to travel with its action: computing keys into a separate slice and letting
+// sort swap only the actions leaves the comparison reading keys of unrelated entries, and
+// the result is an arbitrary permutation rather than a sorted list.
 func SortByDestinationDir(actions []SyncAction) {
-	keys := make([]string, len(actions))
-	for i, a := range actions {
-		keys[i] = filepath.Dir(a.destinationPath())
+	type keyedAction struct {
+		directoriesFirst int
+		destinationDir   string
+		action           SyncAction
 	}
-	sort.SliceStable(actions, func(i, j int) bool {
-		return keys[i] < keys[j]
+	items := make([]keyedAction, len(actions))
+	for i, a := range actions {
+		rank := 1
+		if _, isMkdir := a.(MakeDirectoryAction); isMkdir {
+			rank = 0
+		}
+		items[i] = keyedAction{
+			directoriesFirst: rank,
+			destinationDir:   filepath.Dir(a.destinationPath()),
+			action:           a,
+		}
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].directoriesFirst != items[j].directoriesFirst {
+			return items[i].directoriesFirst < items[j].directoriesFirst
+		}
+		return items[i].destinationDir < items[j].destinationDir
 	})
+	for i := range items {
+		actions[i] = items[i].action
+	}
 }
 
 const cmdSeparator = "\u0001"

@@ -28,22 +28,51 @@ func FindFilesFromDirectoryWithFS(fsys rsfs.FileSystem, dirPath string, excluded
 	totalSizeOfFiles int64,
 	findFilesErr error,
 ) {
+	files, _, totalSizeOfFiles, findFilesErr = FindFilesAndDirsFromDirectoryWithFS(fsys, dirPath, excludedFiles, counter)
+	return files, totalSizeOfFiles, findFilesErr
+}
+
+// FindFilesAndDirsFromDirectory returns the files of FindFilesFromDirectory and the
+// directories of FindDirsFromDirectory from a single walk.
+func FindFilesAndDirsFromDirectory(dirPath string, excludedFiles set.Set[string], counter *int32) (
+	files map[string]entity.FileMeta,
+	dirs map[string]int64,
+	totalSizeOfFiles int64,
+	findFilesErr error,
+) {
+	fsys := rsfs.NewLocalFS()
+	defer fsys.Close()
+	return FindFilesAndDirsFromDirectoryWithFS(fsys, dirPath, excludedFiles, counter)
+}
+
+// FindFilesAndDirsFromDirectoryWithFS is like FindFilesAndDirsFromDirectory but uses the
+// given FileSystem.
+func FindFilesAndDirsFromDirectoryWithFS(fsys rsfs.FileSystem, dirPath string, excludedFiles set.Set[string],
+	counter *int32,
+) (
+	files map[string]entity.FileMeta,
+	dirs map[string]int64,
+	totalSizeOfFiles int64,
+	findFilesErr error,
+) {
 	entries, err := walkWithExclusions(fsys, dirPath, excludedFiles, counter)
 	if err != nil {
-		return map[string]entity.FileMeta{}, 0, err
+		return map[string]entity.FileMeta{}, map[string]int64{}, 0, err
 	}
-	allFiles := make(map[string]entity.FileMeta, len(entries))
+	files = make(map[string]entity.FileMeta, len(entries))
+	dirs = make(map[string]int64)
 	for _, e := range entries {
 		if e.IsDir {
+			dirs[e.RelativePath] = e.ModTime
 			continue
 		}
-		allFiles[e.RelativePath] = entity.FileMeta{
+		files[e.RelativePath] = entity.FileMeta{
 			Size:              e.Size,
 			ModifiedTimestamp: e.ModTime,
 		}
 		totalSizeOfFiles += e.Size
 	}
-	return allFiles, totalSizeOfFiles, nil
+	return files, dirs, totalSizeOfFiles, nil
 }
 
 // FindDirsFromDirectory returns a map of relative directory paths to their

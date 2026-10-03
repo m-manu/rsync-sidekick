@@ -1,8 +1,6 @@
 package fs
 
 import (
-	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,22 +29,52 @@ var DefaultOneFileSystem bool
 // DefaultArchiveOneFileSystem is the default for OneFileSystem on archive scans.
 var DefaultArchiveOneFileSystem bool
 
+// DefaultMinSize is the --min-size threshold in bytes: regular files smaller than this are
+// left out of every walk, so they never become orphans, candidates or archive candidates
+// and never get hashed. Zero disables it. Directories are never filtered.
+//
+// Filtering inside the walks rather than afterwards keeps the progress counters honest —
+// they report what will actually be worked on.
+var DefaultMinSize int64
+
+// DefaultWalkThreads is how many directories a local walk reads at once (--walk-threads).
+var DefaultWalkThreads = 4
+
+// SkipBySize reports whether a regular file of this size is below DefaultMinSize.
+func SkipBySize(isDir bool, size int64) bool {
+	return !isDir && DefaultMinSize > 0 && size < DefaultMinSize
+}
+
 // NewLocalFSForArchive returns a LocalFS configured for archive scanning.
 func NewLocalFSForArchive() *LocalFS {
 	return &LocalFS{OneFileSystem: DefaultArchiveOneFileSystem}
 }
 
 func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}, counter *int32) ([]DirEntry, error) {
+	return l.walk(dirPath, excludedNames, counter, nil)
+}
+
+// WalkEach is Walk handing the entries to emit as they are read, a directory at a time
+// and from several goroutines at once, instead of returning them all at the end.
+func (l *LocalFS) WalkEach(dirPath string, excludedNames map[string]struct{}, counter *int32,
+	emit func([]DirEntry),
+) error {
+	_, err := l.walk(dirPath, excludedNames, counter, emit)
+	return err
+}
+
+func (l *LocalFS) walk(dirPath string, excludedNames map[string]struct{}, counter *int32,
+	emit func([]DirEntry),
+) ([]DirEntry, error) {
 	// Use BTRFS-optimized walk if available (batch ioctl instead of per-file stat)
 	if !l.OneFileSystem && IsBtrfs(dirPath) {
-		entries, err := BtrfsWalk(dirPath, excludedNames, counter)
+		entries, err := btrfsWalk(dirPath, excludedNames, counter, emit)
 		if err == nil {
 			return entries, nil
 		}
 		// Fall back to standard walk on error
 	}
 
-	entries := make([]DirEntry, 0, 10_000)
 	// Get root device ID for --one-file-system check
 	var rootDevice uint64
 	if l.OneFileSystem {
@@ -54,58 +82,71 @@ func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}, counte
 			rootDevice = device
 		}
 	}
-	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			fmte.PrintfErr("skipping \"%s\": %+v\n", path, err)
-			return nil
+	var skipDir func(path string) bool
+	if l.OneFileSystem {
+		// --one-file-system: skip directories on different filesystems
+		skipDir = func(path string) bool {
+			device, ok := l.getDevice(path)
+			return ok && device != rootDevice
 		}
+	}
+	return walkParallel(standardDir{absPath: dirPath}, DefaultWalkThreads,
+		func(dir standardDir) ([]DirEntry, []standardDir) {
+			return readStandardDir(dir, excludedNames, counter, skipDir)
+		}, emit), nil
+}
+
+// standardDir is a directory for readStandardDir.
+type standardDir struct{ absPath, relativePath string }
+
+// readStandardDir reads one directory with ReadDir and one lstat per entry: its entries,
+// and the subdirectories still to walk. skipDir, when set, leaves directories out.
+func readStandardDir(dir standardDir, excludedNames map[string]struct{}, counter *int32,
+	skipDir func(path string) bool,
+) (entries []DirEntry, subdirs []standardDir) {
+	children, err := os.ReadDir(dir.absPath)
+	if err != nil {
+		// Entries read before the error are still walked, as filepath.WalkDir does.
+		fmte.PrintfErr("skipping \"%s\": %+v\n", dir.absPath, err)
+	}
+	for _, d := range children {
 		if _, excluded := excludedNames[d.Name()]; excluded {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
+			continue
 		}
 		// Ignore dot files (Mac)
 		if strings.HasPrefix(d.Name(), "._") {
-			return nil
+			continue
 		}
-		if d.Type().IsRegular() || d.IsDir() {
-			info, infoErr := d.Info()
-			if infoErr != nil {
-				fmte.PrintfErr("couldn't get metadata of \"%s\": %+v\n", path, infoErr)
-				return nil
-			}
-			// --one-file-system: skip directories on different filesystems
-			if l.OneFileSystem && d.IsDir() {
-				if device, ok := l.getDevice(path); ok && device != rootDevice {
-					return filepath.SkipDir
-				}
-			}
-			relativePath, relErr := filepath.Rel(dirPath, path)
-			if relErr != nil {
-				fmte.PrintfErr("couldn't comprehend path \"%s\": %+v\n", path, relErr)
-				return nil
-			}
-			// Skip the root directory itself
-			if relativePath == "." {
-				return nil
-			}
-			entries = append(entries, DirEntry{
-				RelativePath: relativePath,
-				Size:         info.Size(),
-				ModTime:      info.ModTime().Unix(),
-				IsDir:        d.IsDir(),
-			})
-			if counter != nil && d.Type().IsRegular() {
-				atomic.AddInt32(counter, 1)
-			}
+		if !d.Type().IsRegular() && !d.IsDir() {
+			continue
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("couldn't scan directory %s: %v", dirPath, err)
+		path := filepath.Join(dir.absPath, d.Name())
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			fmte.PrintfErr("couldn't get metadata of \"%s\": %+v\n", path, infoErr)
+			continue
+		}
+		if d.IsDir() && skipDir != nil && skipDir(path) {
+			continue
+		}
+		relativePath := filepath.Join(dir.relativePath, d.Name())
+		if d.IsDir() {
+			subdirs = append(subdirs, standardDir{absPath: path, relativePath: relativePath})
+		}
+		if SkipBySize(d.IsDir(), info.Size()) {
+			continue
+		}
+		entries = append(entries, DirEntry{
+			RelativePath: relativePath,
+			Size:         info.Size(),
+			ModTime:      info.ModTime().Unix(),
+			IsDir:        d.IsDir(),
+		})
+		if counter != nil && d.Type().IsRegular() {
+			atomic.AddInt32(counter, 1)
+		}
 	}
-	return entries, nil
+	return entries, subdirs
 }
 
 func (l *LocalFS) Lstat(path string) (FileInfo, error) {

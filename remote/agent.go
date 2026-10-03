@@ -15,19 +15,63 @@ import (
 
 	set "github.com/deckarep/golang-set/v2"
 	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
+	"github.com/m-manu/rsync-sidekick/v2/lib"
 	"github.com/m-manu/rsync-sidekick/v2/service"
 )
+
+// defaultDigestProgressInterval is used when a DigestRequest carries no interval,
+// which is what clients older than the throttled progress reporting send.
+const defaultDigestProgressInterval = 2 * time.Second
 
 // RunAgent reads JSON-line requests from stdin, executes them locally,
 // and writes JSON-line responses to stdout. This is invoked on the remote
 // side via "rsync-sidekick --agent".
-func RunAgent() error {
-	reader := bufio.NewReader(os.Stdin)
-	writer := os.Stdout
+func RunAgent(agentVersion string) error {
+	return runAgentOn(os.Stdin, os.Stdout, agentVersion)
+}
+
+// runAgentOn is RunAgent against explicit streams, which is what makes the dispatch
+// loop testable.
+//
+// Reading is kept separate from working: a request is handed to a goroutine so the next
+// one can be read right away. That is what lets a client have, say, a walk and a digest
+// request in flight at once. Which requests may actually overlap is decided per kind:
+//
+//   - walks run one at a time, because they configure global filesystem settings
+//     (one-file-system, min-size) that a second walk would overwrite;
+//   - digests run one at a time, since each already saturates the disk with workers;
+//   - perform requests run in a single queue, strictly in arrival order, because a copy
+//     can depend on a directory an earlier action created;
+//   - version requests answer immediately.
+func runAgentOn(in io.Reader, out io.Writer, agentVersion string) error {
+	reader := bufio.NewReader(in)
+	writer := newSyncWriter(out)
+
+	var walkMu, digestMu sync.Mutex
+	var workers sync.WaitGroup
+
+	// Perform requests go through one worker so their order is the order they arrived in;
+	// a mutex would not guarantee that.
+	performQueue := make(chan Envelope, 64)
+	var performWorker sync.WaitGroup
+	performWorker.Add(1)
+	go func() {
+		defer performWorker.Done()
+		for env := range performQueue {
+			handlePerform(writer.forRequest(env.ID), env.Payload)
+		}
+	}()
+	shutdown := func() {
+		close(performQueue)
+		performWorker.Wait()
+		workers.Wait()
+		closeAgentDigestCache()
+	}
 
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
+			shutdown()
 			if err == io.EOF {
 				return nil
 			}
@@ -41,30 +85,50 @@ func RunAgent() error {
 
 		var env Envelope
 		if err := json.Unmarshal(line, &env); err != nil {
-			writeError(writer, fmt.Sprintf("invalid message: %v", err))
+			writeError(writer.forRequest(env.ID), fmt.Sprintf("invalid message: %v", err))
 			continue
 		}
 
 		switch env.Type {
 		case MsgQuit:
+			shutdown()
 			return nil
 
 		case MsgWalkRequest:
-			handleWalk(writer, env.Payload)
+			workers.Add(1)
+			go func(env Envelope) {
+				defer workers.Done()
+				walkMu.Lock()
+				defer walkMu.Unlock()
+				handleWalk(writer.forRequest(env.ID), env.Payload)
+			}(env)
 
 		case MsgDigestRequest:
-			handleDigest(writer, env.Payload)
+			workers.Add(1)
+			go func(env Envelope) {
+				defer workers.Done()
+				digestMu.Lock()
+				defer digestMu.Unlock()
+				handleDigest(writer.forRequest(env.ID), env.Payload)
+			}(env)
 
 		case MsgPerformRequest:
-			handlePerform(writer, env.Payload)
+			performQueue <- env
+
+		case MsgVersionRequest:
+			writeResponse(writer.forRequest(env.ID), MsgVersionResponse,
+				VersionResponse{Version: agentVersion})
+
+		case MsgGlobRequest:
+			handleGlob(writer.forRequest(env.ID), env.Payload)
 
 		default:
-			writeError(writer, fmt.Sprintf("unknown message type: %s", env.Type))
+			writeError(writer.forRequest(env.ID), fmt.Sprintf("unknown message type: %s", env.Type))
 		}
 	}
 }
 
-func handleWalk(w io.Writer, payload []byte) {
+func handleWalk(w *requestWriter, payload []byte) {
 	var req WalkRequest
 	if err := json.Unmarshal(payload, &req); err != nil {
 		writeError(w, fmt.Sprintf("bad walk request: %v", err))
@@ -73,6 +137,15 @@ func handleWalk(w io.Writer, payload []byte) {
 
 	// Apply one-file-system setting from the client
 	rsfs.DefaultOneFileSystem = req.OneFileSystem
+	rsfs.DefaultMinSize = req.MinSize
+	if req.WalkThreads > 0 {
+		rsfs.DefaultWalkThreads = req.WalkThreads
+	}
+
+	if req.ChunkSize > 0 {
+		handleWalkChunked(w, req)
+		return
+	}
 
 	excluded := set.NewThreadUnsafeSetWithSize[string](len(req.ExcludedNames))
 	for _, name := range req.ExcludedNames {
@@ -100,7 +173,7 @@ func handleWalk(w io.Writer, payload []byte) {
 		}()
 	}
 
-	files, totalSize, err := service.FindFilesFromDirectory(req.DirPath, excluded, &counter)
+	files, dirs, totalSize, err := service.FindFilesAndDirsFromDirectory(req.DirPath, excluded, &counter)
 
 	if done != nil {
 		close(done)
@@ -109,12 +182,6 @@ func handleWalk(w io.Writer, payload []byte) {
 
 	if err != nil {
 		writeError(w, fmt.Sprintf("walk failed: %v", err))
-		return
-	}
-
-	dirs, dirErr := service.FindDirsFromDirectory(req.DirPath, excluded)
-	if dirErr != nil {
-		writeError(w, fmt.Sprintf("walk dirs failed: %v", dirErr))
 		return
 	}
 
@@ -130,31 +197,122 @@ func handleWalk(w io.Writer, payload []byte) {
 	writeResponse(w, MsgWalkResponse, resp)
 }
 
-func handleDigest(w io.Writer, payload []byte) {
+// handleWalkChunked sends the entries in WalkChunk messages while the walk runs, so
+// neither side ever holds the whole tree as one message. The chunks double as progress.
+func handleWalkChunked(w *requestWriter, req WalkRequest) {
+	excluded := make(map[string]struct{}, len(req.ExcludedNames))
+	for _, name := range req.ExcludedNames {
+		excluded[name] = struct{}{}
+	}
+	var mu sync.Mutex
+	batch := make([]WalkEntry, 0, req.ChunkSize)
+	sent := 0
+	var totalSize int64
+	// The full batch is swapped out under the lock and sent outside it, so the walk
+	// workers keep reading while a chunk is on the wire.
+	send := func(entries []WalkEntry) {
+		writeResponse(w, MsgWalkChunk, WalkChunk{Entries: entries})
+	}
+	emit := func(entries []rsfs.DirEntry) {
+		var full []WalkEntry
+		mu.Lock()
+		for _, e := range entries {
+			batch = append(batch, WalkEntry{Path: e.RelativePath, Size: e.Size, ModTime: e.ModTime, IsDir: e.IsDir})
+			if !e.IsDir {
+				totalSize += e.Size
+			}
+		}
+		if len(batch) >= req.ChunkSize {
+			full, batch = batch, make([]WalkEntry, 0, req.ChunkSize)
+			sent += len(full)
+		}
+		mu.Unlock()
+		if full != nil {
+			send(full)
+		}
+	}
+
+	err := rsfs.NewLocalFS().WalkEach(req.DirPath, excluded, nil, emit)
+	if err != nil {
+		writeError(w, fmt.Sprintf("walk failed: %v", err))
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(batch) > 0 {
+		sent += len(batch)
+		send(batch)
+	}
+	writeResponse(w, MsgWalkResponse, WalkResponse{TotalSize: totalSize, Entries: sent, Chunked: true})
+}
+
+func handleDigest(w *requestWriter, payload []byte) {
 	var req DigestRequest
 	if err := json.Unmarshal(payload, &req); err != nil {
 		writeError(w, fmt.Sprintf("bad digest request: %v", err))
 		return
 	}
 
+	useAgentDigestCache(req.DigestCache)
 	total := len(req.Files)
-	resp := DigestResponse{
-		Digests: make(map[string]FileDigest, total),
-	}
 
-	for i, relPath := range req.Files {
-		absPath := filepath.Join(req.BasePath, relPath)
-		digest, err := service.GetDigest(absPath)
-		if err == nil {
-			resp.Digests[relPath] = FileDigestFromEntity(digest)
+	// Hashing runs with the same parallelism as a local run, so a sync is equally fast
+	// in either direction. Progress is reported on a timer rather than per file — one
+	// message per file used to put len(Files) round-trips on the wire.
+	interval := time.Duration(req.ProgressIntervalMs) * time.Millisecond
+	if interval <= 0 {
+		interval = defaultDigestProgressInterval
+	}
+	var counter int32
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				writeResponse(w, MsgDigestProgress,
+					DigestProgress{FilesHashed: int(atomic.LoadInt32(&counter)), Total: total})
+			}
 		}
-		writeResponse(w, MsgDigestProgress, DigestProgress{FilesHashed: i + 1, Total: total})
+	}()
+
+	digests := service.BatchDigestsParallel(nil, req.BasePath, req.Files, &counter)
+
+	// Stop reporting before writing the response: writeResponse has a single writer.
+	close(done)
+	wg.Wait()
+
+	resp := DigestResponse{
+		Digests: make(map[string]FileDigest, len(digests)),
+	}
+	for relPath, digest := range digests {
+		resp.Digests[relPath] = FileDigestFromEntity(digest)
 	}
 
 	writeResponse(w, MsgDigestResponse, resp)
 }
 
-func handlePerform(w io.Writer, payload []byte) {
+func handleGlob(w *requestWriter, payload []byte) {
+	var req GlobRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		writeError(w, fmt.Sprintf("bad glob request: %v", err))
+		return
+	}
+	matches, err := lib.GlobDirsAll(req.Patterns)
+	if err != nil {
+		writeError(w, fmt.Sprintf("glob failed: %v", err))
+		return
+	}
+	writeResponse(w, MsgGlobResponse, GlobResponse{Matches: matches})
+}
+
+func handlePerform(w *requestWriter, payload []byte) {
 	var req PerformRequest
 	if err := json.Unmarshal(payload, &req); err != nil {
 		writeError(w, fmt.Sprintf("bad perform request: %v", err))
@@ -244,14 +402,43 @@ func executeAction(spec ActionSpec) error {
 	}
 }
 
-func writeResponse(w io.Writer, msgType string, payload interface{}) {
-	data, _ := json.Marshal(payload)
-	env := Envelope{Type: msgType, Payload: data}
-	line, _ := json.Marshal(env)
-	line = append(line, '\n')
-	_, _ = w.Write(line)
+// syncWriter serialises writes to the agent's single output stream. One response can be
+// megabytes, hence several pipe writes, and two goroutines must never interleave theirs.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
 }
 
-func writeError(w io.Writer, msg string) {
+func newSyncWriter(w io.Writer) *syncWriter {
+	return &syncWriter{w: w}
+}
+
+// forRequest returns a writer that stamps every message with the given request ID, so the
+// client can tell whose message it is.
+func (s *syncWriter) forRequest(id uint64) *requestWriter {
+	return &requestWriter{out: s, id: id}
+}
+
+// requestWriter writes messages belonging to one request.
+type requestWriter struct {
+	out *syncWriter
+	id  uint64
+}
+
+func (w *requestWriter) writeLine(line []byte) {
+	w.out.mu.Lock()
+	defer w.out.mu.Unlock()
+	_, _ = w.out.w.Write(line)
+}
+
+func writeResponse(w *requestWriter, msgType string, payload interface{}) {
+	data, _ := json.Marshal(payload)
+	env := Envelope{Type: msgType, ID: w.id, Payload: data}
+	line, _ := json.Marshal(env)
+	line = append(line, '\n')
+	w.writeLine(line)
+}
+
+func writeError(w *requestWriter, msg string) {
 	writeResponse(w, MsgError, ErrorResponse{Message: msg})
 }

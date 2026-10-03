@@ -5,6 +5,8 @@ package fs
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,28 +73,37 @@ var mountFSTypeCache map[string]string
 var mountFSTypeCacheOnce sync.Once
 
 func buildMountCache() {
-	mountFSTypeCache = make(map[string]string)
-	data, err := syscall.Open("/proc/self/mounts", syscall.O_RDONLY, 0)
+	f, err := os.Open("/proc/self/mounts")
 	if err != nil {
+		mountFSTypeCache = make(map[string]string)
 		return
 	}
-	defer syscall.Close(data)
-	buf := make([]byte, 64*1024)
-	n, _ := syscall.Read(data, buf)
-	if n <= 0 {
-		return
+	defer f.Close()
+	mountFSTypeCache = parseMountFSTypes(f)
+}
+
+// parseMountFSTypes maps mountpoint → fs type from the /proc/self/mounts format.
+//
+// It has to read to EOF, not once: procfs hands out its content in chunks of a few
+// kilobytes regardless of the buffer offered, so a single read on a host with many mounts
+// (docker overlays, for instance) returns only the first few entries. Everything past the
+// first chunk would be missing from the map, and a mountpoint that isn't in the map is not
+// recognised as BTRFS - which silently costs the optimized walk on exactly those hosts.
+func parseMountFSTypes(r io.Reader) map[string]string {
+	byMountpoint := make(map[string]string)
+	data, err := io.ReadAll(r)
+	if err != nil && len(data) == 0 {
+		return byMountpoint
 	}
-	for _, line := range strings.Split(string(buf[:n]), "\n") {
+	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 3 {
 			continue
 		}
-		mountpoint := fields[1]
 		// Unescape octal sequences (e.g. \040 for space)
-		mountpoint = unescapeOctal(mountpoint)
-		fstype := fields[2]
-		mountFSTypeCache[mountpoint] = fstype
+		byMountpoint[unescapeOctal(fields[1])] = fields[2]
 	}
+	return byMountpoint
 }
 
 func unescapeOctal(s string) string {
@@ -304,6 +315,13 @@ func readInodeItems(fd int, treeID uint64, minInode, maxInode uint64) (map[uint6
 var ErrNotBtrfs = fmt.Errorf("not a btrfs filesystem")
 
 func BtrfsWalk(dirPath string, excludedNames map[string]struct{}, counter *int32) ([]DirEntry, error) {
+	return btrfsWalk(dirPath, excludedNames, counter, nil)
+}
+
+// btrfsWalk is BtrfsWalk, handing the entries to emit as they are read when it is set.
+// It only fails before the first entry is read.
+func btrfsWalk(dirPath string, excludedNames map[string]struct{}, counter *int32, emit func([]DirEntry),
+) ([]DirEntry, error) {
 	if !IsBtrfs(dirPath) {
 		return nil, ErrNotBtrfs
 	}
@@ -317,227 +335,139 @@ func BtrfsWalk(dirPath string, excludedNames map[string]struct{}, counter *int32
 	}
 	defer syscall.Close(fd)
 
-	var result []DirEntry
-
-	type walkItem struct {
-		inodeID      uint64
-		relativePath string
-		absPath      string
-		treeID       uint64
-	}
-
-	queue := []walkItem{{inodeID: rootInode, relativePath: "", absPath: dirPath, treeID: treeID}}
-
-	for len(queue) > 0 {
-		item := queue[0]
-		queue = queue[1:]
-
-		// Check if this directory is still on BTRFS (not a submount with different fs)
-		if item.relativePath != "" && !IsBtrfs(item.absPath) {
-			// Different filesystem — fall back to stat-based walk for this subtree
-			fallbackEntries, err := fallbackWalkDir(item.absPath, item.relativePath, excludedNames, counter)
-			if err == nil {
-				result = append(result, fallbackEntries...)
-			}
-			continue
-		}
-
-		// Detect subvolume boundary: child dir may be a different subvolume
-		curTreeID := item.treeID
-		if item.relativePath != "" {
-			newTreeID := getSubvolID(item.absPath)
-			if newTreeID != curTreeID {
-				curTreeID = newTreeID
-				// Re-open fd for the new subvolume's inode space
-				item.inodeID = getInodeID(item.absPath)
-			}
-		}
-
-		// Read directory entries via ioctl
-		dirEntries, err := readDirIndex(fd, curTreeID, item.inodeID)
-		if err != nil {
-			// ioctl failed — fall back for this directory
-			fallbackEntries, err := fallbackWalkDir(item.absPath, item.relativePath, excludedNames, counter)
-			if err == nil {
-				result = append(result, fallbackEntries...)
-			}
-			continue
-		}
-
-		// Collect inode IDs for batch lookup
-		var minIno, maxIno uint64
-		type childInfo struct {
-			relPath string
-			absPath string
-			dtype   uint8
-		}
-		children := make(map[uint64]childInfo, len(dirEntries))
-		for _, de := range dirEntries {
-			if _, excluded := excludedNames[de.Name]; excluded {
-				continue
-			}
-			if strings.HasPrefix(de.Name, "._") {
-				continue
-			}
-			if de.Type != btrfsFtRegFile && de.Type != btrfsFtDir {
-				continue
-			}
-			relPath := de.Name
-			if item.relativePath != "" {
-				relPath = item.relativePath + "/" + de.Name
-			}
-			absPath := item.absPath + "/" + de.Name
-			children[de.InodeID] = childInfo{relPath: relPath, absPath: absPath, dtype: de.Type}
-			if minIno == 0 || de.InodeID < minIno {
-				minIno = de.InodeID
-			}
-			if de.InodeID > maxIno {
-				maxIno = de.InodeID
-			}
-		}
-
-		if len(children) == 0 {
-			continue
-		}
-
-		// Batch-read inode items
-		inodeInfos, err := readInodeItems(fd, curTreeID, minIno, maxIno)
-		if err != nil {
-			continue
-		}
-
-		for ino, child := range children {
-			info, ok := inodeInfos[ino]
-			if !ok {
-				// Inode not found in batch — may be in a different subvolume, stat individually
-				var st syscall.Stat_t
-				if syscall.Stat(child.absPath, &st) != nil {
-					continue
-				}
-				info = btrfsInodeInfo{Size: st.Size, Mode: st.Mode, MTimeSec: int64(st.Mtim.Sec)}
-			}
-
-			if child.dtype == btrfsFtDir {
-				result = append(result, DirEntry{
-					RelativePath: child.relPath,
-					Size:         0,
-					ModTime:      info.MTimeSec,
-					IsDir:        true,
-				})
-				queue = append(queue, walkItem{
-					inodeID:      ino,
-					relativePath: child.relPath,
-					absPath:      child.absPath,
-					treeID:       curTreeID,
-				})
-			} else {
-				result = append(result, DirEntry{
-					RelativePath: child.relPath,
-					Size:         info.Size,
-					ModTime:      info.MTimeSec,
-					IsDir:        false,
-				})
-				if counter != nil {
-					atomic.AddInt32(counter, 1)
-				}
-			}
-		}
-	}
-
-	return result, nil
+	root := btrfsWalkItem{inodeID: rootInode, relativePath: "", absPath: dirPath, treeID: treeID}
+	return walkParallel(root, DefaultWalkThreads, func(item btrfsWalkItem) ([]DirEntry, []btrfsWalkItem) {
+		return btrfsWalkDir(fd, item, excludedNames, counter)
+	}, emit), nil
 }
 
-// fallbackWalkDir does a standard stat-based walk for a subtree that's not on BTRFS.
-func fallbackWalkDir(absDir, relPrefix string, excludedNames map[string]struct{}, counter *int32) ([]DirEntry, error) {
-	var result []DirEntry
-	f, err := syscall.Open(absDir, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer syscall.Close(f)
+type btrfsWalkItem struct {
+	inodeID      uint64
+	relativePath string
+	absPath      string
+	treeID       uint64
+	// standard marks a subtree read with readStandardDir: below a mount of another
+	// filesystem, or where the ioctl failed (it needs root).
+	standard bool
+}
 
-	// Read directory entries via getdents, then stat each
-	entries, err := readDir(absDir)
-	if err != nil {
-		return nil, err
+// btrfsWalkDir reads one directory: its entries, and the subdirectories still to walk.
+func btrfsWalkDir(fd int, item btrfsWalkItem, excludedNames map[string]struct{}, counter *int32,
+) (result []DirEntry, subdirs []btrfsWalkItem) {
+	if item.standard || (item.relativePath != "" && !IsBtrfs(item.absPath)) {
+		return btrfsWalkStandard(item, excludedNames, counter)
 	}
-	for _, name := range entries {
-		if _, excluded := excludedNames[name]; excluded {
+
+	// Detect subvolume boundary: child dir may be a different subvolume
+	curTreeID := item.treeID
+	if item.relativePath != "" {
+		newTreeID := getSubvolID(item.absPath)
+		if newTreeID != curTreeID {
+			curTreeID = newTreeID
+			// Re-open fd for the new subvolume's inode space
+			item.inodeID = getInodeID(item.absPath)
+		}
+	}
+
+	// Read directory entries via ioctl
+	dirEntries, err := readDirIndex(fd, curTreeID, item.inodeID)
+	if err != nil {
+		return btrfsWalkStandard(item, excludedNames, counter)
+	}
+
+	// Collect inode IDs for batch lookup
+	var minIno, maxIno uint64
+	type childInfo struct {
+		relPath string
+		absPath string
+		dtype   uint8
+	}
+	children := make(map[uint64]childInfo, len(dirEntries))
+	for _, de := range dirEntries {
+		if _, excluded := excludedNames[de.Name]; excluded {
 			continue
 		}
-		if strings.HasPrefix(name, "._") {
+		if strings.HasPrefix(de.Name, "._") {
 			continue
 		}
-		fullPath := absDir + "/" + name
-		var st syscall.Stat_t
-		if syscall.Lstat(fullPath, &st) != nil {
+		if de.Type != btrfsFtRegFile && de.Type != btrfsFtDir {
 			continue
 		}
-		relPath := name
-		if relPrefix != "" {
-			relPath = relPrefix + "/" + name
+		relPath := de.Name
+		if item.relativePath != "" {
+			relPath = item.relativePath + "/" + de.Name
 		}
-		mode := st.Mode & syscall.S_IFMT
-		if mode == syscall.S_IFREG {
+		absPath := item.absPath + "/" + de.Name
+		children[de.InodeID] = childInfo{relPath: relPath, absPath: absPath, dtype: de.Type}
+		if minIno == 0 || de.InodeID < minIno {
+			minIno = de.InodeID
+		}
+		if de.InodeID > maxIno {
+			maxIno = de.InodeID
+		}
+	}
+
+	if len(children) == 0 {
+		return nil, nil
+	}
+
+	// Batch-read inode items
+	inodeInfos, err := readInodeItems(fd, curTreeID, minIno, maxIno)
+	if err != nil {
+		return nil, nil
+	}
+
+	for ino, child := range children {
+		info, ok := inodeInfos[ino]
+		if !ok {
+			// Inode not found in batch — may be in a different subvolume, stat individually
+			var st syscall.Stat_t
+			if syscall.Stat(child.absPath, &st) != nil {
+				continue
+			}
+			info = btrfsInodeInfo{Size: st.Size, Mode: st.Mode, MTimeSec: int64(st.Mtim.Sec)}
+		}
+
+		if child.dtype == btrfsFtDir {
 			result = append(result, DirEntry{
-				RelativePath: relPath,
-				Size:         st.Size,
-				ModTime:      int64(st.Mtim.Sec),
+				RelativePath: child.relPath,
+				Size:         0,
+				ModTime:      info.MTimeSec,
+				IsDir:        true,
+			})
+			subdirs = append(subdirs, btrfsWalkItem{
+				inodeID:      ino,
+				relativePath: child.relPath,
+				absPath:      child.absPath,
+				treeID:       curTreeID,
+			})
+		} else {
+			if SkipBySize(false, info.Size) {
+				continue
+			}
+			result = append(result, DirEntry{
+				RelativePath: child.relPath,
+				Size:         info.Size,
+				ModTime:      info.MTimeSec,
 				IsDir:        false,
 			})
 			if counter != nil {
 				atomic.AddInt32(counter, 1)
 			}
-		} else if mode == syscall.S_IFDIR {
-			result = append(result, DirEntry{
-				RelativePath: relPath,
-				Size:         0,
-				ModTime:      int64(st.Mtim.Sec),
-				IsDir:        true,
-			})
-			// Recurse
-			subEntries, err := fallbackWalkDir(fullPath, relPath, excludedNames, counter)
-			if err == nil {
-				result = append(result, subEntries...)
-			}
 		}
 	}
-	return result, nil
+	return result, subdirs
 }
 
-// readDir reads directory entry names using os.ReadDir.
-func readDir(path string) ([]string, error) {
-	d, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
-	if err != nil {
-		return nil, err
+// btrfsWalkStandard reads one directory the standard way; its subdirectories stay on that
+// way, in the same pool of workers.
+func btrfsWalkStandard(item btrfsWalkItem, excludedNames map[string]struct{}, counter *int32,
+) ([]DirEntry, []btrfsWalkItem) {
+	entries, dirs := readStandardDir(standardDir{absPath: item.absPath, relativePath: item.relativePath},
+		excludedNames, counter, nil)
+	subdirs := make([]btrfsWalkItem, len(dirs))
+	for i, dir := range dirs {
+		subdirs[i] = btrfsWalkItem{relativePath: dir.relativePath, absPath: dir.absPath, standard: true}
 	}
-	defer syscall.Close(d)
-
-	var names []string
-	buf := make([]byte, 8192)
-	for {
-		n, err := syscall.ReadDirent(d, buf)
-		if err != nil {
-			return names, err
-		}
-		if n <= 0 {
-			break
-		}
-		offset := 0
-		for offset < n {
-			dirent := (*syscall.Dirent)(unsafe.Pointer(&buf[offset]))
-			offset += int(dirent.Reclen)
-			nameBytes := (*[256]byte)(unsafe.Pointer(&dirent.Name[0]))
-			nameLen := 0
-			for nameLen < len(nameBytes) && nameBytes[nameLen] != 0 {
-				nameLen++
-			}
-			name := string(nameBytes[:nameLen])
-			if name == "." || name == ".." {
-				continue
-			}
-			names = append(names, name)
-		}
-	}
-	return names, nil
+	return entries, subdirs
 }

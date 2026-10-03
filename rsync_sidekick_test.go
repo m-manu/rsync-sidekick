@@ -12,6 +12,7 @@ import (
 	set "github.com/deckarep/golang-set/v2"
 	"github.com/m-manu/rsync-sidekick/v2/action"
 	"github.com/m-manu/rsync-sidekick/v2/fmte"
+	"github.com/m-manu/rsync-sidekick/v2/lib"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -52,6 +53,15 @@ func copyFile(srcPath string, dstPath string) {
 	if err != nil {
 		// This shouldn't happen, unless there is a bug in test case
 		panic(fmt.Errorf("error: Unable to write file %s due to: %+v", srcPath, err))
+	}
+	// Keep the original's mtime, so copies made at source and destination match even when
+	// a second boundary falls between them.
+	info, err := os.Stat(srcPath)
+	if err == nil {
+		err = os.Chtimes(dstPath, info.ModTime(), info.ModTime())
+	}
+	if err != nil {
+		panic(fmt.Errorf("error: Unable to copy mtime of %s due to: %+v", srcPath, err))
 	}
 }
 
@@ -142,7 +152,7 @@ func TestRSyncSidekick(t *testing.T) {
 	defer tearDown(t)
 	fmte.Off()
 	// Source and destination are in sync (base case)
-	actions1, syncErr1 := getSyncActionsWithProgress(runID, srcPath, exclusionsForTests, dstPath, false, 2*time.Second, false, false, nil)
+	actions1, syncErr1 := getSyncActionsWithProgress(runID, srcPath, exclusionsForTests, dstPath, false, 2*time.Second, false, false, nil, nil)
 	stopIfError(t, syncErr1)
 	assert.Equal(t, []action.SyncAction{}, actions1)
 	// Do series of changes at source:
@@ -177,11 +187,11 @@ func TestRSyncSidekick(t *testing.T) {
 	assert.NoFileExists(t, atDst("map1.go.txt"))
 	assert.NoFileExists(t, atDst(".Trashes/go1.sum"))
 	// Source and destination are back in sync
-	actions2, syncErr2 := getSyncActionsWithProgress(runID, srcPath, exclusionsForTests, dstPath, false, 2*time.Second, false, false, nil)
+	actions2, syncErr2 := getSyncActionsWithProgress(runID, srcPath, exclusionsForTests, dstPath, false, 2*time.Second, false, false, nil, nil)
 	stopIfError(t, syncErr2)
 	assert.Equal(t, []action.SyncAction{}, actions2)
 	deleteFile(atSrc("/another_code/sort.go.txt"))
-	actions3, syncErr3 := getSyncActionsWithProgress(runID, srcPath, exclusionsForTests, dstPath, false, 2*time.Second, false, false, nil)
+	actions3, syncErr3 := getSyncActionsWithProgress(runID, srcPath, exclusionsForTests, dstPath, false, 2*time.Second, false, false, nil, nil)
 	stopIfError(t, syncErr3)
 	assert.Equal(t, []action.SyncAction{}, actions3)
 }
@@ -322,7 +332,7 @@ func TestTimestampPropagationBug(t *testing.T) {
 	// Run rsync-sidekick
 	fmte.Off()
 	exclusions := set.NewSet[string]()
-	actions, syncErr := getSyncActionsWithProgress(runID, srcDir, exclusions, dstDir, false, 0, false, false, nil)
+	actions, syncErr := getSyncActionsWithProgress(runID, srcDir, exclusions, dstDir, false, 0, false, false, nil, nil)
 	stopIfError(t, syncErr)
 
 	// The bug is that rsync-sidekick will incorrectly create an action to propagate
@@ -386,7 +396,7 @@ func TestCandidateReusedForCopies(t *testing.T) {
 		exclusions := set.NewSet[string]()
 
 		// Get actions with copyDuplicates=true
-		actions, syncErr := getSyncActionsWithProgress(runID, srcDir, exclusions, dstDir, false, 0, true, false, nil)
+		actions, syncErr := getSyncActionsWithProgress(runID, srcDir, exclusions, dstDir, false, 0, true, false, nil, nil)
 		stopIfError(t, syncErr)
 
 		// Count moves and copies
@@ -405,7 +415,7 @@ func TestCandidateReusedForCopies(t *testing.T) {
 		assert.Equal(t, 2, copyCount, "expected 2 copy actions (candidate reused)")
 
 		// Execute and verify all 3 files end up in destination
-		err = performActions(actions, dstDir, false)
+		err = performActions(actions, dstDir, false, false, 0)
 		stopIfError(t, err)
 
 		assert.FileExists(t, filepath.Join(dstDir, "A", "x"))
@@ -444,7 +454,7 @@ func TestCandidateReusedForCopies(t *testing.T) {
 		exclusions := set.NewSet[string]()
 
 		// Get actions with copyDuplicates=false
-		actions, syncErr := getSyncActionsWithProgress(runID, srcDir, exclusions, dstDir, false, 0, false, false, nil)
+		actions, syncErr := getSyncActionsWithProgress(runID, srcDir, exclusions, dstDir, false, 0, false, false, nil, nil)
 		stopIfError(t, syncErr)
 
 		// Should only have 1 move, no copies
@@ -462,6 +472,47 @@ func TestCandidateReusedForCopies(t *testing.T) {
 		assert.Equal(t, 1, moveCount, "expected exactly 1 move action")
 		assert.Equal(t, 0, copyCount, "expected 0 copy actions without --copy-duplicates")
 	})
+}
+
+func TestIgnoreExtensionMatchesHashNamedArchive(t *testing.T) {
+	fileContent := []byte("content stored under its hash in the archive")
+	ts := time.Now().Add(-1 * time.Hour)
+	testDir, err := filepath.Abs("./test_ignore_extension_" + runID)
+	stopIfError(t, err)
+	createDirectory(testDir)
+	defer func() { _ = os.RemoveAll(testDir) }()
+
+	srcDir := filepath.Join(testDir, "source")
+	dstDir := filepath.Join(testDir, "destination")
+	archiveDir := filepath.Join(testDir, "archive")
+	for _, dir := range []string{srcDir, dstDir, archiveDir} {
+		createDirectory(dir)
+	}
+	for _, path := range []string{filepath.Join(srcDir, "photo.jpg"), filepath.Join(archiveDir, "9f86d081884c7d65")} {
+		stopIfError(t, os.WriteFile(path, fileContent, 0644))
+		stopIfError(t, os.Chtimes(path, ts, ts))
+	}
+	fmte.Off()
+	defer func() { lib.IgnoreFileExtension = false }()
+
+	for _, ignore := range []bool{false, true} {
+		lib.IgnoreFileExtension = ignore
+		actions, syncErr := getSyncActionsWithProgress(runID, srcDir, set.NewSet[string](), dstDir,
+			false, 0, true, false, []string{archiveDir}, nil)
+		stopIfError(t, syncErr)
+		copies := 0
+		for _, a := range actions {
+			if _, ok := a.(action.CopyFileAction); ok {
+				copies++
+			}
+		}
+		expected := 0
+		if ignore {
+			expected = 1
+		}
+		assert.Equal(t, expected, copies, "copies from the hash-named archive with ignore-extension=%v, actions: %v",
+			ignore, actions)
+	}
 }
 
 // TestMoveRedirectForCopyActions verifies that when a file is moved and a later
@@ -509,7 +560,7 @@ func TestMoveRedirectForCopyActions(t *testing.T) {
 		}
 
 		fmte.Off()
-		err = performActions(actions, dstDir, false)
+		err = performActions(actions, dstDir, false, false, 0)
 		stopIfError(t, err)
 
 		assert.FileExists(t, filepath.Join(dstDir, "A", "x"))
@@ -561,7 +612,7 @@ func TestMoveRedirectForCopyActions(t *testing.T) {
 		}
 
 		fmte.Off()
-		err = performActions(actions, dstDir, false)
+		err = performActions(actions, dstDir, false, false, 0)
 		stopIfError(t, err)
 
 		assert.FileExists(t, filepath.Join(dstDir, "A", "x"))

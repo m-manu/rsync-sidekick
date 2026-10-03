@@ -31,7 +31,7 @@ func walkViaAgent(t *testing.T, dirPath string, oneFileSystem bool) WalkResponse
 	assert.NoError(t, err)
 
 	var buf bytes.Buffer
-	handleWalk(&buf, payload)
+	handleWalk(newSyncWriter(&buf).forRequest(0), payload)
 
 	var env Envelope
 	assert.NoError(t, json.Unmarshal(buf.Bytes(), &env))

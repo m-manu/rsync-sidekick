@@ -27,7 +27,7 @@ func getDigest(path string) (entity.FileDigest, error) {
 	if statErr != nil {
 		return entity.FileDigest{}, statErr
 	}
-	hash, hashErr := fileHash(path, info.Size())
+	hash, hashErr := cachedFileHash(path, info)
 	if hashErr != nil {
 		return entity.FileDigest{}, hashErr
 	}
