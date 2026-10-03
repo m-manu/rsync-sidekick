@@ -3,6 +3,7 @@ package service
 import (
 	"cmp"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -310,8 +311,13 @@ func sortForLocality(basePath string, relPaths []string, fsys rsfs.FileSystem) {
 // known. It lets callers apply a match right away instead of collecting everything for
 // the end: an interrupted run then keeps every copy it already made. Actions arrive in
 // dependency order — a directory before the file that goes into it. Returning an error
-// aborts the scan.
+// aborts the scan, except for one wrapping ErrActionSkipped.
 type ArchiveActionFunc func(action.SyncAction) error
+
+// ErrActionSkipped, returned (wrapped) by an ArchiveActionFunc, means this one action
+// could not be applied — say its archive file was deleted after it was hashed. The scan
+// goes on, and the orphan stays unmatched so a later archive file or rsync can serve it.
+var ErrActionSkipped = errors.New("action skipped")
 
 // emit hands an action to onAction, or collects it when there is none.
 func emit(a action.SyncAction, onAction ArchiveActionFunc, collected *[]action.SyncAction) error {
@@ -600,6 +606,9 @@ func matchChunk(chunk []string, pendingForChunk map[string][]string,
 				mkdirAction := action.MakeDirectoryAction{AbsoluteDirPath: parentDir, FS: destFS}
 				if !uniqueness.Contains(mkdirAction.Uniqueness()) {
 					if err := emit(mkdirAction, onAction, actions); err != nil {
+						if errors.Is(err, ErrActionSkipped) {
+							continue
+						}
 						return err
 					}
 					uniqueness.Add(mkdirAction.Uniqueness())
@@ -613,6 +622,9 @@ func matchChunk(chunk []string, pendingForChunk map[string][]string,
 			}
 			if !uniqueness.Contains(copyAction.Uniqueness()) {
 				if err := emit(copyAction, onAction, actions); err != nil {
+					if errors.Is(err, ErrActionSkipped) {
+						continue
+					}
 					return err
 				}
 				uniqueness.Add(copyAction.Uniqueness())

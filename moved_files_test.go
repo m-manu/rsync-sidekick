@@ -39,6 +39,21 @@ func TestRedirectInOrder_FollowsOnlyMovesThatComeEarlier(t *testing.T) {
 	assert.Equal(t, "a", actions[3].(action.PropagateTimestampAction).DestinationFileRelativePath)
 }
 
+func TestLocalArchiveStreamer_VanishedSourceIsSkippedNotFatal(t *testing.T) {
+	dst := t.TempDir()
+	var applied int
+	streamer := newLocalArchiveActionStreamer(&applied, movedFiles{})
+
+	err := streamer(action.CopyFileAction{
+		AbsSourcePath: filepath.Join(t.TempDir(), "deleted-meanwhile.bin"),
+		AbsDestPath:   filepath.Join(dst, "target.bin"),
+	})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, service.ErrActionSkipped)
+	assert.Equal(t, 0, applied)
+}
+
 func TestMovedFiles_RebaseWalksFollowsMovesWithoutTouchingSharedMaps(t *testing.T) {
 	moved := movedFiles{}
 	moved.record(action.MoveFileAction{BasePath: "/dst", RelativeFromPath: "x.bin", RelativeToPath: "sub/a.bin"})

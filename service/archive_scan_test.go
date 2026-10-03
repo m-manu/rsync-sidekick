@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -239,6 +240,38 @@ func TestScanArchives_StreamErrorAbortsTheScan(t *testing.T) {
 
 	require.ErrorIs(t, err, assert.AnError,
 		"a failing copy must stop the scan rather than be silently dropped")
+}
+
+func TestScanArchives_SkippedCopyLeavesTheOrphanToTheNextArchive(t *testing.T) {
+	f := newArchiveScanFixture(t)
+	secondArchive := filepath.Join(filepath.Dir(f.archiveDir), "archive2")
+	require.NoError(t, os.MkdirAll(secondArchive, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(secondArchive, "also-match.txt"), []byte("hello world"), 0o644))
+	var requested []string
+	var progress ArchiveScanProgress
+	var applied []action.CopyFileAction
+	// The first archive's copy fails as if its file had been deleted after hashing.
+	onAction := func(a action.SyncAction) error {
+		if copyAction, ok := a.(action.CopyFileAction); ok {
+			if filepath.Dir(copyAction.AbsSourcePath) == f.archiveDir {
+				return fmt.Errorf("%w: file vanished", ErrActionSkipped)
+			}
+			applied = append(applied, copyAction)
+		}
+		return nil
+	}
+
+	_, err := ScanArchivesForCopiesWithDigests(
+		walkFixtureArchives(t, f.archiveDir, secondArchive),
+		f.orphans, nil, recordingDigestFn(f.sourceDir, &requested), onAction,
+		f.sourceFiles, f.destDir, false, nil, &progress,
+	)
+
+	require.NoError(t, err, "a skipped copy must not stop the scan")
+	require.Len(t, applied, 1)
+	assert.Equal(t, filepath.Join(secondArchive, "also-match.txt"), applied[0].AbsSourcePath,
+		"the orphan stayed unmatched and the next archive served it")
+	assert.EqualValues(t, 1, progress.Matches)
 }
 
 func TestWalkArchives_KeepsPathOrderAndCounts(t *testing.T) {

@@ -840,7 +840,8 @@ func newLocalArchiveActionStreamer(applied *int, moved movedFiles) service.Archi
 	return func(a action.SyncAction) error {
 		a = moved.redirect(a)
 		if err := a.Perform(); err != nil {
-			return fmt.Errorf("error performing \"%s\": %w", a.UnixCommand(), err)
+			fmte.PrintfErr("skipping %s: %+v\n", a, err)
+			return fmt.Errorf("%w: %v", service.ErrActionSkipped, err)
 		}
 		*applied++
 		fmte.PrintfV("Performed: %s\n", a.UnixCommand())
