@@ -339,19 +339,16 @@ type btrfsWalkItem struct {
 	relativePath string
 	absPath      string
 	treeID       uint64
+	// standard marks a subtree read with readStandardDir: below a mount of another
+	// filesystem, or where the ioctl failed (it needs root).
+	standard bool
 }
 
 // btrfsWalkDir reads one directory: its entries, and the subdirectories still to walk.
 func btrfsWalkDir(fd int, item btrfsWalkItem, excludedNames map[string]struct{}, counter *int32,
 ) (result []DirEntry, subdirs []btrfsWalkItem) {
-	// Check if this directory is still on BTRFS (not a submount with different fs)
-	if item.relativePath != "" && !IsBtrfs(item.absPath) {
-		// Different filesystem — fall back to stat-based walk for this subtree
-		fallbackEntries, err := fallbackWalkDir(item.absPath, item.relativePath, excludedNames, counter)
-		if err == nil {
-			result = append(result, fallbackEntries...)
-		}
-		return result, nil
+	if item.standard || (item.relativePath != "" && !IsBtrfs(item.absPath)) {
+		return btrfsWalkStandard(item, excludedNames, counter)
 	}
 
 	// Detect subvolume boundary: child dir may be a different subvolume
@@ -368,12 +365,7 @@ func btrfsWalkDir(fd int, item btrfsWalkItem, excludedNames map[string]struct{},
 	// Read directory entries via ioctl
 	dirEntries, err := readDirIndex(fd, curTreeID, item.inodeID)
 	if err != nil {
-		// ioctl failed — fall back for this directory
-		fallbackEntries, err := fallbackWalkDir(item.absPath, item.relativePath, excludedNames, counter)
-		if err == nil {
-			result = append(result, fallbackEntries...)
-		}
-		return result, nil
+		return btrfsWalkStandard(item, excludedNames, counter)
 	}
 
 	// Collect inode IDs for batch lookup
@@ -460,100 +452,15 @@ func btrfsWalkDir(fd int, item btrfsWalkItem, excludedNames map[string]struct{},
 	return result, subdirs
 }
 
-// fallbackWalkDir does a standard stat-based walk for a subtree that's not on BTRFS.
-func fallbackWalkDir(absDir, relPrefix string, excludedNames map[string]struct{}, counter *int32) ([]DirEntry, error) {
-	var result []DirEntry
-	f, err := syscall.Open(absDir, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
-	if err != nil {
-		return nil, err
+// btrfsWalkStandard reads one directory the standard way; its subdirectories stay on that
+// way, in the same pool of workers.
+func btrfsWalkStandard(item btrfsWalkItem, excludedNames map[string]struct{}, counter *int32,
+) ([]DirEntry, []btrfsWalkItem) {
+	entries, dirs := readStandardDir(standardDir{absPath: item.absPath, relativePath: item.relativePath},
+		excludedNames, counter, nil)
+	subdirs := make([]btrfsWalkItem, len(dirs))
+	for i, dir := range dirs {
+		subdirs[i] = btrfsWalkItem{relativePath: dir.relativePath, absPath: dir.absPath, standard: true}
 	}
-	defer syscall.Close(f)
-
-	// Read directory entries via getdents, then stat each
-	entries, err := readDir(absDir)
-	if err != nil {
-		return nil, err
-	}
-	for _, name := range entries {
-		if _, excluded := excludedNames[name]; excluded {
-			continue
-		}
-		if strings.HasPrefix(name, "._") {
-			continue
-		}
-		fullPath := absDir + "/" + name
-		var st syscall.Stat_t
-		if syscall.Lstat(fullPath, &st) != nil {
-			continue
-		}
-		relPath := name
-		if relPrefix != "" {
-			relPath = relPrefix + "/" + name
-		}
-		mode := st.Mode & syscall.S_IFMT
-		if mode == syscall.S_IFREG {
-			if SkipBySize(false, st.Size) {
-				continue
-			}
-			result = append(result, DirEntry{
-				RelativePath: relPath,
-				Size:         st.Size,
-				ModTime:      int64(st.Mtim.Sec),
-				IsDir:        false,
-			})
-			if counter != nil {
-				atomic.AddInt32(counter, 1)
-			}
-		} else if mode == syscall.S_IFDIR {
-			result = append(result, DirEntry{
-				RelativePath: relPath,
-				Size:         0,
-				ModTime:      int64(st.Mtim.Sec),
-				IsDir:        true,
-			})
-			// Recurse
-			subEntries, err := fallbackWalkDir(fullPath, relPath, excludedNames, counter)
-			if err == nil {
-				result = append(result, subEntries...)
-			}
-		}
-	}
-	return result, nil
-}
-
-// readDir reads directory entry names using os.ReadDir.
-func readDir(path string) ([]string, error) {
-	d, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer syscall.Close(d)
-
-	var names []string
-	buf := make([]byte, 8192)
-	for {
-		n, err := syscall.ReadDirent(d, buf)
-		if err != nil {
-			return names, err
-		}
-		if n <= 0 {
-			break
-		}
-		offset := 0
-		for offset < n {
-			dirent := (*syscall.Dirent)(unsafe.Pointer(&buf[offset]))
-			offset += int(dirent.Reclen)
-			nameBytes := (*[256]byte)(unsafe.Pointer(&dirent.Name[0]))
-			nameLen := 0
-			for nameLen < len(nameBytes) && nameBytes[nameLen] != 0 {
-				nameLen++
-			}
-			name := string(nameBytes[:nameLen])
-			if name == "." || name == ".." {
-				continue
-			}
-			names = append(names, name)
-		}
-	}
-	return names, nil
+	return entries, subdirs
 }

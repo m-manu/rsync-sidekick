@@ -67,56 +67,71 @@ func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}, counte
 			rootDevice = device
 		}
 	}
-	type localDir struct{ absPath, relativePath string }
-	return walkParallel(localDir{absPath: dirPath}, DefaultWalkThreads,
-		func(dir localDir) (entries []DirEntry, subdirs []localDir) {
-			children, err := os.ReadDir(dir.absPath)
-			if err != nil {
-				// Entries read before the error are still walked, as filepath.WalkDir does.
-				fmte.PrintfErr("skipping \"%s\": %+v\n", dir.absPath, err)
-			}
-			for _, d := range children {
-				if _, excluded := excludedNames[d.Name()]; excluded {
-					continue
-				}
-				// Ignore dot files (Mac)
-				if strings.HasPrefix(d.Name(), "._") {
-					continue
-				}
-				if !d.Type().IsRegular() && !d.IsDir() {
-					continue
-				}
-				path := filepath.Join(dir.absPath, d.Name())
-				info, infoErr := d.Info()
-				if infoErr != nil {
-					fmte.PrintfErr("couldn't get metadata of \"%s\": %+v\n", path, infoErr)
-					continue
-				}
-				// --one-file-system: skip directories on different filesystems
-				if l.OneFileSystem && d.IsDir() {
-					if device, ok := l.getDevice(path); ok && device != rootDevice {
-						continue
-					}
-				}
-				relativePath := filepath.Join(dir.relativePath, d.Name())
-				if d.IsDir() {
-					subdirs = append(subdirs, localDir{absPath: path, relativePath: relativePath})
-				}
-				if SkipBySize(d.IsDir(), info.Size()) {
-					continue
-				}
-				entries = append(entries, DirEntry{
-					RelativePath: relativePath,
-					Size:         info.Size(),
-					ModTime:      info.ModTime().Unix(),
-					IsDir:        d.IsDir(),
-				})
-				if counter != nil && d.Type().IsRegular() {
-					atomic.AddInt32(counter, 1)
-				}
-			}
-			return entries, subdirs
+	var skipDir func(path string) bool
+	if l.OneFileSystem {
+		// --one-file-system: skip directories on different filesystems
+		skipDir = func(path string) bool {
+			device, ok := l.getDevice(path)
+			return ok && device != rootDevice
+		}
+	}
+	return walkParallel(standardDir{absPath: dirPath}, DefaultWalkThreads,
+		func(dir standardDir) ([]DirEntry, []standardDir) {
+			return readStandardDir(dir, excludedNames, counter, skipDir)
 		}), nil
+}
+
+// standardDir is a directory for readStandardDir.
+type standardDir struct{ absPath, relativePath string }
+
+// readStandardDir reads one directory with ReadDir and one lstat per entry: its entries,
+// and the subdirectories still to walk. skipDir, when set, leaves directories out.
+func readStandardDir(dir standardDir, excludedNames map[string]struct{}, counter *int32,
+	skipDir func(path string) bool,
+) (entries []DirEntry, subdirs []standardDir) {
+	children, err := os.ReadDir(dir.absPath)
+	if err != nil {
+		// Entries read before the error are still walked, as filepath.WalkDir does.
+		fmte.PrintfErr("skipping \"%s\": %+v\n", dir.absPath, err)
+	}
+	for _, d := range children {
+		if _, excluded := excludedNames[d.Name()]; excluded {
+			continue
+		}
+		// Ignore dot files (Mac)
+		if strings.HasPrefix(d.Name(), "._") {
+			continue
+		}
+		if !d.Type().IsRegular() && !d.IsDir() {
+			continue
+		}
+		path := filepath.Join(dir.absPath, d.Name())
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			fmte.PrintfErr("couldn't get metadata of \"%s\": %+v\n", path, infoErr)
+			continue
+		}
+		if d.IsDir() && skipDir != nil && skipDir(path) {
+			continue
+		}
+		relativePath := filepath.Join(dir.relativePath, d.Name())
+		if d.IsDir() {
+			subdirs = append(subdirs, standardDir{absPath: path, relativePath: relativePath})
+		}
+		if SkipBySize(d.IsDir(), info.Size()) {
+			continue
+		}
+		entries = append(entries, DirEntry{
+			RelativePath: relativePath,
+			Size:         info.Size(),
+			ModTime:      info.ModTime().Unix(),
+			IsDir:        d.IsDir(),
+		})
+		if counter != nil && d.Type().IsRegular() {
+			atomic.AddInt32(counter, 1)
+		}
+	}
+	return entries, subdirs
 }
 
 func (l *LocalFS) Lstat(path string) (FileInfo, error) {
