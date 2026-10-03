@@ -101,28 +101,21 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 				case <-scanDone:
 					return
 				case <-ticker.C:
-					srcFinished := ""
-					if atomic.LoadInt32(&sourceScanDone) == 1 {
-						srcFinished = " [FINISHED]"
+					sourceWhere, destWhere := "", ""
+					if sourceFS != nil {
+						sourceWhere, destWhere = "remote", "local"
+					} else if destFS != nil {
+						sourceWhere, destWhere = "local", "remote"
 					}
-					dstFinished := ""
-					if atomic.LoadInt32(&destScanDone) == 1 {
-						dstFinished = " [FINISHED]"
+					parts := []scanPart{
+						{atomic.LoadInt32(&scanSourceCounter), "src", sourceWhere, atomic.LoadInt32(&sourceScanDone) == 1},
+						{atomic.LoadInt32(&scanDestCounter), "dst", destWhere, atomic.LoadInt32(&destScanDone) == 1},
 					}
-					if len(archivePaths) == 0 {
-						fmte.Printf("Scanning files: %d at source%s, %d at destination%s...\n",
-							atomic.LoadInt32(&scanSourceCounter), srcFinished,
-							atomic.LoadInt32(&scanDestCounter), dstFinished)
-						continue
+					if len(archivePaths) > 0 {
+						parts = append(parts, scanPart{atomic.LoadInt32(&scanArchiveCounter), "arch", destWhere,
+							atomic.LoadInt32(&archiveScanDone) == 1})
 					}
-					archFinished := ""
-					if atomic.LoadInt32(&archiveScanDone) == 1 {
-						archFinished = " [FINISHED]"
-					}
-					fmte.Printf("Scanning files: %d at source%s, %d at destination%s, %d in archives%s...\n",
-						atomic.LoadInt32(&scanSourceCounter), srcFinished,
-						atomic.LoadInt32(&scanDestCounter), dstFinished,
-						atomic.LoadInt32(&scanArchiveCounter), archFinished)
+					fmte.Printf("%s", scanProgressLine(parts...))
 				}
 			}
 		}()
@@ -541,32 +534,20 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 				case <-scanDone:
 					return
 				case <-ticker.C:
-					localFinished := ""
-					if atomic.LoadInt32(&localScanDone) == 1 {
-						localFinished = " [FINISHED]"
-					}
-					remoteFinished := ""
-					if atomic.LoadInt32(&remoteScanDone) == 1 {
-						remoteFinished = " [FINISHED]"
-					}
-					archives := ""
-					if prewalkArchives {
-						archFinished := ""
-						if atomic.LoadInt32(&archiveScanDone) == 1 {
-							archFinished = " [FINISHED]"
-						}
-						archives = fmt.Sprintf(", %d in archives (local)%s",
-							atomic.LoadInt32(&scanArchiveCounter), archFinished)
-					}
+					local := scanPart{atomic.LoadInt32(&localScanCounter), "src", "local", atomic.LoadInt32(&localScanDone) == 1}
+					remote := scanPart{atomic.LoadInt32(&remoteScanCounter), "dst", "remote", atomic.LoadInt32(&remoteScanDone) == 1}
 					if sourceIsRemote {
-						fmte.Printf("Scanning files: %d at source (remote)%s, %d at destination (local)%s%s...\n",
-							atomic.LoadInt32(&remoteScanCounter), remoteFinished,
-							atomic.LoadInt32(&localScanCounter), localFinished, archives)
-					} else {
-						fmte.Printf("Scanning files: %d at source (local)%s, %d at destination (remote)%s%s...\n",
-							atomic.LoadInt32(&localScanCounter), localFinished,
-							atomic.LoadInt32(&remoteScanCounter), remoteFinished, archives)
+						local.label, remote.label = "dst", "src"
 					}
+					parts := []scanPart{local, remote}
+					if sourceIsRemote {
+						parts = []scanPart{remote, local}
+					}
+					if prewalkArchives {
+						parts = append(parts, scanPart{atomic.LoadInt32(&scanArchiveCounter), "arch",
+							parts[1].where, atomic.LoadInt32(&archiveScanDone) == 1})
+					}
+					fmte.Printf("%s", scanProgressLine(parts...))
 				}
 			}
 		}()
