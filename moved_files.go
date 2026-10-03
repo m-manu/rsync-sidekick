@@ -76,12 +76,22 @@ func relBelow(root, path string) (string, bool) {
 	return rel, true
 }
 
-// redirect points a copy whose source was moved at the file's current location.
+// redirect points an action at the current location of a file that was moved: the source
+// of a copy, or the target of a timestamp fix — that one is aimed at a candidate's old
+// path, and sorting by destination directory can put its move first.
 func (m movedFiles) redirect(a action.SyncAction) action.SyncAction {
-	if copyAction, ok := a.(action.CopyFileAction); ok {
-		if newPath, wasMoved := m[copyAction.AbsSourcePath]; wasMoved {
-			copyAction.AbsSourcePath = newPath
-			return copyAction
+	switch act := a.(type) {
+	case action.CopyFileAction:
+		if newPath, wasMoved := m[act.AbsSourcePath]; wasMoved {
+			act.AbsSourcePath = newPath
+			return act
+		}
+	case action.PropagateTimestampAction:
+		if newPath, wasMoved := m[act.DestinationPath()]; wasMoved {
+			if rel, err := filepath.Rel(act.DestinationBaseDirPath, newPath); err == nil {
+				act.DestinationFileRelativePath = rel
+				return act
+			}
 		}
 	}
 	return a
