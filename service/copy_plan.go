@@ -221,6 +221,7 @@ func ApplyPlan(groups []PlanGroup, baseDir string, dryRun bool, parallelism int,
 	stop := make(chan struct{})
 	if progressFrequency > 0 {
 		go func() {
+			progress := lib.NewProgress("Applying plan", time.Now())
 			ticker := time.NewTicker(progressFrequency)
 			defer ticker.Stop()
 			for {
@@ -228,9 +229,11 @@ func ApplyPlan(groups []PlanGroup, baseDir string, dryRun bool, parallelism int,
 				case <-stop:
 					return
 				case <-ticker.C:
-					fmte.Printf("Applying plan: %d/%d groups, %d reflinked, %d failed...\n",
-						min(next.Load(), int64(len(groups))), len(groups),
-						atomic.LoadInt64(&stats.TargetsDone), atomic.LoadInt64(&stats.TargetsFailed))
+					fmte.Printf("%s...\n", progress.Line(time.Now(),
+						lib.ProgressPart{Count: min(next.Load(), int64(len(groups))), Total: int64(len(groups)),
+							Label: "groups"},
+						lib.ProgressPart{Count: atomic.LoadInt64(&stats.TargetsDone), Label: "reflinked"},
+						lib.ProgressPart{Count: atomic.LoadInt64(&stats.TargetsFailed), Label: "failed"}))
 				}
 			}
 		}()

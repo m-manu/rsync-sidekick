@@ -9,6 +9,7 @@ import (
 
 	"github.com/m-manu/rsync-sidekick/v2/action"
 	"github.com/m-manu/rsync-sidekick/v2/fmte"
+	"github.com/m-manu/rsync-sidekick/v2/lib"
 )
 
 // actionStats counts what was performed, broken down by kind. One line every few seconds
@@ -93,6 +94,7 @@ func startActionStatsProgress(stats *actionStats, done *atomic.Int64, total int,
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		progress := lib.NewProgress("Applying", time.Now())
 		ticker := time.NewTicker(progressFrequency)
 		defer ticker.Stop()
 		for {
@@ -100,8 +102,8 @@ func startActionStatsProgress(stats *actionStats, done *atomic.Int64, total int,
 			case <-finished:
 				return
 			case <-ticker.C:
-				fmte.Printf("Applying actions: %d / %d - %s...\n",
-					done.Load(), total, stats.summary())
+				fmte.Printf("%s - %s...\n", progress.Line(time.Now(),
+					lib.ProgressPart{Count: done.Load(), Total: int64(total), Label: "actions"}), stats.summary())
 			}
 		}
 	}()

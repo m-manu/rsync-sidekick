@@ -8,6 +8,7 @@ import (
 
 	"github.com/m-manu/rsync-sidekick/v2/action"
 	"github.com/m-manu/rsync-sidekick/v2/fmte"
+	"github.com/m-manu/rsync-sidekick/v2/lib"
 )
 
 // destApplier applies destination actions in chunks while hashing is still going on, and
@@ -78,19 +79,25 @@ func (s *streamApplier) report() {
 		verb, s.done, s.done+s.failed, s.stats.summary())
 }
 
+// hashSide is one side of the hashing progress.
+type hashSide struct {
+	done         *int32
+	total        int
+	label, where string
+}
+
+func (s hashSide) part() lib.ProgressPart {
+	count := int64(atomic.LoadInt32(s.done))
+	return lib.ProgressPart{Count: count, Total: int64(s.total), Label: s.label, Where: s.where,
+		Done: count >= int64(s.total)}
+}
+
 // reportHashProgress prints the hashing progress of both sides until stop is closed.
-func reportHashProgress(stop <-chan struct{}, sourceDone *int32, sourceTotal int32,
-	destinationDone *int32, destinationTotal int32, frequency time.Duration,
-) {
+func reportHashProgress(stop <-chan struct{}, source, destination hashSide, frequency time.Duration) {
 	if frequency <= 0 {
 		return
 	}
-	percent := func(done *int32, total int32) float64 {
-		if total == 0 {
-			return 100
-		}
-		return 100.0 * float64(atomic.LoadInt32(done)) / float64(total)
-	}
+	progress := lib.NewProgress("Hashing", time.Now())
 	ticker := time.NewTicker(frequency)
 	defer ticker.Stop()
 	for {
@@ -98,8 +105,7 @@ func reportHashProgress(stop <-chan struct{}, sourceDone *int32, sourceTotal int
 		case <-stop:
 			return
 		case <-ticker.C:
-			fmte.Printf("%.0f%% done at source and %.0f%% done at destination\n",
-				percent(sourceDone, sourceTotal), percent(destinationDone, destinationTotal))
+			fmte.Printf("%s...\n", progress.Line(time.Now(), source.part(), destination.part()))
 		}
 	}
 }

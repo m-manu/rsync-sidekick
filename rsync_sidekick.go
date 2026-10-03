@@ -53,6 +53,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 	var sourceFiles, destinationFiles map[string]entity.FileMeta
 	var sourceSize, destinationSize int64
 	var sourceFilesErr, destinationFilesErr error
+	sourceWhere, destWhere := sideLocations(sourceFS != nil, destFS != nil)
 	var scanSourceCounter, scanDestCounter int32
 	var sourceScanDone, destScanDone int32
 	var wgDirScan sync.WaitGroup
@@ -94,6 +95,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 	scanDone := make(chan struct{})
 	if progressFrequency > 0 {
 		go func() {
+			progress := lib.NewProgress("Scanning", time.Now())
 			ticker := time.NewTicker(progressFrequency)
 			defer ticker.Stop()
 			for {
@@ -101,21 +103,17 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 				case <-scanDone:
 					return
 				case <-ticker.C:
-					sourceWhere, destWhere := "", ""
-					if sourceFS != nil {
-						sourceWhere, destWhere = "remote", "local"
-					} else if destFS != nil {
-						sourceWhere, destWhere = "local", "remote"
-					}
-					parts := []scanPart{
-						{atomic.LoadInt32(&scanSourceCounter), "src", sourceWhere, atomic.LoadInt32(&sourceScanDone) == 1},
-						{atomic.LoadInt32(&scanDestCounter), "dst", destWhere, atomic.LoadInt32(&destScanDone) == 1},
+					parts := []lib.ProgressPart{
+						{Count: int64(atomic.LoadInt32(&scanSourceCounter)), Label: "src", Where: sourceWhere,
+							Done: atomic.LoadInt32(&sourceScanDone) == 1},
+						{Count: int64(atomic.LoadInt32(&scanDestCounter)), Label: "dst", Where: destWhere,
+							Done: atomic.LoadInt32(&destScanDone) == 1},
 					}
 					if len(archivePaths) > 0 {
-						parts = append(parts, scanPart{atomic.LoadInt32(&scanArchiveCounter), "arch", destWhere,
-							atomic.LoadInt32(&archiveScanDone) == 1})
+						parts = append(parts, lib.ProgressPart{Count: int64(atomic.LoadInt32(&scanArchiveCounter)),
+							Label: "arch", Where: destWhere, Done: atomic.LoadInt32(&archiveScanDone) == 1})
 					}
-					fmte.Printf("%s", scanProgressLine(parts...))
+					fmte.Printf("%s...\n", progress.Line(time.Now(), parts...))
 				}
 			}
 		}()
@@ -180,7 +178,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 			func(chunk []string) (map[string]entity.FileDigest, error) {
 				return service.BatchDigestsWorkers(destFS, destinationDirPath, chunk, &destinationCounter, destinationWorkers), nil
 			},
-			&sourceCounter, &destinationCounter, applier, progressFrequency)
+			&sourceCounter, &destinationCounter, applier, sourceWhere, destWhere, progressFrequency)
 		end = time.Now()
 		if syncErr != nil {
 			return nil, fmt.Errorf("error while computing sync actions: %+v", syncErr)
@@ -226,7 +224,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 			// Digests of unmatched orphans at source, computed on demand: only orphans
 			// that some archive file matches on extension and size are ever hashed.
 			digestFn := func(orphans []string) (map[string]entity.FileDigest, error) {
-				return withDigestProgress(len(orphans), progressFrequency,
+				return withDigestProgress(len(orphans), sourceWhere, progressFrequency,
 					func(counter *int32) (map[string]entity.FileDigest, error) {
 						return service.BatchDigestsParallel(sourceFS, sourceDirPath, orphans, counter), nil
 					})
@@ -239,7 +237,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 			archiveWalks = moved.rebaseWalks(archiveWalks)
 			var archiveProgress service.ArchiveScanProgress
 			atomic.StoreInt32(&archiveProgress.FilesFound, atomic.LoadInt32(&scanArchiveCounter))
-			stopArchiveProgress := startArchiveScanProgress(&archiveProgress, progressFrequency)
+			stopArchiveProgress := startArchiveScanProgress(&archiveProgress, destWhere, progressFrequency)
 			archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
 				archiveWalks, unmatchedOrphans, knownOrphanDigests, digestFn, onArchiveAction,
 				sourceFiles, destinationDirPath, useReflink, destFS,
@@ -268,10 +266,12 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 // and hands each chunk's actions to applier right away (when there is one).
 func streamDestinationPhase(matcher *service.DestMatcher, orphans, candidates []string,
 	hashOrphans, hashCandidates service.ChunkDigestFunc, sourceDone, destinationDone *int32,
-	applier destApplier, progressFrequency time.Duration,
+	applier destApplier, sourceWhere, destWhere string, progressFrequency time.Duration,
 ) ([]action.SyncAction, error) {
 	stop := make(chan struct{})
-	go reportHashProgress(stop, sourceDone, int32(len(orphans)), destinationDone, int32(len(candidates)),
+	go reportHashProgress(stop,
+		hashSide{done: sourceDone, total: len(orphans), label: "src", where: sourceWhere},
+		hashSide{done: destinationDone, total: len(candidates), label: "dst", where: destWhere},
 		progressFrequency)
 	var onActions func([]action.SyncAction) error
 	if applier != nil {
@@ -461,6 +461,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 	var sourceDirs, destDirs map[string]int64
 	var sourceSize, destinationSize int64
 	var sourceFilesErr, destinationFilesErr error
+	sourceWhere, destWhere := sideLocations(sourceIsRemote, !sourceIsRemote)
 	var localScanCounter, remoteScanCounter int32
 	var localScanDone, remoteScanDone int32
 	intervalMs := progressFrequency.Milliseconds()
@@ -527,6 +528,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 	scanDone := make(chan struct{})
 	if progressFrequency > 0 {
 		go func() {
+			progress := lib.NewProgress("Scanning", time.Now())
 			ticker := time.NewTicker(progressFrequency)
 			defer ticker.Stop()
 			for {
@@ -534,20 +536,20 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 				case <-scanDone:
 					return
 				case <-ticker.C:
-					local := scanPart{atomic.LoadInt32(&localScanCounter), "src", "local", atomic.LoadInt32(&localScanDone) == 1}
-					remote := scanPart{atomic.LoadInt32(&remoteScanCounter), "dst", "remote", atomic.LoadInt32(&remoteScanDone) == 1}
+					local := lib.ProgressPart{Count: int64(atomic.LoadInt32(&localScanCounter)), Label: "src",
+						Where: "local", Done: atomic.LoadInt32(&localScanDone) == 1}
+					remote := lib.ProgressPart{Count: int64(atomic.LoadInt32(&remoteScanCounter)), Label: "dst",
+						Where: "remote", Done: atomic.LoadInt32(&remoteScanDone) == 1}
+					parts := []lib.ProgressPart{local, remote}
 					if sourceIsRemote {
-						local.label, remote.label = "dst", "src"
-					}
-					parts := []scanPart{local, remote}
-					if sourceIsRemote {
-						parts = []scanPart{remote, local}
+						local.Label, remote.Label = "dst", "src"
+						parts = []lib.ProgressPart{remote, local}
 					}
 					if prewalkArchives {
-						parts = append(parts, scanPart{atomic.LoadInt32(&scanArchiveCounter), "arch",
-							parts[1].where, atomic.LoadInt32(&archiveScanDone) == 1})
+						parts = append(parts, lib.ProgressPart{Count: int64(atomic.LoadInt32(&scanArchiveCounter)),
+							Label: "arch", Where: parts[1].Where, Done: atomic.LoadInt32(&archiveScanDone) == 1})
 					}
-					fmte.Printf("%s", scanProgressLine(parts...))
+					fmte.Printf("%s...\n", progress.Line(time.Now(), parts...))
 				}
 			}
 		}()
@@ -629,7 +631,8 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			}
 			var streamErr error
 			actions, streamErr = streamDestinationPhase(matcher, hashable, candidatesAtDestination,
-				hashOrphans, hashCandidates, &sourceDone, &destinationDone, applier, progressFrequency)
+				hashOrphans, hashCandidates, &sourceDone, &destinationDone, applier,
+				sourceWhere, destWhere, progressFrequency)
 			if streamErr != nil {
 				return streamErr
 			}
@@ -681,7 +684,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			// Digests of unmatched orphans at source, computed on demand: only orphans
 			// that some archive file matches on extension and size are ever hashed.
 			digestFn := func(orphans []string) (map[string]entity.FileDigest, error) {
-				return withDigestProgress(len(orphans), progressFrequency,
+				return withDigestProgress(len(orphans), sourceWhere, progressFrequency,
 					func(counter *int32) (map[string]entity.FileDigest, error) {
 						if sourceIsRemote {
 							return agentClient.BatchDigest(sourceDirPath, orphans, counter, progressFrequency.Milliseconds())
@@ -705,7 +708,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 				}
 				var archiveProgress service.ArchiveScanProgress
 				atomic.StoreInt32(&archiveProgress.FilesFound, atomic.LoadInt32(&scanArchiveCounter))
-				stopArchiveProgress := startArchiveScanProgress(&archiveProgress, progressFrequency)
+				stopArchiveProgress := startArchiveScanProgress(&archiveProgress, destWhere, progressFrequency)
 				archiveActions, archiveErr := service.ScanArchivesForCopiesWithDigests(
 					archiveWalks, unmatchedOrphans, knownOrphanDigests, digestFn, onArchiveAction,
 					sourceFiles, destDirPath, useReflink, nil,
@@ -766,7 +769,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 
 	if plan.enabled() {
 		digestFn := func(orphans []string) (map[string]entity.FileDigest, error) {
-			return withDigestProgress(len(orphans), progressFrequency,
+			return withDigestProgress(len(orphans), sourceWhere, progressFrequency,
 				func(counter *int32) (map[string]entity.FileDigest, error) {
 					return agentClient.BatchDigest(sourceDirPath, orphans, counter, progressFrequency.Milliseconds())
 				})
@@ -830,9 +833,21 @@ func newLocalArchiveActionStreamer(applied *int, moved movedFiles) service.Archi
 	}
 }
 
+// sideLocations names where source and destination are for progress lines; both stay
+// empty when everything is local.
+func sideLocations(sourceRemote, destRemote bool) (sourceWhere, destWhere string) {
+	switch {
+	case sourceRemote:
+		return "remote", "local"
+	case destRemote:
+		return "local", "remote"
+	}
+	return "", ""
+}
+
 // startArchiveScanProgress reports the archive scan counters until the returned stop
 // function is called.
-func startArchiveScanProgress(progress *service.ArchiveScanProgress,
+func startArchiveScanProgress(progress *service.ArchiveScanProgress, where string,
 	progressFrequency time.Duration,
 ) (stop func()) {
 	if progressFrequency <= 0 {
@@ -843,6 +858,7 @@ func startArchiveScanProgress(progress *service.ArchiveScanProgress,
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		lines := lib.NewProgress("Archives", time.Now())
 		ticker := time.NewTicker(progressFrequency)
 		defer ticker.Stop()
 		for {
@@ -850,15 +866,13 @@ func startArchiveScanProgress(progress *service.ArchiveScanProgress,
 			case <-done:
 				return
 			case <-ticker.C:
-				// Archives are always on the destination side; the orphan digests running
-				// alongside are on the source side. Label both so the two interleaved
-				// progress lines are telling apart at a glance.
-				fmte.Printf("DST: Scanning archives: %d files found, %d checked, %d / %d digests, %d matched...\n",
-					atomic.LoadInt32(&progress.FilesFound),
-					atomic.LoadInt32(&progress.FilesChecked),
-					atomic.LoadInt32(&progress.DigestsDone),
-					atomic.LoadInt32(&progress.DigestsNeeded),
-					atomic.LoadInt32(&progress.Matches))
+				found := int64(atomic.LoadInt32(&progress.FilesFound))
+				fmte.Printf("%s...\n", lines.Line(time.Now(),
+					lib.ProgressPart{Count: int64(atomic.LoadInt32(&progress.FilesChecked)), Total: found,
+						Label: "checked", Where: where},
+					lib.ProgressPart{Count: int64(atomic.LoadInt32(&progress.DigestsDone)),
+						Total: int64(atomic.LoadInt32(&progress.DigestsNeeded)), Label: "hashed", Where: where},
+					lib.ProgressPart{Count: int64(atomic.LoadInt32(&progress.Matches)), Label: "matched"}))
 			}
 		}
 	}()
@@ -870,14 +884,15 @@ func startArchiveScanProgress(progress *service.ArchiveScanProgress,
 
 // withDigestProgress runs compute, reporting how many of count digests are done so far.
 // The counter it hands to compute is what drives that output.
-func withDigestProgress(count int, progressFrequency time.Duration,
+func withDigestProgress(count int, where string, progressFrequency time.Duration,
 	compute func(counter *int32) (map[string]entity.FileDigest, error),
 ) (map[string]entity.FileDigest, error) {
-	fmte.Printf("SRC: Computing digests of %d orphan candidate(s)...\n", count)
+	fmte.Printf("Hashing %s orphan candidate(s) at source...\n", lib.GroupThousands(int64(count)))
 	var counter int32
 	done := make(chan struct{})
 	if progressFrequency > 0 {
 		go func() {
+			progress := lib.NewProgress("Hashing orphans", time.Now())
 			ticker := time.NewTicker(progressFrequency)
 			defer ticker.Stop()
 			for {
@@ -885,8 +900,8 @@ func withDigestProgress(count int, progressFrequency time.Duration,
 				case <-done:
 					return
 				case <-ticker.C:
-					fmte.Printf("SRC: Computing orphan digests: %d / %d...\n",
-						atomic.LoadInt32(&counter), count)
+					fmte.Printf("%s...\n", progress.Line(time.Now(), lib.ProgressPart{
+						Count: int64(atomic.LoadInt32(&counter)), Total: int64(count), Label: "src", Where: where}))
 				}
 			}
 		}()
@@ -973,6 +988,7 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archiveWalks []servic
 	archiveScanDone := make(chan struct{})
 	if progressFrequency > 0 {
 		go func() {
+			progress := lib.NewProgress("Archives", time.Now())
 			ticker := time.NewTicker(progressFrequency)
 			defer ticker.Stop()
 			for {
@@ -980,10 +996,11 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archiveWalks []servic
 				case <-archiveScanDone:
 					return
 				case <-ticker.C:
-					fmte.Printf("DST: Scanning archives (remote): %d files found, %d checked, %d digests...\n",
-						atomic.LoadInt32(&archiveWalkCounter),
-						atomic.LoadInt32(&archiveCheckCounter),
-						atomic.LoadInt32(&archiveDigestCounter))
+					fmte.Printf("%s...\n", progress.Line(time.Now(),
+						lib.ProgressPart{Count: int64(atomic.LoadInt32(&archiveCheckCounter)),
+							Total: int64(atomic.LoadInt32(&archiveWalkCounter)), Label: "checked", Where: "local"},
+						lib.ProgressPart{Count: int64(atomic.LoadInt32(&archiveDigestCounter)),
+							Label: "hashed", Where: "remote"}))
 				}
 			}
 		}()
