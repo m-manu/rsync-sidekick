@@ -44,21 +44,21 @@ func mountsLike(overlays int) string {
 		b.WriteString(strings.Repeat("a", 64))
 		b.WriteString("/merged overlay rw,relatime,lowerdir=/x,upperdir=/y,workdir=/z 0 0\n")
 	}
-	b.WriteString("/dev/sdb1 /media/raid btrfs rw,relatime,space_cache=v2 0 0\n")
+	b.WriteString("/dev/sdb1 /mnt/data btrfs rw,relatime,space_cache=v2 0 0\n")
 	return b.String()
 }
 
 func TestParseMountFSTypes_ReadsPastTheFirstChunk(t *testing.T) {
 	// The bug this guards: one read() of procfs returned ~3 KiB of a 54 KiB mount table, so
-	// /media/raid was missing from the map and the BTRFS walk silently never engaged.
+	// /mnt/data was missing from the map and the BTRFS walk silently never engaged.
 	table := mountsLike(200)
 	assert.Greater(t, len(table), 20_000, "the interesting entry has to sit well past one chunk")
 
 	byMountpoint := parseMountFSTypes(&chunkedReader{data: table, chunk: 3297})
 
-	assert.Equal(t, "btrfs", byMountpoint["/media/raid"])
+	assert.Equal(t, "btrfs", byMountpoint["/mnt/data"])
 	assert.Equal(t, "btrfs", byMountpoint["/"])
-	assert.Len(t, byMountpoint, 3, "one root, one overlay path, one raid")
+	assert.Len(t, byMountpoint, 3, "one root, one overlay path, one data mount")
 }
 
 func TestParseMountFSTypes_UnescapesMountpoints(t *testing.T) {
@@ -73,15 +73,15 @@ func TestParseMountFSTypes_SkipsShortLines(t *testing.T) {
 }
 
 func TestFsTypeForPath_LongestPrefixWins(t *testing.T) {
-	// /media is ext4 and /media/raid is btrfs on the host that turned this up: picking the
-	// shorter match is what made IsBtrfs answer false for a path on BTRFS.
+	// /mnt is ext4 and /mnt/data is btrfs: picking the shorter match is what made IsBtrfs
+	// answer false for a path on BTRFS.
 	mountFSTypeCache = map[string]string{
-		"/":           "btrfs",
-		"/media":      "ext4",
-		"/media/raid": "btrfs",
+		"/":         "btrfs",
+		"/mnt":      "ext4",
+		"/mnt/data": "btrfs",
 	}
 	mountFSTypeCacheOnce.Do(func() {})
 
-	assert.Equal(t, "btrfs", fsTypeForPath("/media/raid/BackupArchiv/video/7c/43"))
-	assert.Equal(t, "ext4", fsTypeForPath("/media/somewhere/else"))
+	assert.Equal(t, "btrfs", fsTypeForPath("/mnt/data/archive/video/7c/43"))
+	assert.Equal(t, "ext4", fsTypeForPath("/mnt/somewhere/else"))
 }

@@ -19,9 +19,9 @@ func withIncludeDirs(t *testing.T, dirs ...string) {
 }
 
 func TestNormalizeIncludeDirs_CleansAndDropsNestedEntries(t *testing.T) {
-	got, err := normalizeIncludeDirs([]string{"Media/", " FastDrive ", "Media/Movies", "", "./Privat", "FastDrive"})
+	got, err := normalizeIncludeDirs([]string{"Media/", " Videos ", "Media/Movies", "", "./Private", "Videos"})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"Media", "FastDrive", "Privat"}, got)
+	assert.Equal(t, []string{"Media", "Videos", "Private"}, got)
 }
 
 func TestNormalizeIncludeDirs_RejectsPathsOutsideTheRoot(t *testing.T) {
@@ -40,16 +40,16 @@ func TestWalkBases_StartAtTheLastComponentWithoutWildcard(t *testing.T) {
 }
 
 func TestIncludedPath_MatchesPrefixesAndWildcards(t *testing.T) {
-	withIncludeDirs(t, "FastDrive", "BackupComputer/*", "Back?p*/x")
+	withIncludeDirs(t, "Videos", "Backups/*", "Arch?ve*/x")
 	cases := map[string]bool{
-		"FastDrive/a.mkv":               true,
-		"FastDrive":                     true,
-		"FastDriveOld/a.mkv":            false,
-		"BackupComputer/nexus/etc/f":    true,
-		"BackupComputer/top-level-file": true,
-		"BackupArchiv/x/y":              true,
-		"BackupArchiv/z/y":              false,
-		"Privat/a":                      false,
+		"Videos/a.mkv":           true,
+		"Videos":                 true,
+		"VideosOld/a.mkv":        false,
+		"Backups/laptop/etc/f":   true,
+		"Backups/top-level-file": true,
+		"Archives/x/y":           true,
+		"Archives/z/y":           false,
+		"Private/a":              false,
 	}
 	for path, want := range cases {
 		assert.Equal(t, want, includedPath(path), "path %q", path)
@@ -94,10 +94,10 @@ func TestWalkIncluded_WithoutIncludeDirsWalksTheRoot(t *testing.T) {
 
 func TestReadIncludeFile_SkipsCommentsAndBlankLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "include.txt")
-	require.NoError(t, os.WriteFile(path, []byte("# repair\nFastDrive\n\n  Privat  \nBackup*\n"), 0o644))
+	require.NoError(t, os.WriteFile(path, []byte("# folders to sync\nVideos\n\n  Private  \nBackup*\n"), 0o644))
 	got, err := readIncludeFile(path)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"FastDrive", "Privat", "Backup*"}, got)
+	assert.Equal(t, []string{"Videos", "Private", "Backup*"}, got)
 }
 
 func TestRsyncSidekick_IncludeDirLimitsTheScan(t *testing.T) {

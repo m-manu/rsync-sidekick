@@ -271,7 +271,7 @@ To work on a few folders of a large tree while keeping paths relative to its roo
 folders), name them with `--include-dir`:
 
 ```bash
-rsync-sidekick --include-dir FastDrive --include-dir 'Backup*' --include-dir 'Media/*/2024' \
+rsync-sidekick --include-dir Videos --include-dir 'Backup*' --include-dir 'Media/*/2024' \
     -c --reflink user@server:/data/ /backup/data/
 ```
 
