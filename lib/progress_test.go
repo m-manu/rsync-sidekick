@@ -15,7 +15,8 @@ func TestGroupThousands(t *testing.T) {
 }
 
 func TestFormatRate(t *testing.T) {
-	cases := map[float64]string{0: "0/s", -1: "0/s", 0.25: "0.2/s", 3.04: "3.0/s", 350.4: "350/s",
+	cases := map[float64]string{0: "0/s", -1: "0/s", 0.0004: "0/s", 0.0005: "0.001/s", 0.0042: "0.004/s",
+		0.0096: "0.01/s", 0.042: "0.04/s", 0.096: "0.1/s", 0.25: "0.2/s", 3.04: "3.0/s", 350.4: "350/s",
 		2400: "2.4k/s", 999_949: "999.9k/s", 1_200_000: "1.2M/s"}
 	for rate, want := range cases {
 		assert.Equal(t, want, FormatRate(rate), "rate=%v", rate)

@@ -107,12 +107,17 @@ func perSecond(count int64, elapsed time.Duration) float64 {
 	return float64(count) / elapsed.Seconds()
 }
 
-// FormatRate writes a per-second rate short enough for a progress line: 0.3/s, 350/s,
-// 2.4k/s, 1.2M/s.
+// FormatRate writes a per-second rate short enough for a progress line: 0.004/s, 0.04/s,
+// 0.3/s, 350/s, 2.4k/s, 1.2M/s. Below 1/s it takes as many decimals as its first digit
+// needs, up to three; anything smaller shows as 0/s.
 func FormatRate(perSecond float64) string {
 	switch {
-	case perSecond <= 0:
+	case perSecond < 0.0005:
 		return "0/s"
+	case perSecond < 0.0095:
+		return strconv.FormatFloat(perSecond, 'f', 3, 64) + "/s"
+	case perSecond < 0.095:
+		return strconv.FormatFloat(perSecond, 'f', 2, 64) + "/s"
 	case perSecond < 10:
 		return strconv.FormatFloat(perSecond, 'f', 1, 64) + "/s"
 	case perSecond < 1000:
