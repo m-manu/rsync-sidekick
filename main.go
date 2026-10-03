@@ -84,7 +84,7 @@ func setupExclusionsOpt() {
 	defaultExclusions, defaultExclusionsExamples := lib.LineSeparatedStrToMap(defaultExclusionsStr)
 	excludesListFilePathPtr := flag.StringP(exclusionsFlag, "x", exclusionsDefaultValue,
 		fmt.Sprintf("path to file containing newline separated list of file/directory names to be excluded\n"+
-			"(even if this is not set, files/directories such these will still be ignored: %s etc.)",
+			"(names are matched anywhere in the tree; always ignored, even without this flag: %s etc.)",
 			strings.Join(defaultExclusionsExamples, ", ")))
 	flags.getExcludedFiles = func() set.Set[string] {
 		excludesListFilePath := *excludesListFilePathPtr
