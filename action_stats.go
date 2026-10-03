@@ -3,12 +3,10 @@ package main
 import (
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/m-manu/rsync-sidekick/v2/action"
-	"github.com/m-manu/rsync-sidekick/v2/fmte"
 	"github.com/m-manu/rsync-sidekick/v2/lib"
 )
 
@@ -86,29 +84,7 @@ func (s *actionStats) summary() string {
 func startActionStatsProgress(stats *actionStats, done *atomic.Int64, total int,
 	progressFrequency time.Duration,
 ) (stop func()) {
-	if progressFrequency <= 0 {
-		return func() {}
-	}
-	finished := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		progress := lib.NewProgress("Applying", time.Now())
-		ticker := time.NewTicker(progressFrequency)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-finished:
-				return
-			case <-ticker.C:
-				fmte.Printf("%s - %s...\n", progress.Line(time.Now(),
-					lib.ProgressPart{Count: done.Load(), Total: int64(total), Label: "actions"}), stats.summary())
-			}
-		}
-	}()
-	return func() {
-		close(finished)
-		wg.Wait()
-	}
+	return progressBoard.Track(progressFrequency, "Applying", func() []lib.ProgressPart {
+		return []lib.ProgressPart{{Count: done.Load(), Total: int64(total), Label: "actions", Note: stats.summary()}}
+	})
 }

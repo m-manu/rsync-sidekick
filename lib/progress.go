@@ -14,6 +14,7 @@ type ProgressPart struct {
 	Where string // local, remote, or empty when it doesn't matter
 	Done  bool
 	Rate  float64 // per second; set by Progress.Line
+	Note  string  // shown after the part, e.g. a breakdown of what was done
 }
 
 // FormatProgress writes "Title: part | part" without a line end, so callers can add
@@ -21,20 +22,28 @@ type ProgressPart struct {
 func FormatProgress(title string, parts ...ProgressPart) string {
 	formatted := make([]string, len(parts))
 	for i, part := range parts {
-		count := GroupThousands(part.Count)
-		if part.Total > 0 {
-			count += "/" + GroupThousands(part.Total)
-		}
-		tags := []string{part.Label}
-		if part.Where != "" {
-			tags = append(tags, part.Where)
-		}
-		if part.Done {
-			tags = append(tags, "DONE")
-		}
-		formatted[i] = count + " [" + FormatRate(part.Rate) + "] (" + strings.Join(tags, ";") + ")"
+		formatted[i] = formatPart(part)
 	}
 	return title + ": " + strings.Join(formatted, " | ")
+}
+
+func formatPart(part ProgressPart) string {
+	count := GroupThousands(part.Count)
+	if part.Total > 0 {
+		count += "/" + GroupThousands(part.Total)
+	}
+	tags := []string{part.Label}
+	if part.Where != "" {
+		tags = append(tags, part.Where)
+	}
+	if part.Done {
+		tags = append(tags, "DONE")
+	}
+	formatted := count + " [" + FormatRate(part.Rate) + "] (" + strings.Join(tags, ";") + ")"
+	if part.Note != "" {
+		formatted += " - " + part.Note
+	}
+	return formatted
 }
 
 // Progress keeps the rate of every part of a progress line from one tick to the next:
@@ -52,6 +61,11 @@ func NewProgress(title string, start time.Time) *Progress {
 
 // Line formats one tick of the progress, without a line end.
 func (p *Progress) Line(now time.Time, parts ...ProgressPart) string {
+	p.setRates(now, parts)
+	return FormatProgress(p.title, parts...)
+}
+
+func (p *Progress) setRates(now time.Time, parts []ProgressPart) {
 	for i, part := range parts {
 		rate, known := p.rates[part.Label]
 		if !known {
@@ -60,7 +74,6 @@ func (p *Progress) Line(now time.Time, parts ...ProgressPart) string {
 		}
 		parts[i].Rate = rate.update(now, part.Count, part.Done)
 	}
-	return FormatProgress(p.title, parts...)
 }
 
 // progressRate follows one counter. A part that starts late (the archive walk waits for

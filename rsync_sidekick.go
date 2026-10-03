@@ -92,38 +92,25 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 			atomic.StoreInt32(&archiveScanDone, 1)
 		}()
 	}
-	scanDone := make(chan struct{})
-	if progressFrequency > 0 {
-		go func() {
-			progress := lib.NewProgress("Scanning", time.Now())
-			ticker := time.NewTicker(progressFrequency)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-scanDone:
-					return
-				case <-ticker.C:
-					parts := []lib.ProgressPart{
-						{Count: int64(atomic.LoadInt32(&scanSourceCounter)), Label: "src", Where: sourceWhere,
-							Done: atomic.LoadInt32(&sourceScanDone) == 1},
-						{Count: int64(atomic.LoadInt32(&scanDestCounter)), Label: "dst", Where: destWhere,
-							Done: atomic.LoadInt32(&destScanDone) == 1},
-					}
-					if len(archivePaths) > 0 {
-						parts = append(parts, lib.ProgressPart{Count: int64(atomic.LoadInt32(&scanArchiveCounter)),
-							Label: "arch", Where: destWhere, Done: atomic.LoadInt32(&archiveScanDone) == 1})
-					}
-					fmte.Printf("%s...\n", progress.Line(time.Now(), parts...))
-				}
-			}
-		}()
-	}
+	stopScanProgress := progressBoard.Track(progressFrequency, "Scanning", func() []lib.ProgressPart {
+		parts := []lib.ProgressPart{
+			{Count: int64(atomic.LoadInt32(&scanSourceCounter)), Label: "src", Where: sourceWhere,
+				Done: atomic.LoadInt32(&sourceScanDone) == 1},
+			{Count: int64(atomic.LoadInt32(&scanDestCounter)), Label: "dst", Where: destWhere,
+				Done: atomic.LoadInt32(&destScanDone) == 1},
+		}
+		if len(archivePaths) > 0 {
+			parts = append(parts, lib.ProgressPart{Count: int64(atomic.LoadInt32(&scanArchiveCounter)),
+				Label: "arch", Where: destWhere, Done: atomic.LoadInt32(&archiveScanDone) == 1})
+		}
+		return parts
+	})
 	// Reporting outlives the source and destination scans: the archive walk deliberately
 	// keeps running into the next phase.
 	go func() {
 		wgDirScan.Wait()
 		wgArchiveWalk.Wait()
-		close(scanDone)
+		stopScanProgress()
 	}()
 	wgDirScan.Wait()
 	end = time.Now()
@@ -268,8 +255,7 @@ func streamDestinationPhase(matcher *service.DestMatcher, orphans, candidates []
 	hashOrphans, hashCandidates service.ChunkDigestFunc, sourceDone, destinationDone *int32,
 	applier destApplier, sourceWhere, destWhere string, progressFrequency time.Duration,
 ) ([]action.SyncAction, error) {
-	stop := make(chan struct{})
-	go reportHashProgress(stop,
+	stop := trackHashProgress(
 		hashSide{done: sourceDone, total: len(orphans), label: "src", where: sourceWhere},
 		hashSide{done: destinationDone, total: len(candidates), label: "dst", where: destWhere},
 		progressFrequency)
@@ -278,7 +264,7 @@ func streamDestinationPhase(matcher *service.DestMatcher, orphans, candidates []
 		onActions = applier.apply
 	}
 	actions, err := service.StreamSyncActions(matcher, orphans, candidates, hashOrphans, hashCandidates, onActions)
-	close(stop)
+	stop()
 	if applier != nil {
 		applier.report()
 	}
@@ -525,41 +511,28 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			atomic.StoreInt32(&archiveScanDone, 1)
 		}()
 	}
-	scanDone := make(chan struct{})
-	if progressFrequency > 0 {
-		go func() {
-			progress := lib.NewProgress("Scanning", time.Now())
-			ticker := time.NewTicker(progressFrequency)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-scanDone:
-					return
-				case <-ticker.C:
-					local := lib.ProgressPart{Count: int64(atomic.LoadInt32(&localScanCounter)), Label: "src",
-						Where: "local", Done: atomic.LoadInt32(&localScanDone) == 1}
-					remote := lib.ProgressPart{Count: int64(atomic.LoadInt32(&remoteScanCounter)), Label: "dst",
-						Where: "remote", Done: atomic.LoadInt32(&remoteScanDone) == 1}
-					parts := []lib.ProgressPart{local, remote}
-					if sourceIsRemote {
-						local.Label, remote.Label = "dst", "src"
-						parts = []lib.ProgressPart{remote, local}
-					}
-					if prewalkArchives {
-						parts = append(parts, lib.ProgressPart{Count: int64(atomic.LoadInt32(&scanArchiveCounter)),
-							Label: "arch", Where: parts[1].Where, Done: atomic.LoadInt32(&archiveScanDone) == 1})
-					}
-					fmte.Printf("%s...\n", progress.Line(time.Now(), parts...))
-				}
-			}
-		}()
-	}
+	stopScanProgress := progressBoard.Track(progressFrequency, "Scanning", func() []lib.ProgressPart {
+		local := lib.ProgressPart{Count: int64(atomic.LoadInt32(&localScanCounter)), Label: "src",
+			Where: "local", Done: atomic.LoadInt32(&localScanDone) == 1}
+		remote := lib.ProgressPart{Count: int64(atomic.LoadInt32(&remoteScanCounter)), Label: "dst",
+			Where: "remote", Done: atomic.LoadInt32(&remoteScanDone) == 1}
+		parts := []lib.ProgressPart{local, remote}
+		if sourceIsRemote {
+			local.Label, remote.Label = "dst", "src"
+			parts = []lib.ProgressPart{remote, local}
+		}
+		if prewalkArchives {
+			parts = append(parts, lib.ProgressPart{Count: int64(atomic.LoadInt32(&scanArchiveCounter)),
+				Label: "arch", Where: parts[1].Where, Done: atomic.LoadInt32(&archiveScanDone) == 1})
+		}
+		return parts
+	})
 	// Reporting outlives the source and destination scans: the archive walk deliberately
 	// keeps running into the next phase.
 	go func() {
 		wgDirScan.Wait()
 		wgArchiveWalk.Wait()
-		close(scanDone)
+		stopScanProgress()
 	}()
 	wgDirScan.Wait()
 	end = time.Now()
@@ -850,36 +823,15 @@ func sideLocations(sourceRemote, destRemote bool) (sourceWhere, destWhere string
 func startArchiveScanProgress(progress *service.ArchiveScanProgress, where string,
 	progressFrequency time.Duration,
 ) (stop func()) {
-	if progressFrequency <= 0 {
-		return func() {}
-	}
-	done := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		lines := lib.NewProgress("Archives", time.Now())
-		ticker := time.NewTicker(progressFrequency)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				found := int64(atomic.LoadInt32(&progress.FilesFound))
-				fmte.Printf("%s...\n", lines.Line(time.Now(),
-					lib.ProgressPart{Count: int64(atomic.LoadInt32(&progress.FilesChecked)), Total: found,
-						Label: "checked", Where: where},
-					lib.ProgressPart{Count: int64(atomic.LoadInt32(&progress.DigestsDone)),
-						Total: int64(atomic.LoadInt32(&progress.DigestsNeeded)), Label: "hashed", Where: where},
-					lib.ProgressPart{Count: int64(atomic.LoadInt32(&progress.Matches)), Label: "matched"}))
-			}
+	return progressBoard.Track(progressFrequency, "Archives", func() []lib.ProgressPart {
+		return []lib.ProgressPart{
+			{Count: int64(atomic.LoadInt32(&progress.FilesChecked)), Total: int64(atomic.LoadInt32(&progress.FilesFound)),
+				Label: "checked", Where: where},
+			{Count: int64(atomic.LoadInt32(&progress.DigestsDone)),
+				Total: int64(atomic.LoadInt32(&progress.DigestsNeeded)), Label: "hashed", Where: where},
+			{Count: int64(atomic.LoadInt32(&progress.Matches)), Label: "matched"},
 		}
-	}()
-	return func() {
-		close(done)
-		wg.Wait()
-	}
+	})
 }
 
 // withDigestProgress runs compute, reporting how many of count digests are done so far.
@@ -889,25 +841,12 @@ func withDigestProgress(count int, where string, progressFrequency time.Duration
 ) (map[string]entity.FileDigest, error) {
 	fmte.Printf("Hashing %s orphan candidate(s) at source...\n", lib.GroupThousands(int64(count)))
 	var counter int32
-	done := make(chan struct{})
-	if progressFrequency > 0 {
-		go func() {
-			progress := lib.NewProgress("Hashing orphans", time.Now())
-			ticker := time.NewTicker(progressFrequency)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-done:
-					return
-				case <-ticker.C:
-					fmte.Printf("%s...\n", progress.Line(time.Now(), lib.ProgressPart{
-						Count: int64(atomic.LoadInt32(&counter)), Total: int64(count), Label: "src", Where: where}))
-				}
-			}
-		}()
-	}
+	stop := progressBoard.Track(progressFrequency, "Hashing orphans", func() []lib.ProgressPart {
+		return []lib.ProgressPart{{Count: int64(atomic.LoadInt32(&counter)), Total: int64(count), Label: "src",
+			Where: where}}
+	})
 	digests, err := compute(&counter)
-	close(done)
+	stop()
 	return digests, err
 }
 
@@ -985,27 +924,14 @@ func scanArchivesViaAgent(agentClient *remote.AgentClient, archiveWalks []servic
 	// ext+size check and the orphan digests are local.
 	var archiveWalkCounter, archiveCheckCounter, archiveDigestCounter int32
 	intervalMs := progressFrequency.Milliseconds()
-	archiveScanDone := make(chan struct{})
-	if progressFrequency > 0 {
-		go func() {
-			progress := lib.NewProgress("Archives", time.Now())
-			ticker := time.NewTicker(progressFrequency)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-archiveScanDone:
-					return
-				case <-ticker.C:
-					fmte.Printf("%s...\n", progress.Line(time.Now(),
-						lib.ProgressPart{Count: int64(atomic.LoadInt32(&archiveCheckCounter)),
-							Total: int64(atomic.LoadInt32(&archiveWalkCounter)), Label: "checked", Where: "local"},
-						lib.ProgressPart{Count: int64(atomic.LoadInt32(&archiveDigestCounter)),
-							Label: "hashed", Where: "remote"}))
-				}
-			}
-		}()
-	}
-	defer close(archiveScanDone)
+	stopProgress := progressBoard.Track(progressFrequency, "Archives", func() []lib.ProgressPart {
+		return []lib.ProgressPart{
+			{Count: int64(atomic.LoadInt32(&archiveCheckCounter)),
+				Total: int64(atomic.LoadInt32(&archiveWalkCounter)), Label: "checked", Where: "local"},
+			{Count: int64(atomic.LoadInt32(&archiveDigestCounter)), Label: "hashed", Where: "remote"},
+		}
+	})
+	defer stopProgress()
 
 	// This function only runs when the destination is the remote side, so digestFn hashes
 	// the local source and can run alongside the agent requests below.

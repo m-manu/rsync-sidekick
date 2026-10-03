@@ -92,20 +92,10 @@ func (s hashSide) part() lib.ProgressPart {
 		Done: count >= int64(s.total)}
 }
 
-// reportHashProgress prints the hashing progress of both sides until stop is closed.
-func reportHashProgress(stop <-chan struct{}, source, destination hashSide, frequency time.Duration) {
-	if frequency <= 0 {
-		return
-	}
-	progress := lib.NewProgress("Hashing", time.Now())
-	ticker := time.NewTicker(frequency)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-ticker.C:
-			fmte.Printf("%s...\n", progress.Line(time.Now(), source.part(), destination.part()))
-		}
-	}
+// trackHashProgress shows the hashing progress of both sides until the returned stop is
+// called.
+func trackHashProgress(source, destination hashSide, frequency time.Duration) (stop func()) {
+	return progressBoard.Track(frequency, "Hashing", func() []lib.ProgressPart {
+		return []lib.ProgressPart{source.part(), destination.part()}
+	})
 }
