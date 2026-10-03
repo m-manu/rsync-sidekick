@@ -125,12 +125,11 @@ func filesWalk(fsys rsfs.FileSystem, exclusions set.Set[string], counter *int32,
 			files, size, err := service.FindFilesFromDirectoryWithFS(fsys, dir, exclusions, counter)
 			return files, nil, size, err
 		}
-		files, size, err := service.FindFilesFromDirectory(dir, exclusions, counter)
+		files, dirs, size, err := service.FindFilesAndDirsFromDirectory(dir, exclusions, counter)
 		if err != nil || !withDirs {
 			return files, nil, size, err
 		}
-		dirs, err := service.FindDirsFromDirectory(dir, exclusions)
-		return files, dirs, size, err
+		return files, dirs, size, nil
 	}
 }
 

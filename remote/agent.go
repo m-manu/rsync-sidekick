@@ -168,7 +168,7 @@ func handleWalk(w *requestWriter, payload []byte) {
 		}()
 	}
 
-	files, totalSize, err := service.FindFilesFromDirectory(req.DirPath, excluded, &counter)
+	files, dirs, totalSize, err := service.FindFilesAndDirsFromDirectory(req.DirPath, excluded, &counter)
 
 	if done != nil {
 		close(done)
@@ -177,12 +177,6 @@ func handleWalk(w *requestWriter, payload []byte) {
 
 	if err != nil {
 		writeError(w, fmt.Sprintf("walk failed: %v", err))
-		return
-	}
-
-	dirs, dirErr := service.FindDirsFromDirectory(req.DirPath, excluded)
-	if dirErr != nil {
-		writeError(w, fmt.Sprintf("walk dirs failed: %v", dirErr))
 		return
 	}
 
