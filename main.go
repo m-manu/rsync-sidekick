@@ -22,7 +22,7 @@ import (
 const (
 	applicationMajorVersion = 2
 	applicationMinorVersion = 17
-	applicationPatchVersion = 1
+	applicationPatchVersion = 2
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -78,14 +78,52 @@ var flags struct {
 	walkThreads          func() int
 }
 
+// defaultExclusionList returns the names of the default exclusions in file order.
+func defaultExclusionList(contents string) []string {
+	var names []string
+	for _, line := range strings.Split(contents, "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// wrapList joins names with ", " into lines of at most width characters (a longer name
+// gets a line of its own).
+func wrapList(names []string, width int) string {
+	var lines []string
+	line := ""
+	for i, name := range names {
+		item := name
+		if i < len(names)-1 {
+			item += ","
+		}
+		switch {
+		case line == "":
+			line = item
+		case len(line)+1+len(item) <= width:
+			line += " " + item
+		default:
+			lines = append(lines, line)
+			line = item
+		}
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
 func setupExclusionsOpt() {
 	const exclusionsFlag = "exclusions"
 	const exclusionsDefaultValue = ""
-	defaultExclusions, defaultExclusionsExamples := lib.LineSeparatedStrToMap(defaultExclusionsStr)
+	defaultExclusions, _ := lib.LineSeparatedStrToMap(defaultExclusionsStr)
 	excludesListFilePathPtr := flag.StringP(exclusionsFlag, "x", exclusionsDefaultValue,
-		fmt.Sprintf("path to file containing newline separated list of file/directory names to be excluded\n"+
-			"(names are matched anywhere in the tree; without this flag %s etc. are ignored - the file replaces that list)",
-			strings.Join(defaultExclusionsExamples, ", ")))
+		"path to file containing newline separated list of file/directory names to be excluded\n"+
+			"(names are matched anywhere in the tree). Without this flag these are ignored:\n"+
+			wrapList(defaultExclusionList(defaultExclusionsStr), 100)+"\n"+
+			"A list file replaces them - copy them into it to keep ignoring them.")
 	flags.getExcludedFiles = func() set.Set[string] {
 		excludesListFilePath := *excludesListFilePathPtr
 		var exclusions set.Set[string]
