@@ -10,3 +10,4 @@ Thumbs.db
 .fseventsd
 _PAlbTN
 System Volume Information
+.stversions

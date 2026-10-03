@@ -22,7 +22,7 @@ import (
 const (
 	applicationMajorVersion = 2
 	applicationMinorVersion = 17
-	applicationPatchVersion = 0
+	applicationPatchVersion = 1
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -84,7 +84,7 @@ func setupExclusionsOpt() {
 	defaultExclusions, defaultExclusionsExamples := lib.LineSeparatedStrToMap(defaultExclusionsStr)
 	excludesListFilePathPtr := flag.StringP(exclusionsFlag, "x", exclusionsDefaultValue,
 		fmt.Sprintf("path to file containing newline separated list of file/directory names to be excluded\n"+
-			"(names are matched anywhere in the tree; always ignored, even without this flag: %s etc.)",
+			"(names are matched anywhere in the tree; without this flag %s etc. are ignored - the file replaces that list)",
 			strings.Join(defaultExclusionsExamples, ", ")))
 	flags.getExcludedFiles = func() set.Set[string] {
 		excludesListFilePath := *excludesListFilePathPtr

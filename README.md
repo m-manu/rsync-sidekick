@@ -116,7 +116,7 @@ flags: (all optional)
                                           turns the cache on for the sides on this host)
   -n, --dry-run                           show what would be done, but don't actually perform any actions
   -x, --exclusions string                 path to file containing newline separated list of file/directory names to be excluded
-                                          (names are matched anywhere in the tree; always ignored, even without this flag: $RECYCLE.BIN, desktop.ini, Thumbs.db etc.)
+                                          (names are matched anywhere in the tree; without this flag $RECYCLE.BIN, desktop.ini, Thumbs.db etc. are ignored - the file replaces that list)
       --hash-min-size string              never hash files smaller than this size, e.g. '512k' - unlike --min-size they stay in the scans:
                                           rsync transfers them, and with --copy-list they go straight into the list (no second rsync pass)
   -h, --help                              display help
