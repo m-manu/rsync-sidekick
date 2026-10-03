@@ -21,7 +21,7 @@ import (
 
 const (
 	applicationMajorVersion = 2
-	applicationMinorVersion = 9
+	applicationMinorVersion = 10
 	applicationPatchVersion = 0
 )
 

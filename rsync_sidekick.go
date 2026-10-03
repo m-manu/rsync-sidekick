@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -32,14 +31,20 @@ func getSyncActionsWithProgress(runID string, sourceDirPath string, exclusions s
 ) ([]action.SyncAction, error) {
 	return getSyncActionsWithProgressFS(runID, sourceDirPath, nil, exclusions,
 		destinationDirPath, nil, verbose, progressFrequency,
-		copyDuplicates, useReflink, archivePaths, onArchiveAction)
+		copyDuplicates, useReflink, archivePaths, onArchiveAction, nil, nil)
 }
 
+// getSyncActionsWithProgressFS computes the sync actions. With applyDestActions set, the
+// moves and copies found within the destination are handed to it as soon as they are
+// known — before the archive scan, which can take hours — and are not returned again.
+// moved is where applyDestActions records its moves; the archive file lists, taken
+// before, are updated from it.
 func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS rsfs.FileSystem,
 	exclusions set.Set[string], destinationDirPath string, destFS rsfs.FileSystem,
 	verbose bool, progressFrequency time.Duration,
 	copyDuplicates bool, useReflink bool, archivePaths []string,
-	onArchiveAction service.ArchiveActionFunc,
+	onArchiveAction service.ArchiveActionFunc, applyDestActions func([]action.SyncAction) error,
+	moved movedFiles,
 ) ([]action.SyncAction, error) {
 	if verbose {
 		fmte.VerboseOn()
@@ -202,11 +207,19 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		}
 	}
 
+	destActions := actions
+	if applyDestActions != nil && len(actions) > 0 {
+		if err := applyDestActions(actions); err != nil {
+			return nil, err
+		}
+		actions = nil
+	}
+
 	// Archive scanning (independent of --copy-duplicates)
 	if len(archivePaths) > 0 {
 		// Determine which orphans are still unmatched
 		resolvedOrphans := set.NewSet[string]()
-		for _, a := range actions {
+		for _, a := range destActions {
 			switch act := a.(type) {
 			case action.MoveFileAction:
 				resolvedOrphans.Add(act.RelativeToPath)
@@ -239,6 +252,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 			if archiveWalkErr != nil {
 				return nil, fmt.Errorf("error scanning archive paths: %+v", archiveWalkErr)
 			}
+			archiveWalks = moved.rebaseWalks(archiveWalks)
 			var archiveProgress service.ArchiveScanProgress
 			atomic.StoreInt32(&archiveProgress.FilesFound, atomic.LoadInt32(&scanArchiveCounter))
 			stopArchiveProgress := startArchiveScanProgress(&archiveProgress, progressFrequency)
@@ -258,10 +272,25 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 	}
 
 	if len(actions) == 0 {
-		fmte.Printf("No sync actions found. You may run rsync.\n")
+		if len(destActions) == 0 {
+			fmte.Printf("No sync actions found. You may run rsync.\n")
+		}
 		return []action.SyncAction{}, nil
 	}
 	return actions, nil
+}
+
+// destActionApplier returns the applyDestActions of a run whose destination is local, or
+// nil where everything has to wait for the end: a script needs the complete list.
+func destActionApplier(outputScriptPath, destDirPath string, dryRun, verbose bool,
+	progressFrequency time.Duration, moved movedFiles,
+) func([]action.SyncAction) error {
+	if outputScriptPath != "" {
+		return nil
+	}
+	return func(actions []action.SyncAction) error {
+		return performActionsTracked(actions, destDirPath, dryRun, verbose, progressFrequency, moved)
+	}
 }
 
 func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string], destinationDirPath string,
@@ -270,13 +299,15 @@ func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string
 ) error {
 	// Archive matches are applied as they are found, so an interrupted run keeps them.
 	// Not in script mode, which needs the complete list, and not for a dry run.
+	moved := movedFiles{}
 	var appliedArchiveActions int
 	var onArchiveAction service.ArchiveActionFunc
 	if outputScriptPath == "" && !dryRun {
-		onArchiveAction = newLocalArchiveActionStreamer(&appliedArchiveActions)
+		onArchiveAction = newLocalArchiveActionStreamer(&appliedArchiveActions, moved)
 	}
-	actions, err := getSyncActionsWithProgress(runID, sourceDirPath, exclusions, destinationDirPath, verbose, progressFrequency,
-		copyDuplicates, useReflink, archivePaths, onArchiveAction)
+	actions, err := getSyncActionsWithProgressFS(runID, sourceDirPath, nil, exclusions, destinationDirPath, nil,
+		verbose, progressFrequency, copyDuplicates, useReflink, archivePaths, onArchiveAction,
+		destActionApplier(outputScriptPath, destinationDirPath, dryRun, verbose, progressFrequency, moved), moved)
 	if appliedArchiveActions > 0 {
 		fmte.Printf("Applied %d actions from archive paths while scanning\n", appliedArchiveActions)
 	}
@@ -296,7 +327,7 @@ func rsyncSidekick(runID string, sourceDirPath string, exclusions set.Set[string
 	if outputScriptPath != "" {
 		return generateScript(actions, outputScriptPath, nil)
 	} else {
-		return performActions(actions, destinationDirPath, dryRun, verbose, progressFrequency)
+		return performActionsTracked(actions, destinationDirPath, dryRun, verbose, progressFrequency, moved)
 	}
 }
 
@@ -362,14 +393,19 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 
 	// Stream archive matches only when the destination is local; over SFTP each action
 	// would be its own round-trip.
+	moved := movedFiles{}
 	var appliedArchiveActions int
 	var onArchiveAction service.ArchiveActionFunc
-	if destFS == nil && outputScriptPath == "" && !dryRun {
-		onArchiveAction = newLocalArchiveActionStreamer(&appliedArchiveActions)
+	var applyDestActions func([]action.SyncAction) error
+	if destFS == nil {
+		if outputScriptPath == "" && !dryRun {
+			onArchiveAction = newLocalArchiveActionStreamer(&appliedArchiveActions, moved)
+		}
+		applyDestActions = destActionApplier(outputScriptPath, destDirPath, dryRun, verbose, progressFrequency, moved)
 	}
 	actions, actionsErr := getSyncActionsWithProgressFS(runID, sourceDirPath, sourceFS,
 		exclusions, destDirPath, destFS, verbose, progressFrequency,
-		copyDuplicates, useReflink, archivePaths, onArchiveAction)
+		copyDuplicates, useReflink, archivePaths, onArchiveAction, applyDestActions, moved)
 	if appliedArchiveActions > 0 {
 		fmte.Printf("Applied %d actions from archive paths while scanning\n", appliedArchiveActions)
 	}
@@ -394,7 +430,7 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 		}
 		return generateScript(actions, outputScriptPath, sshSpec)
 	}
-	return performActions(actions, destDirPath, dryRun, verbose, progressFrequency)
+	return performActionsTracked(actions, destDirPath, dryRun, verbose, progressFrequency, moved)
 }
 
 // rsyncSidekickRemoteExec handles the remote-execution mode where the agent
@@ -695,18 +731,23 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 		}
 	}
 
-	if syncDirTimestamps && sourceDirs != nil && destDirs != nil {
-		dirActions := computeDirTimestampActionsFromMaps(sourceDirPath, sourceDirs, destDirPath, destDirs)
-		if len(dirActions) > 0 {
-			fmte.Printf("Found %d directory timestamp actions\n", len(dirActions))
-			actions = append(actions, dirActions...)
+	// With a local destination the moves and copies found so far are applied now, before the
+	// archive scan: whatever is done stays done if the run is interrupted.
+	moved := movedFiles{}
+	destActions := actions
+	if sourceIsRemote && len(actions) > 0 {
+		if apply := destActionApplier(outputScriptPath, destDirPath, dryRun, verbose, progressFrequency, moved); apply != nil {
+			if err := apply(actions); err != nil {
+				return err
+			}
+			actions = nil
 		}
 	}
 
 	// Archive scanning — archives are on the destination side
 	if len(archivePaths) > 0 && len(orphansAtSource) > 0 {
 		resolvedOrphans := set.NewSet[string]()
-		for _, a := range actions {
+		for _, a := range destActions {
 			switch act := a.(type) {
 			case action.MoveFileAction:
 				resolvedOrphans.Add(act.RelativeToPath)
@@ -742,11 +783,12 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 				if archiveWalkErr != nil {
 					return fmt.Errorf("error scanning archive paths: %+v", archiveWalkErr)
 				}
+				archiveWalks = moved.rebaseWalks(archiveWalks)
 				// The destination is local, so matches can be applied as they are found.
 				var appliedArchiveActions int
 				var onArchiveAction service.ArchiveActionFunc
 				if outputScriptPath == "" && !dryRun {
-					onArchiveAction = recordResolvedOrphans(newLocalArchiveActionStreamer(&appliedArchiveActions),
+					onArchiveAction = recordResolvedOrphans(newLocalArchiveActionStreamer(&appliedArchiveActions, moved),
 						destDirPath, archiveResolved)
 				}
 				var archiveProgress service.ArchiveScanProgress
@@ -817,9 +859,19 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 					return agentClient.BatchDigest(sourceDirPath, orphans, counter, progressFrequency.Milliseconds())
 				})
 		}
-		if err := writeCopyPlan(plan, orphansAtSource, actions, archiveResolved, destDirPath,
+		resolvingActions := append(append([]action.SyncAction{}, destActions...), actions...)
+		if err := writeCopyPlan(plan, orphansAtSource, resolvingActions, archiveResolved, destDirPath,
 			sourceFiles, knownOrphanDigests, digestFn); err != nil {
 			return err
+		}
+	}
+
+	// Directory timestamps go last: every file written below a directory changes its mtime.
+	if syncDirTimestamps && sourceDirs != nil && destDirs != nil {
+		dirActions := computeDirTimestampActionsFromMaps(sourceDirPath, sourceDirs, destDirPath, destDirs)
+		if len(dirActions) > 0 {
+			fmte.Printf("Found %d directory timestamp actions\n", len(dirActions))
+			actions = append(actions, dirActions...)
 		}
 	}
 
@@ -843,7 +895,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 	}
 
 	// Source is remote, destination is local: perform locally
-	return performActions(actions, destDirPath, dryRun, verbose, progressFrequency)
+	return performActionsTracked(actions, destDirPath, dryRun, verbose, progressFrequency, moved)
 }
 
 // newLocalArchiveActionStreamer applies each archive match immediately instead of
@@ -853,8 +905,9 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 // Only for a local destination: there a copy is a reflink or a plain local write, cheap
 // enough to do one at a time. With a remote destination each action would be its own
 // round-trip over the agent connection, where batching at the end is the better trade.
-func newLocalArchiveActionStreamer(applied *int) service.ArchiveActionFunc {
+func newLocalArchiveActionStreamer(applied *int, moved movedFiles) service.ArchiveActionFunc {
 	return func(a action.SyncAction) error {
+		a = moved.redirect(a)
 		if err := a.Perform(); err != nil {
 			return fmt.Errorf("error performing \"%s\": %w", a.UnixCommand(), err)
 		}
@@ -1457,13 +1510,20 @@ type actionResult struct {
 func performActions(actions []action.SyncAction, destinationDirPath string, dryRun, verbose bool,
 	progressFrequency time.Duration,
 ) error {
+	return performActionsTracked(actions, destinationDirPath, dryRun, verbose, progressFrequency, movedFiles{})
+}
+
+// performActionsTracked is performActions sharing movedPaths with other phases of the run,
+// so copies from a file moved by an earlier batch find it at its new path.
+func performActionsTracked(actions []action.SyncAction, destinationDirPath string, dryRun, verbose bool,
+	progressFrequency time.Duration, movedPaths movedFiles,
+) error {
 	if dryRun {
 		fmte.Printf("Simulating sync actions at destination (dry run)...\n")
 	} else {
 		fmte.Printf("Applying sync actions at destination...\n")
 	}
 	successCount := 0
-	movedPaths := make(map[string]string)
 
 	action.SortByDestinationDir(actions)
 
@@ -1503,12 +1563,7 @@ func performActions(actions []action.SyncAction, destinationDirPath string, dryR
 	// I/O loop — performs actions, sends lightweight results to printer
 	start := time.Now()
 	for i, syncAction := range actions {
-		if copyAct, ok := syncAction.(action.CopyFileAction); ok {
-			if newPath, wasMoved := movedPaths[copyAct.AbsSourcePath]; wasMoved {
-				copyAct.AbsSourcePath = newPath
-				syncAction = copyAct
-			}
-		}
+		syncAction = movedPaths.redirect(syncAction)
 
 		var aErr error
 		if !dryRun {
@@ -1524,11 +1579,7 @@ func performActions(actions []action.SyncAction, destinationDirPath string, dryR
 		if aErr == nil {
 			successCount++
 			if !dryRun {
-				if moveAct, ok := syncAction.(action.MoveFileAction); ok {
-					oldAbs := filepath.Join(moveAct.BasePath, moveAct.RelativeFromPath)
-					newAbs := filepath.Join(moveAct.BasePath, moveAct.RelativeToPath)
-					movedPaths[oldAbs] = newAbs
-				}
+				movedPaths.record(syncAction)
 			}
 		}
 	}
