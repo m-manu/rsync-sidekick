@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	set "github.com/deckarep/golang-set/v2"
 	"github.com/m-manu/rsync-sidekick/v2/entity"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -130,6 +131,80 @@ func TestApplyPlan_ReflinksTargetsAndSkipsWhatDoesNotFit(t *testing.T) {
 	assert.Equal(t, "other", string(existing), "an existing target is never overwritten")
 	assert.NoFileExists(t, filepath.Join(base, "dup/changed.bin"))
 	assert.NoFileExists(t, filepath.Join(base, "dup/missing.bin"))
+}
+
+// simulateRsync copies the listed files from src to dst like rsync -a --files-from:
+// parent directories are created, content and mtime are carried over.
+func simulateRsync(t *testing.T, src, dst string, list []string) {
+	t.Helper()
+	for _, rel := range list {
+		info, err := os.Stat(filepath.Join(src, rel))
+		require.NoError(t, err)
+		content, err := os.ReadFile(filepath.Join(src, rel))
+		require.NoError(t, err)
+		writeFileWithMtime(t, filepath.Join(dst, rel), string(content), info.ModTime().Unix())
+	}
+}
+
+type treeEntry struct {
+	content string
+	mtime   int64
+}
+
+func readTree(t *testing.T, root string) map[string]treeEntry {
+	t.Helper()
+	tree := make(map[string]treeEntry)
+	require.NoError(t, filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		rel, _ := filepath.Rel(root, path)
+		tree[rel] = treeEntry{content: string(content), mtime: info.ModTime().Unix()}
+		return nil
+	}))
+	return tree
+}
+
+func TestCopyPlanWorkflow_TransfersEachContentOnceAndRebuildsTheSource(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	big := string(make([]byte, 40_000)) + "same content"
+	writeFileWithMtime(t, filepath.Join(src, "Movies/a.mkv"), big, 100)
+	writeFileWithMtime(t, filepath.Join(src, "Archive/2024/a.mkv"), big, 200)
+	writeFileWithMtime(t, filepath.Join(src, "Old/a-copy.mkv"), big, 300)
+	writeFileWithMtime(t, filepath.Join(src, "Movies/b.mkv"), string(make([]byte, 40_000))+"other content", 400)
+	writeFileWithMtime(t, filepath.Join(src, "Docs/note.txt"), "note", 500)
+
+	sourceFiles, _, err := FindFilesFromDirectory(src, set.NewSet[string](), nil)
+	require.NoError(t, err)
+	orphans := FindOrphans(sourceFiles, map[string]entity.FileMeta{})
+	digestFn := func(paths []string) (map[string]entity.FileDigest, error) {
+		return BatchDigestsParallel(nil, src, paths, nil), nil
+	}
+
+	// step 1: plan
+	copyList, groups, err := BuildCopyPlan(orphans, sourceFiles, nil, digestFn)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Archive/2024/a.mkv", "Docs/note.txt", "Movies/b.mkv"}, copyList,
+		"the three copies of a.mkv cross the network once")
+	require.Len(t, groups, 1)
+	planPath := filepath.Join(t.TempDir(), "plan.jsonl")
+	require.NoError(t, WritePlan(planPath, groups))
+
+	// step 2: rsync --files-from, simulated
+	simulateRsync(t, src, dst, copyList)
+
+	// step 3: apply the plan read back from disk
+	readGroups, err := ReadPlan(planPath)
+	require.NoError(t, err)
+	stats := ApplyPlan(readGroups, dst, false, 2, 0)
+
+	assert.Equal(t, int64(2), stats.TargetsDone)
+	assert.Equal(t, int64(0), stats.TargetsFailed+stats.GroupsSkipped)
+	assert.Equal(t, readTree(t, src), readTree(t, dst), "destination must equal source: content and mtime")
 }
 
 func TestApplyPlan_DryRunChangesNothing(t *testing.T) {
