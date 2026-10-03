@@ -54,6 +54,15 @@ func copyFile(srcPath string, dstPath string) {
 		// This shouldn't happen, unless there is a bug in test case
 		panic(fmt.Errorf("error: Unable to write file %s due to: %+v", srcPath, err))
 	}
+	// Keep the original's mtime, so copies made at source and destination match even when
+	// a second boundary falls between them.
+	info, err := os.Stat(srcPath)
+	if err == nil {
+		err = os.Chtimes(dstPath, info.ModTime(), info.ModTime())
+	}
+	if err != nil {
+		panic(fmt.Errorf("error: Unable to copy mtime of %s due to: %+v", srcPath, err))
+	}
 }
 
 func cd(path string) {
