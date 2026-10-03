@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -190,6 +191,30 @@ func TestAgentClient_ProgressUpdatesTheCounter(t *testing.T) {
 	// value itself is gone by now — what matters is that it was routed and not treated as
 	// the response.
 	assert.EqualValues(t, 0, counter, "empty walk response means zero files")
+}
+
+func TestAgentClient_CounterKeepsGrowingAcrossConsecutiveWalks(t *testing.T) {
+	// The agent counts every walk from zero; one counter shared by several walks (include
+	// directories, archive paths) must still show the running total.
+	progressSeen := make(chan int32, 4)
+	var counter int32
+	client := newFakeAgentClient(t, func(request Envelope, reply *json.Encoder) {
+		progress, _ := json.Marshal(WalkProgress{FilesFound: 2})
+		_ = reply.Encode(Envelope{Type: MsgWalkProgress, ID: request.ID, Payload: progress})
+		walkResp, _ := json.Marshal(WalkResponse{Files: map[string]FileMeta{
+			"a": {Size: 1}, "b": {Size: 1}, "c": {Size: 1},
+		}})
+		_ = reply.Encode(Envelope{Type: MsgWalkResponse, ID: request.ID, Payload: walkResp})
+	})
+
+	_, _, _, err1 := client.Walk("/first", nil, &counter, 1000, false)
+	progressSeen <- atomic.LoadInt32(&counter)
+	_, _, _, err2 := client.Walk("/second", nil, &counter, 1000, false)
+
+	require.NoError(t, err1)
+	require.NoError(t, err2)
+	assert.EqualValues(t, 3, <-progressSeen, "first walk: its own three files")
+	assert.EqualValues(t, 6, atomic.LoadInt32(&counter), "second walk adds to the first instead of restarting")
 }
 
 func TestAgentClient_AnswerWithoutIDGoesToTheOnlyRequest(t *testing.T) {

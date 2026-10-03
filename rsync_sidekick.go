@@ -917,8 +917,8 @@ func withDigestProgress(count int, progressFrequency time.Duration,
 // walkArchivesViaAgent walks archive paths on the remote destination, the counterpart of
 // service.WalkArchives for a remote destination.
 //
-// counter reflects the path currently being walked, since the agent reports each walk's
-// own count — with several archive paths it restarts per path.
+// counter keeps growing across the archive paths: the client adds each walk's count to
+// what the counter held before.
 func walkArchivesViaAgent(agentClient *remote.AgentClient, archivePaths []string,
 	excludedNames []string, counter *int32, intervalMs int64,
 ) ([]service.ArchiveWalk, error) {

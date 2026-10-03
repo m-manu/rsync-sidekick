@@ -49,10 +49,20 @@ type AgentClient struct {
 
 // pendingRequest collects what the reader goroutine needs to route messages of one
 // request: progress updates go straight into counter, and the single terminal message
-// goes to respCh.
+// goes to respCh. The agent counts each request from zero; base is what counter held
+// when the request started, so a counter shared by consecutive requests keeps growing.
 type pendingRequest struct {
 	respCh  chan *Envelope
 	counter *int32
+	base    int32
+}
+
+// counterValue reads a counter that may be nil.
+func counterValue(counter *int32) int32 {
+	if counter == nil {
+		return 0
+	}
+	return atomic.LoadInt32(counter)
 }
 
 // NewAgentClient starts the agent process on the remote host via system ssh
@@ -141,12 +151,12 @@ func (c *AgentClient) route(env *Envelope) {
 	case MsgWalkProgress:
 		var progress WalkProgress
 		if pending.counter != nil && json.Unmarshal(env.Payload, &progress) == nil {
-			atomic.StoreInt32(pending.counter, int32(progress.FilesFound))
+			atomic.StoreInt32(pending.counter, pending.base+int32(progress.FilesFound))
 		}
 	case MsgDigestProgress:
 		var progress DigestProgress
 		if pending.counter != nil && json.Unmarshal(env.Payload, &progress) == nil {
-			atomic.StoreInt32(pending.counter, int32(progress.FilesHashed))
+			atomic.StoreInt32(pending.counter, pending.base+int32(progress.FilesHashed))
 		}
 	default:
 		// respCh has room for exactly the one terminal message.
@@ -223,6 +233,7 @@ func (c *AgentClient) Walk(dirPath string, excludedNames []string, counter *int3
 		DirPath: dirPath, ExcludedNames: excludedNames, ProgressIntervalMs: progressIntervalMs,
 		OneFileSystem: oneFileSystem, MinSize: rsfs.DefaultMinSize,
 	}
+	base := counterValue(counter)
 	env, err := c.roundTrip(MsgWalkRequest, req, counter)
 	if err != nil {
 		return nil, nil, 0, err
@@ -248,7 +259,7 @@ func (c *AgentClient) Walk(dirPath string, excludedNames []string, counter *int3
 		files[p] = meta
 	}
 	if counter != nil {
-		atomic.StoreInt32(counter, int32(len(files)))
+		atomic.StoreInt32(counter, base+int32(len(files)))
 	}
 	return files, walkResp.Dirs, totalSize, nil
 }
@@ -261,6 +272,7 @@ func (c *AgentClient) BatchDigest(basePath string, files []string, counter *int3
 ) (map[string]entity.FileDigest, error) {
 	req := DigestRequest{BasePath: basePath, Files: files, ProgressIntervalMs: progressIntervalMs,
 		DigestCache: c.DigestCache}
+	base := counterValue(counter)
 	env, err := c.roundTrip(MsgDigestRequest, req, counter)
 	if err != nil {
 		return nil, err
@@ -281,7 +293,7 @@ func (c *AgentClient) BatchDigest(basePath string, files []string, counter *int3
 		digests[p] = digest
 	}
 	if counter != nil {
-		atomic.StoreInt32(counter, int32(len(files)))
+		atomic.StoreInt32(counter, base+int32(len(files)))
 	}
 	return digests, nil
 }
@@ -346,7 +358,7 @@ func (c *AgentClient) roundTrip(msgType string, payload interface{}, counter *in
 	}
 
 	id := c.nextID.Add(1)
-	pending := &pendingRequest{respCh: make(chan *Envelope, 1), counter: counter}
+	pending := &pendingRequest{respCh: make(chan *Envelope, 1), counter: counter, base: counterValue(counter)}
 	c.pendingMu.Lock()
 	c.pending[id] = pending
 	c.pendingMu.Unlock()
