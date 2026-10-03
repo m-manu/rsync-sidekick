@@ -83,24 +83,24 @@ func mountpointForPath(path string) string {
 // FICLONE = _IOW(0x94, 9, int) = 0x40049409
 const ficlone = 0x40049409
 
-// reflinkCopy creates a reflink copy using FICLONE ioctl directly, avoiding fork+exec of cp.
+// reflinkCopy creates a reflink copy using FICLONE ioctl directly, avoiding fork+exec of cp,
+// and falls back to a full copy; cloned tells which one it was.
 // Caches reflink support per mountpoint: first call tries ioctl, subsequent calls skip if unsupported.
-func reflinkCopy(src, dst string, mode os.FileMode) error {
+func reflinkCopy(src, dst string, mode os.FileMode) (cloned bool, err error) {
 	mp := mountpointForPath(dst)
 	if supported, ok := reflinkSupport.Load(mp); ok && !supported.(bool) {
-		reflinkFallbacks.Add(1)
-		return regularCopyWithMode(src, dst, mode)
+		return false, regularCopyWithMode(src, dst, mode)
 	}
 
 	srcFile, err := os.Open(src)
 	if err != nil {
-		return fmt.Errorf("cannot open source %q: %w", src, err)
+		return false, fmt.Errorf("cannot open source %q: %w", src, err)
 	}
 	defer srcFile.Close()
 
 	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
-		return fmt.Errorf("cannot create destination %q: %w", dst, err)
+		return false, fmt.Errorf("cannot create destination %q: %w", dst, err)
 	}
 
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, dstFile.Fd(), ficlone, srcFile.Fd())
@@ -108,10 +108,9 @@ func reflinkCopy(src, dst string, mode os.FileMode) error {
 		dstFile.Close()
 		os.Remove(dst)
 		reflinkSupport.Store(mp, false)
-		reflinkFallbacks.Add(1)
-		return regularCopyWithMode(src, dst, mode)
+		return false, regularCopyWithMode(src, dst, mode)
 	}
 
 	reflinkSupport.Store(mp, true)
-	return dstFile.Close()
+	return true, dstFile.Close()
 }

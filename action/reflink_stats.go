@@ -11,3 +11,11 @@ var reflinkFallbacks atomic.Int64
 func ReflinkFallbacks() int64 {
 	return reflinkFallbacks.Load()
 }
+
+// movesAsCopies counts moves that rename couldn't do and that were copied instead.
+var movesAsCopies atomic.Int64
+
+// MovesAsCopies reports how many moves were done as copies, the original kept.
+func MovesAsCopies() int64 {
+	return movesAsCopies.Load()
+}

@@ -53,8 +53,12 @@ func (a CopyFileAction) Perform() error {
 	}
 
 	if a.UseReflink {
-		if err := reflinkOrCopy(a.AbsSourcePath, a.AbsDestPath, srcInfo.Mode()); err != nil {
+		cloned, err := reflinkOrCopy(a.AbsSourcePath, a.AbsDestPath, srcInfo.Mode())
+		if err != nil {
 			return err
+		}
+		if !cloned {
+			reflinkFallbacks.Add(1)
 		}
 	} else {
 		if err := regularCopy(a.AbsSourcePath, a.AbsDestPath); err != nil {
@@ -97,18 +101,17 @@ var (
 
 // reflinkOrCopy reflinks src to dst where the filesystem supports it and copies it
 // otherwise: FICLONE on Linux, clonefile (cp -c) on macOS, a plain copy everywhere else.
-// Every reflink that ends up as a full copy is counted in reflinkFallbacks.
-func reflinkOrCopy(src, dst string, mode os.FileMode) error {
+// cloned tells whether it became a reflink.
+func reflinkOrCopy(src, dst string, mode os.FileMode) (cloned bool, err error) {
 	switch platform {
 	case "linux":
 		return reflinkCopy(src, dst, mode)
 	case "darwin":
 		if err := cloneFile(src, dst); err == nil {
-			return nil
+			return true, nil
 		}
 	}
-	reflinkFallbacks.Add(1)
-	return regularCopyWithMode(src, dst, mode)
+	return false, regularCopyWithMode(src, dst, mode)
 }
 
 func regularCopyWithMode(src, dst string, mode os.FileMode) error {

@@ -71,6 +71,7 @@ func (s *actionStats) summary() string {
 	add(copied, "copied")
 	add(reflinked, "reflinked")
 	add(s.moved.Load(), "moved")
+	add(min(action.MovesAsCopies(), s.moved.Load()), "of them copied (rename can't cross filesystems or subvolumes)")
 	add(s.timestamps.Load(), "timestamps")
 	add(s.errors.Load(), "errors")
 	if len(parts) == 0 {

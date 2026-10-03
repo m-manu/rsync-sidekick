@@ -41,11 +41,36 @@ func (a MoveFileAction) Perform() error {
 	}
 	if _, err := os.Stat(a.destinationPath()); err == nil {
 		return fmt.Errorf(`error: file "%s" already exists`, a.destinationPath())
-	} else if errors.Is(err, os.ErrNotExist) {
-		return os.Rename(a.sourcePath(), a.destinationPath())
-	} else {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	err := os.Rename(a.sourcePath(), a.destinationPath())
+	if isCrossDevice(err) {
+		return copyInsteadOfMove(a.sourcePath(), a.destinationPath())
+	}
+	return err
+}
+
+// copyInsteadOfMove handles a move that rename can't do: across filesystems, and across
+// BTRFS subvolumes of one filesystem. Like mv, it copies the file - as a reflink where
+// possible, so within one BTRFS it takes no space - but unlike mv it keeps the original,
+// since rsync-sidekick never deletes; rsync --delete removes it later.
+func copyInsteadOfMove(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if _, err := reflinkOrCopy(src, dst, info.Mode()); err != nil {
+		return fmt.Errorf("rename across devices, copy failed too: %w", err)
+	}
+	if err := os.Chtimes(dst, info.ModTime(), info.ModTime()); err != nil {
+		return err
+	}
+	if err := keepOwner(info, dst); err != nil {
+		return err
+	}
+	movesAsCopies.Add(1)
+	return nil
 }
 
 // Uniqueness generates unique string for file renaming/movement
