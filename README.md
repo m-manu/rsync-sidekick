@@ -115,6 +115,8 @@ flags: (all optional)
   -n, --dry-run                           show what would be done, but don't actually perform any actions
   -x, --exclusions string                 path to file containing newline separated list of file/directory names to be excluded
                                           (even if this is not set, files/directories such these will still be ignored: $RECYCLE.BIN, desktop.ini, Thumbs.db etc.)
+      --hash-min-size string              never hash files smaller than this size, e.g. '512k' - unlike --min-size they stay in the scans:
+                                          rsync transfers them, and with --copy-list they go straight into the list (no second rsync pass)
   -h, --help                              display help
       --ignore-extension                  match files by size and content only, not by file extension
                                           (finds copies whose names differ, e.g. an archive that names files by their hash)
@@ -142,7 +144,7 @@ flags: (all optional)
   -i, --ssh-key string                    path to SSH private key for remote connections
   -d, --sync-dir-timestamps               also propagate directory timestamps from source to destination
   -v, --verbose                           logs every single action performed, plus extra information (caution: makes it slow!)
-      --version                           show application version (v2.11.0) and exit
+      --version                           show application version (v2.12.0) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```
@@ -256,8 +258,9 @@ rsync-sidekick --apply-plan=plan.jsonl /backup/data/
   source changed after step 1). Existing targets are never overwritten, so the step can be repeated. Targets get their
   own mtime from the plan; mode, owner and group come from the original. `-n` shows what would happen.
 - Only orphans sharing their size (and extension, unless `--ignore-extension`) with another orphan are hashed.
-- Files below `--min-size` are never scanned, so they are missing from `copy.txt`: transfer them separately, e.g.
-  `rsync -a --ignore-existing --max-size=1M …`.
+- Small files: hashing one costs a disk seek or two, transferring it costs less below a few hundred KiB. Use
+  `--hash-min-size 512k`: smaller files are never hashed but still go into `copy.txt`, so one rsync pass covers
+  everything. (Files below `--min-size` are not scanned at all and would need a second rsync pass.)
 - Needs remote-execution mode with the source on the remote side.
 
 ### Scanning only some folders (`--include-dir`, `--include-from`)

@@ -21,7 +21,7 @@ import (
 
 const (
 	applicationMajorVersion = 2
-	applicationMinorVersion = 11
+	applicationMinorVersion = 12
 	applicationPatchVersion = 0
 )
 
@@ -75,6 +75,7 @@ var flags struct {
 	copyPlan              func() copyPlanOutput
 	applyPlanPath         func() string
 	includeDirs           func() ([]string, error)
+	hashMinSize           func() int64
 }
 
 func setupExclusionsOpt() {
@@ -259,6 +260,25 @@ func setupMinSizeOpt() {
 		size, err := bytesutil.ParseBinarySize(*minSizePtr)
 		if err != nil {
 			fmte.PrintfErr("error: argument to flag --%s is invalid: %+v\n", minSizeFlag, err)
+			flag.Usage()
+			os.Exit(exitCodeInvalidMinSize)
+		}
+		return size
+	}
+}
+
+func setupHashMinSizeOpt() {
+	const hashMinSizeFlag = "hash-min-size"
+	hashMinSizePtr := flag.String(hashMinSizeFlag, "",
+		"never hash files smaller than this size, e.g. '512k' - unlike --min-size they stay in the scans:\n"+
+			"rsync transfers them, and with --copy-list they go straight into the list (no second rsync pass)")
+	flags.hashMinSize = func() int64 {
+		if *hashMinSizePtr == "" {
+			return 0
+		}
+		size, err := bytesutil.ParseBinarySize(*hashMinSizePtr)
+		if err != nil {
+			fmte.PrintfErr("error: argument to flag --%s is invalid: %+v\n", hashMinSizeFlag, err)
 			flag.Usage()
 			os.Exit(exitCodeInvalidMinSize)
 		}
@@ -486,6 +506,7 @@ func setupFlags() {
 	setupIgnoreExtensionOpt()
 	setupCopyPlanOpt()
 	setupIncludeDirOpt()
+	setupHashMinSizeOpt()
 	setupUsage()
 }
 
@@ -581,6 +602,10 @@ func main() {
 	if minSize := flags.minSize(); minSize > 0 {
 		rsfs.DefaultMinSize = minSize
 		fmte.Printf("Ignoring files smaller than %s\n", bytesutil.BinaryFormat(minSize))
+	}
+	if size := flags.hashMinSize(); size > 0 {
+		hashMinSize = size
+		fmte.Printf("Not hashing files smaller than %s\n", bytesutil.BinaryFormat(size))
 	}
 
 	// Set --one-file-system defaults for LocalFS instances

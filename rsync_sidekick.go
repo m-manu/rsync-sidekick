@@ -157,7 +157,8 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		lib.WriteSliceToFile(orphansAtSource, fmt.Sprintf("./info_%s_orphans_at_source.txt", runID))
 	}
 	fmte.Printf("Finding candidates at destination...\n")
-	candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, orphansAtSource)
+	hashable := hashableOrphans(orphansAtSource, sourceFiles)
+	candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, hashable)
 	var actions []action.SyncAction
 	// Digests computed while matching moves; reused by the archive scan below. Empty when
 	// there were no candidates at destination, in which case that phase never ran.
@@ -179,7 +180,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 		matcher := service.NewDestMatcher(sourceDirPath, sourceFiles, destinationDirPath, destinationFiles, destFS,
 			copyDuplicates, useReflink)
 		var syncErr error
-		actions, syncErr = streamDestinationPhase(matcher, orphansAtSource, candidatesAtDestination,
+		actions, syncErr = streamDestinationPhase(matcher, hashable, candidatesAtDestination,
 			func(chunk []string) (map[string]entity.FileDigest, error) {
 				return service.BatchDigestsWorkers(sourceFS, sourceDirPath, chunk, &sourceCounter, sourceWorkers), nil
 			},
@@ -221,7 +222,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 			}
 		}
 		var unmatchedOrphans []string
-		for _, o := range orphansAtSource {
+		for _, o := range hashable {
 			if !resolvedOrphans.Contains(o) {
 				unmatchedOrphans = append(unmatchedOrphans, o)
 			}
@@ -593,6 +594,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 
 	fmte.Printf("Finding files at source that don't have counterparts at destination...\n")
 	orphansAtSource := service.FindOrphans(sourceFiles, destinationFiles)
+	hashable := hashableOrphans(orphansAtSource, sourceFiles)
 
 	var actions []action.SyncAction
 	// Digests computed while matching moves; reused by the archive scan below. Empty when
@@ -607,7 +609,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 		fmte.Printf("Found %d files\n", len(orphansAtSource))
 
 		fmte.Printf("Finding candidates at destination...\n")
-		candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, orphansAtSource)
+		candidatesAtDestination := findCandidatesAtDestination(sourceFiles, destinationFiles, hashable)
 		if len(candidatesAtDestination) == 0 {
 			fmte.Printf("No candidates found. Looks like all %d files are new. rsync will do the rest.\n", len(orphansAtSource))
 		} else {
@@ -645,7 +647,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 				matcher.AlwaysCreateParentDirs()
 			}
 			var streamErr error
-			actions, streamErr = streamDestinationPhase(matcher, orphansAtSource, candidatesAtDestination,
+			actions, streamErr = streamDestinationPhase(matcher, hashable, candidatesAtDestination,
 				hashOrphans, hashCandidates, &sourceDone, &destinationDone, applier, progressFrequency)
 			if streamErr != nil {
 				return streamErr
@@ -687,7 +689,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			}
 		}
 		var unmatchedOrphans []string
-		for _, o := range orphansAtSource {
+		for _, o := range hashable {
 			if !resolvedOrphans.Contains(o) {
 				unmatchedOrphans = append(unmatchedOrphans, o)
 			}

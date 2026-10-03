@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -81,15 +82,43 @@ func unresolvedOrphans(orphans []string, actions []action.SyncAction, destDirPat
 	return unresolved
 }
 
+// hashMinSize keeps files smaller than this away from hashing (--hash-min-size); zero
+// hashes every size. Such files stay orphans: rsync transfers them, and with --copy-list
+// they go straight into the list.
+var hashMinSize int64
+
+// hashableOrphans returns the orphans of at least hashMinSize, in path order.
+func hashableOrphans(orphans []string, sourceFiles map[string]entity.FileMeta) []string {
+	hashable := make([]string, 0, len(orphans))
+	for _, orphan := range orphans {
+		if sourceFiles[orphan].Size >= hashMinSize {
+			hashable = append(hashable, orphan)
+		}
+	}
+	slices.Sort(hashable)
+	return hashable
+}
+
 func writeCopyPlan(plan copyPlanOutput, orphans []string, actions []action.SyncAction,
 	archiveResolved set.Set[string], destDirPath string, sourceFiles map[string]entity.FileMeta,
 	knownDigests map[string]entity.FileDigest, digestFn service.OrphanDigestFunc,
 ) error {
 	unresolved := unresolvedOrphans(orphans, actions, destDirPath, archiveResolved)
-	fmte.Printf("Building copy plan for %d files nothing at destination can serve...\n", len(unresolved))
-	copyList, groups, err := service.BuildCopyPlan(unresolved, sourceFiles, knownDigests, digestFn)
+	toPlan := hashableOrphans(unresolved, sourceFiles)
+	small := len(unresolved) - len(toPlan)
+	fmte.Printf("Building copy plan for %d files nothing at destination can serve (%d below --hash-min-size go straight to the list)...\n",
+		len(unresolved), small)
+	copyList, groups, err := service.BuildCopyPlan(toPlan, sourceFiles, knownDigests, digestFn)
 	if err != nil {
 		return err
+	}
+	if small > 0 {
+		for _, orphan := range unresolved {
+			if sourceFiles[orphan].Size < hashMinSize {
+				copyList = append(copyList, orphan)
+			}
+		}
+		slices.Sort(copyList)
 	}
 	var transferBytes, savedBytes int64
 	targets := 0
