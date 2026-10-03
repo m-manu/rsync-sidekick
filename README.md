@@ -216,7 +216,17 @@ rsync-sidekick -c --reflink /Users/manu/Photos/ /mnt/btrfs-backup/Photos/
 ### Transferring each content only once (`--copy-list`, `--plan-out`, `--apply-plan`)
 
 When the source holds the same content at several paths that are all missing at the destination, plain
-`rsync` transfers every copy. These three flags split the job so each content crosses the network once:
+`rsync` transfers every copy. These three flags split the job so each content crosses the network once.
+
+Example: a backup lost three folders. At source, `Movies/a.mkv`, `Archive/2024/a.mkv` and `Old/a-copy.mkv` are the
+same 8 GiB file, and none of them is at the destination any more. `rsync` alone sends 24 GiB; with the steps below,
+8 GiB go over the network and the other two paths become reflinks of the first one.
+
+```text
+copy.txt    Archive/2024/a.mkv                      ← rsync transfers this one
+plan.jsonl  {"dg":"s…","sz":8589934592,"o":{"p":"Archive/2024/a.mkv","mt":…},
+             "t":[{"p":"Movies/a.mkv","mt":…},{"p":"Old/a-copy.mkv","mt":…}]}
+```
 
 ```bash
 # 1. as usual, plus: write what rsync still has to transfer, and the duplicate groups
