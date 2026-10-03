@@ -27,10 +27,12 @@ const (
 )
 
 // archiveMatchChunkSize is how many archive candidates are hashed and matched before the
-// next batch starts. It exists so the first copies land on disk after minutes rather than
-// after the last hash of the whole path. Large enough that per-chunk overhead and the
-// parallel hashing stay worthwhile; a variable only so tests can shrink it.
-var archiveMatchChunkSize = 10_000
+// next batch starts. It exists so matches show up, and copies land on disk, soon rather
+// than after the last hash of the whole path. The candidates are sorted by inode before
+// they are cut into chunks, so smaller chunks keep the disk order; what a chunk costs is
+// the workers waiting for its slowest file, about 1% at this size. A variable only so
+// tests can shrink it.
+var archiveMatchChunkSize = 1_000
 
 // FindOrphans finds files at source that do not have corresponding files at destination.
 // File at destination must exist and have same size and same modified timestamp.
