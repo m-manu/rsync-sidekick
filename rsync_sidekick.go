@@ -56,22 +56,16 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 	wgDirScan.Add(2)
 	go func() {
 		defer wgDirScan.Done()
-		if sourceFS != nil {
-			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectoryWithFS(sourceFS, sourceDirPath, exclusions, &scanSourceCounter)
-		} else {
-			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions, &scanSourceCounter)
-		}
+		sourceFiles, _, sourceSize, sourceFilesErr = walkIncluded(sourceDirPath, nil,
+			filesWalk(sourceFS, exclusions, &scanSourceCounter, false))
 		atomic.StoreInt32(&sourceScanDone, 1)
 	}()
 	destWalkDone := make(chan struct{})
 	go func() {
 		defer wgDirScan.Done()
 		defer close(destWalkDone)
-		if destFS != nil {
-			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectoryWithFS(destFS, destinationDirPath, exclusions, &scanDestCounter)
-		} else {
-			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectory(destinationDirPath, exclusions, &scanDestCounter)
-		}
+		destinationFiles, _, destinationSize, destinationFilesErr = walkIncluded(destinationDirPath,
+			missingLocally(destFS), filesWalk(destFS, exclusions, &scanDestCounter, false))
 		atomic.StoreInt32(&destScanDone, 1)
 	}()
 
@@ -89,7 +83,7 @@ func getSyncActionsWithProgressFS(runID string, sourceDirPath string, sourceFS r
 			<-destWalkDone
 			if destinationFilesErr == nil {
 				archiveWalks, archiveWalkErr = service.WalkArchivesKnowing(archivePaths, exclusions, destFS,
-					&scanArchiveCounter, &service.KnownTree{Root: destinationDirPath, Files: destinationFiles})
+					&scanArchiveCounter, knownDestinationTree(destinationDirPath, destinationFiles))
 			}
 			atomic.StoreInt32(&archiveScanDone, 1)
 		}()
@@ -448,13 +442,12 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 	go func() {
 		defer wgDirScan.Done()
 		if sourceIsRemote {
-			sourceFiles, sourceDirs, sourceSize, sourceFilesErr = agentClient.Walk(sourceDirPath, excludedNames, &remoteScanCounter, intervalMs, rsfs.DefaultOneFileSystem)
+			sourceFiles, sourceDirs, sourceSize, sourceFilesErr = walkIncluded(sourceDirPath, nil,
+				agentWalk(agentClient, excludedNames, &remoteScanCounter, intervalMs))
 			atomic.StoreInt32(&remoteScanDone, 1)
 		} else {
-			sourceFiles, sourceSize, sourceFilesErr = service.FindFilesFromDirectory(sourceDirPath, exclusions, &localScanCounter)
-			if sourceFilesErr == nil && syncDirTimestamps {
-				sourceDirs, sourceFilesErr = service.FindDirsFromDirectory(sourceDirPath, exclusions)
-			}
+			sourceFiles, sourceDirs, sourceSize, sourceFilesErr = walkIncluded(sourceDirPath, nil,
+				filesWalk(nil, exclusions, &localScanCounter, syncDirTimestamps))
 			atomic.StoreInt32(&localScanDone, 1)
 		}
 	}()
@@ -463,13 +456,12 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 		defer wgDirScan.Done()
 		defer close(destWalkDone)
 		if sourceIsRemote {
-			destinationFiles, destinationSize, destinationFilesErr = service.FindFilesFromDirectory(destDirPath, exclusions, &localScanCounter)
-			if destinationFilesErr == nil && syncDirTimestamps {
-				destDirs, destinationFilesErr = service.FindDirsFromDirectory(destDirPath, exclusions)
-			}
+			destinationFiles, destDirs, destinationSize, destinationFilesErr = walkIncluded(destDirPath,
+				localDirMissing, filesWalk(nil, exclusions, &localScanCounter, syncDirTimestamps))
 			atomic.StoreInt32(&localScanDone, 1)
 		} else {
-			destinationFiles, destDirs, destinationSize, destinationFilesErr = agentClient.Walk(destDirPath, excludedNames, &remoteScanCounter, intervalMs, rsfs.DefaultOneFileSystem)
+			destinationFiles, destDirs, destinationSize, destinationFilesErr = walkIncluded(destDirPath, nil,
+				agentWalk(agentClient, excludedNames, &remoteScanCounter, intervalMs))
 			atomic.StoreInt32(&remoteScanDone, 1)
 		}
 	}()
@@ -495,7 +487,7 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 			if destinationFilesErr == nil {
 				if archivesAreLocal {
 					archiveWalks, archiveWalkErr = service.WalkArchivesKnowing(archivePaths, exclusions, nil,
-						&scanArchiveCounter, &service.KnownTree{Root: destDirPath, Files: destinationFiles})
+						&scanArchiveCounter, knownDestinationTree(destDirPath, destinationFiles))
 				} else {
 					archiveWalks, archiveWalkErr = walkArchivesViaAgent(agentClient, archivePaths,
 						excludedNames, &scanArchiveCounter, intervalMs)
@@ -1266,19 +1258,11 @@ func computeDirTimestampActions(sourceDirPath string, sourceFS rsfs.FileSystem,
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if sourceFS != nil {
-			sourceDirs, srcErr = service.FindDirsFromDirectoryWithFS(sourceFS, sourceDirPath, exclusions)
-		} else {
-			sourceDirs, srcErr = service.FindDirsFromDirectory(sourceDirPath, exclusions)
-		}
+		_, sourceDirs, _, srcErr = walkIncluded(sourceDirPath, nil, dirsWalk(sourceFS, exclusions))
 	}()
 	go func() {
 		defer wg.Done()
-		if destFS != nil {
-			destDirs, dstErr = service.FindDirsFromDirectoryWithFS(destFS, destDirPath, exclusions)
-		} else {
-			destDirs, dstErr = service.FindDirsFromDirectory(destDirPath, exclusions)
-		}
+		_, destDirs, _, dstErr = walkIncluded(destDirPath, missingLocally(destFS), dirsWalk(destFS, exclusions))
 	}()
 	wg.Wait()
 	if srcErr != nil {

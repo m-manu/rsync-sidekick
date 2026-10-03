@@ -21,7 +21,7 @@ import (
 
 const (
 	applicationMajorVersion = 2
-	applicationMinorVersion = 7
+	applicationMinorVersion = 8
 	applicationPatchVersion = 0
 )
 
@@ -74,6 +74,7 @@ var flags struct {
 	remoteDigestCachePath func() (string, bool)
 	copyPlan              func() copyPlanOutput
 	applyPlanPath         func() string
+	includeDirs           func() ([]string, error)
 }
 
 func setupExclusionsOpt() {
@@ -421,6 +422,25 @@ func setupCopyPlanOpt() {
 	}
 }
 
+func setupIncludeDirOpt() {
+	includeDirPtr := flag.StringArray("include-dir", nil,
+		"only scan this directory below source and destination root (relative path; can be specified multiple\n"+
+			"times; shell wildcards like 'Backup*' or 'Backup/*/data' are allowed; archive paths are not limited)")
+	includeFromPtr := flag.String("include-from", "",
+		"read --include-dir entries from this file, one per line (empty lines and lines starting with # are ignored)")
+	flags.includeDirs = func() ([]string, error) {
+		dirs := append([]string{}, *includeDirPtr...)
+		if *includeFromPtr != "" {
+			fromFile, err := readIncludeFile(*includeFromPtr)
+			if err != nil {
+				return nil, fmt.Errorf("cannot read --include-from file: %w", err)
+			}
+			dirs = append(dirs, fromFile...)
+		}
+		return normalizeIncludeDirs(dirs)
+	}
+}
+
 func setupFlags() {
 	setupHelpOpt()
 	setupExclusionsOpt()
@@ -444,6 +464,7 @@ func setupFlags() {
 	setupDigestCacheOpt()
 	setupIgnoreExtensionOpt()
 	setupCopyPlanOpt()
+	setupIncludeDirOpt()
 	setupUsage()
 }
 
@@ -521,6 +542,16 @@ func main() {
 
 	if flags.ignoreExtension() {
 		lib.IgnoreFileExtension = true
+	}
+
+	dirs, includeErr := flags.includeDirs()
+	if includeErr != nil {
+		fmte.PrintfErr("error: %+v\n", includeErr)
+		os.Exit(exitCodeInvalidNumArgs)
+	}
+	includeDirs = dirs
+	if len(includeDirs) > 0 {
+		fmte.Printf("Scanning only: %s\n", strings.Join(includeDirs, ", "))
 	}
 
 	// --min-size applies to every walk, local and remote alike.

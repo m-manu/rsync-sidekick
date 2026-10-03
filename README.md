@@ -117,6 +117,9 @@ flags: (all optional)
   -h, --help                              display help
       --ignore-extension                  match files by size and content only, not by file extension
                                           (finds copies whose names differ, e.g. an archive that names files by their hash)
+      --include-dir stringArray           only scan this directory below source and destination root (relative path; can be specified multiple
+                                          times; shell wildcards like 'Backup*' or 'Backup/*/data' are allowed; archive paths are not limited)
+      --include-from string               read --include-dir entries from this file, one per line (empty lines and lines starting with # are ignored)
       --list                              list files along their metadata for given directory
       --min-size string                   ignore files smaller than this size, e.g. '1M', '512k', '2g'
                                           (they are left out of every directory scan, so they are never hashed;
@@ -138,7 +141,7 @@ flags: (all optional)
   -i, --ssh-key string                    path to SSH private key for remote connections
   -d, --sync-dir-timestamps               also propagate directory timestamps from source to destination
   -v, --verbose                           logs every single action performed, plus extra information (caution: makes it slow!)
-      --version                           show application version (v2.7.0) and exit
+      --version                           show application version (v2.8.0) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```
@@ -248,6 +251,24 @@ rsync-sidekick --apply-plan=plan.jsonl /backup/data/
 - Files below `--min-size` are never scanned, so they are missing from `copy.txt`: transfer them separately, e.g.
   `rsync -a --ignore-existing --max-size=1M …`.
 - Needs remote-execution mode with the source on the remote side.
+
+### Scanning only some folders (`--include-dir`, `--include-from`)
+
+To work on a few folders of a large tree while keeping paths relative to its root (and finding duplicates across those
+folders), name them with `--include-dir`:
+
+```bash
+rsync-sidekick --include-dir FastDrive --include-dir 'Backup*' --include-dir 'Media/*/2024' \
+    -c --reflink user@server:/data/ /backup/data/
+```
+
+- Paths are relative to the source and destination root; source and destination are both limited to them.
+- Shell wildcards (`*`, `?`, `[...]`) work per path component. The walk starts at the last component without a
+  wildcard, so `Backup*` walks the whole root and filters, while `Media/*/2024` only walks `Media`.
+- An include directory missing at a local destination simply contributes nothing; at the source it is an error.
+- `--archive-path` is not limited: `-a /backup/data` keeps the whole destination available as a copy source.
+- `--include-from <file>` reads one entry per line; empty lines and lines starting with `#` are ignored.
+- Unlike `--exclusions`, which matches names anywhere in the tree, include directories match paths from the root.
 
 ### Skipping small files (`--min-size`)
 
