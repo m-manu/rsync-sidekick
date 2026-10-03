@@ -277,10 +277,14 @@ rsync-sidekick --apply-plan=plan.jsonl /backup/data/
 
   ```bash
   split -l 100000 -d -a 3 copy.txt copy-part-
-  for f in copy-part-*; do rsync -aHAX --files-from="$f" user@server:/data/ /backup/data/ || break; done
+  for f in copy-part-*; do
+    rsync -aHAX --files-from="$f" user@server:/data/ /backup/data/
+    rc=$?; [ $rc -eq 0 ] || [ $rc -eq 23 ] || [ $rc -eq 24 ] || break
+  done
   ```
 
-  If a piece fails, the loop stops; start again from that piece.
+  Exit codes 23 and 24 mean single files have vanished at the source since the list was written (`link_stat …
+  failed: No such file or directory`); the loop goes on. Any other error stops it; start again from that piece.
 
 ### Scanning only some folders (`--include-dir`, `--include-from`)
 
