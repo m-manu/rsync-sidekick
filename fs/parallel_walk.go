@@ -5,11 +5,13 @@ import "sync"
 // walkParallel walks a directory tree with threads workers that share one queue of
 // directories. visit reads one directory and returns its entries plus the subdirectories
 // still to walk. Each worker collects its entries on its own; a worker that finds the
-// queue empty waits as long as another one may still add subdirectories.
+// queue empty waits as long as another one may still add subdirectories. With emit set,
+// the entries of each directory go to emit right away instead (from several workers at
+// once) and nothing is returned.
 //
 // Several outstanding requests keep all disks of an array busy and let the I/O scheduler
 // sort the seeks. The order of the result is not defined.
-func walkParallel[D any](root D, threads int, visit func(D) ([]DirEntry, []D)) []DirEntry {
+func walkParallel[D any](root D, threads int, visit func(D) ([]DirEntry, []D), emit func([]DirEntry)) []DirEntry {
 	threads = max(threads, 1)
 	var mu sync.Mutex
 	queueChanged := sync.NewCond(&mu)
@@ -36,7 +38,13 @@ func walkParallel[D any](root D, threads int, visit func(D) ([]DirEntry, []D)) [
 				mu.Unlock()
 
 				entries, subdirs := visit(dir)
-				perWorker[w] = append(perWorker[w], entries...)
+				if emit != nil {
+					if len(entries) > 0 {
+						emit(entries)
+					}
+				} else {
+					perWorker[w] = append(perWorker[w], entries...)
+				}
 
 				mu.Lock()
 				queue = append(queue, subdirs...)

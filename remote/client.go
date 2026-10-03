@@ -55,6 +55,9 @@ type pendingRequest struct {
 	respCh  chan *Envelope
 	counter *int32
 	base    int32
+	// onChunk takes the WalkChunk messages of a chunked walk, on the reading goroutine and
+	// in order, so all of them are handled before the closing response is delivered.
+	onChunk func(payload []byte)
 }
 
 // counterValue reads a counter that may be nil.
@@ -158,6 +161,10 @@ func (c *AgentClient) route(env *Envelope) {
 		if pending.counter != nil && json.Unmarshal(env.Payload, &progress) == nil {
 			atomic.StoreInt32(pending.counter, pending.base+int32(progress.FilesHashed))
 		}
+	case MsgWalkChunk:
+		if pending.onChunk != nil {
+			pending.onChunk(env.Payload)
+		}
 	default:
 		// respCh has room for exactly the one terminal message.
 		select {
@@ -232,9 +239,11 @@ func (c *AgentClient) Walk(dirPath string, excludedNames []string, counter *int3
 	req := WalkRequest{
 		DirPath: dirPath, ExcludedNames: excludedNames, ProgressIntervalMs: progressIntervalMs,
 		OneFileSystem: oneFileSystem, MinSize: rsfs.DefaultMinSize, WalkThreads: rsfs.DefaultWalkThreads,
+		ChunkSize: walkChunkSize,
 	}
 	base := counterValue(counter)
-	env, err := c.roundTrip(MsgWalkRequest, req, counter)
+	chunked := newChunkedWalk(counter, base)
+	env, err := c.roundTripChunked(MsgWalkRequest, req, counter, chunked.add)
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -245,6 +254,10 @@ func (c *AgentClient) Walk(dirPath string, excludedNames []string, counter *int3
 	if err := json.Unmarshal(env.Payload, &walkResp); err != nil {
 		return nil, nil, 0, fmt.Errorf("bad walk response: %w", err)
 	}
+	if walkResp.Chunked {
+		return chunked.result(walkResp)
+	}
+	// An agent that doesn't know ChunkSize sends everything in the response.
 	files := make(map[string]entity.FileMeta, len(walkResp.Files))
 	totalSize := walkResp.TotalSize
 	for p, fm := range walkResp.Files {
@@ -262,6 +275,64 @@ func (c *AgentClient) Walk(dirPath string, excludedNames []string, counter *int3
 		atomic.StoreInt32(counter, base+int32(len(files)))
 	}
 	return files, walkResp.Dirs, totalSize, nil
+}
+
+// walkChunkSize is how many entries a WalkChunk carries: about 1 MB of JSON, small enough
+// to keep memory flat, large enough that per-message overhead doesn't matter. A variable
+// so tests can split small trees into several chunks.
+var walkChunkSize = 10_000
+
+// chunkedWalk collects the WalkChunk messages of one walk.
+type chunkedWalk struct {
+	counter   *int32
+	base      int32
+	files     map[string]entity.FileMeta
+	dirs      map[string]int64
+	totalSize int64
+	entries   int
+	err       error
+}
+
+func newChunkedWalk(counter *int32, base int32) *chunkedWalk {
+	return &chunkedWalk{counter: counter, base: base, files: make(map[string]entity.FileMeta),
+		dirs: make(map[string]int64)}
+}
+
+// add takes one chunk. The file count doubles as the walk's progress.
+func (w *chunkedWalk) add(payload []byte) {
+	var chunk WalkChunk
+	if err := json.Unmarshal(payload, &chunk); err != nil {
+		if w.err == nil {
+			w.err = fmt.Errorf("bad walk chunk: %w", err)
+		}
+		return
+	}
+	w.entries += len(chunk.Entries)
+	for _, e := range chunk.Entries {
+		if e.IsDir {
+			w.dirs[e.Path] = e.ModTime
+			continue
+		}
+		if rsfs.SkipBySize(false, e.Size) {
+			continue
+		}
+		w.files[e.Path] = entity.FileMeta{Size: e.Size, ModifiedTimestamp: e.ModTime}
+		w.totalSize += e.Size
+	}
+	if w.counter != nil {
+		atomic.StoreInt32(w.counter, w.base+int32(len(w.files)))
+	}
+}
+
+// result checks that every chunk arrived and returns what they carried.
+func (w *chunkedWalk) result(resp WalkResponse) (map[string]entity.FileMeta, map[string]int64, int64, error) {
+	if w.err != nil {
+		return nil, nil, 0, w.err
+	}
+	if w.entries != resp.Entries {
+		return nil, nil, 0, fmt.Errorf("walk incomplete: received %d of %d entries", w.entries, resp.Entries)
+	}
+	return w.files, w.dirs, w.totalSize, nil
 }
 
 // BatchDigest asks the remote agent to compute digests for a batch of files.
@@ -351,6 +422,13 @@ func (c *AgentClient) Close() error {
 // roundTrip sends one request and waits for its terminal message. Progress messages are
 // applied to counter along the way.
 func (c *AgentClient) roundTrip(msgType string, payload interface{}, counter *int32) (*Envelope, error) {
+	return c.roundTripChunked(msgType, payload, counter, nil)
+}
+
+// roundTripChunked is roundTrip with a handler for WalkChunk messages.
+func (c *AgentClient) roundTripChunked(msgType string, payload interface{}, counter *int32,
+	onChunk func(payload []byte),
+) (*Envelope, error) {
 	if !c.concurrent {
 		// Without ID echoing, a second request in flight would make responses ambiguous.
 		c.opMu.Lock()
@@ -358,7 +436,8 @@ func (c *AgentClient) roundTrip(msgType string, payload interface{}, counter *in
 	}
 
 	id := c.nextID.Add(1)
-	pending := &pendingRequest{respCh: make(chan *Envelope, 1), counter: counter, base: counterValue(counter)}
+	pending := &pendingRequest{respCh: make(chan *Envelope, 1), counter: counter, base: counterValue(counter),
+		onChunk: onChunk}
 	c.pendingMu.Lock()
 	c.pending[id] = pending
 	c.pendingMu.Unlock()

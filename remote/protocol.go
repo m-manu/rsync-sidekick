@@ -8,6 +8,7 @@ const (
 	MsgWalkRequest     = "walk_request"
 	MsgWalkProgress    = "walk_progress"
 	MsgWalkResponse    = "walk_response"
+	MsgWalkChunk       = "walk_chunk"
 	MsgDigestRequest   = "digest_request"
 	MsgDigestProgress  = "digest_progress"
 	MsgDigestResponse  = "digest_response"
@@ -65,6 +66,23 @@ type WalkRequest struct {
 	OneFileSystem      bool     `json:"one_file_system,omitempty"`
 	// WalkThreads mirrors --walk-threads; an agent that doesn't know it walks with its default.
 	WalkThreads int `json:"walk_threads,omitempty"`
+	// ChunkSize asks for the entries in WalkChunk messages of up to this many entries, sent
+	// while the walk runs, instead of all of them in the WalkResponse. An agent that
+	// doesn't know it answers the old way, which clients still accept.
+	ChunkSize int `json:"chunk_size,omitempty"`
+}
+
+// WalkChunk carries part of the entries of a walk asked for with ChunkSize.
+type WalkChunk struct {
+	Entries []WalkEntry `json:"entries"`
+}
+
+// WalkEntry is a file or directory of a WalkChunk, with short keys as there are millions.
+type WalkEntry struct {
+	Path    string `json:"p"`
+	Size    int64  `json:"s,omitempty"`
+	ModTime int64  `json:"m"`
+	IsDir   bool   `json:"d,omitempty"`
 }
 
 // WalkProgress is sent by the agent periodically during a directory scan.
@@ -78,11 +96,15 @@ type FileMeta struct {
 	ModifiedTimestamp int64 `json:"modified_timestamp"`
 }
 
-// WalkResponse returns the file map and optionally directory timestamps.
+// WalkResponse returns the file map and optionally directory timestamps. After WalkChunk
+// messages it only closes the walk: Files and Dirs stay empty and Entries tells how many
+// entries the chunks carried, so a lost chunk can't go unnoticed.
 type WalkResponse struct {
 	Files     map[string]FileMeta `json:"files"`
 	Dirs      map[string]int64    `json:"dirs,omitempty"`
 	TotalSize int64               `json:"total_size"`
+	Entries   int                 `json:"entries,omitempty"`
+	Chunked   bool                `json:"chunked,omitempty"`
 }
 
 // DigestRequest asks the agent to hash a batch of files.

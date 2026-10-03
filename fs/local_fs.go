@@ -51,9 +51,24 @@ func NewLocalFSForArchive() *LocalFS {
 }
 
 func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}, counter *int32) ([]DirEntry, error) {
+	return l.walk(dirPath, excludedNames, counter, nil)
+}
+
+// WalkEach is Walk handing the entries to emit as they are read, a directory at a time
+// and from several goroutines at once, instead of returning them all at the end.
+func (l *LocalFS) WalkEach(dirPath string, excludedNames map[string]struct{}, counter *int32,
+	emit func([]DirEntry),
+) error {
+	_, err := l.walk(dirPath, excludedNames, counter, emit)
+	return err
+}
+
+func (l *LocalFS) walk(dirPath string, excludedNames map[string]struct{}, counter *int32,
+	emit func([]DirEntry),
+) ([]DirEntry, error) {
 	// Use BTRFS-optimized walk if available (batch ioctl instead of per-file stat)
 	if !l.OneFileSystem && IsBtrfs(dirPath) {
-		entries, err := BtrfsWalk(dirPath, excludedNames, counter)
+		entries, err := btrfsWalk(dirPath, excludedNames, counter, emit)
 		if err == nil {
 			return entries, nil
 		}
@@ -78,7 +93,7 @@ func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}, counte
 	return walkParallel(standardDir{absPath: dirPath}, DefaultWalkThreads,
 		func(dir standardDir) ([]DirEntry, []standardDir) {
 			return readStandardDir(dir, excludedNames, counter, skipDir)
-		}), nil
+		}, emit), nil
 }
 
 // standardDir is a directory for readStandardDir.

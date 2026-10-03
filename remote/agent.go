@@ -142,6 +142,11 @@ func handleWalk(w *requestWriter, payload []byte) {
 		rsfs.DefaultWalkThreads = req.WalkThreads
 	}
 
+	if req.ChunkSize > 0 {
+		handleWalkChunked(w, req)
+		return
+	}
+
 	excluded := set.NewThreadUnsafeSetWithSize[string](len(req.ExcludedNames))
 	for _, name := range req.ExcludedNames {
 		excluded.Add(name)
@@ -190,6 +195,55 @@ func handleWalk(w *requestWriter, payload []byte) {
 	}
 
 	writeResponse(w, MsgWalkResponse, resp)
+}
+
+// handleWalkChunked sends the entries in WalkChunk messages while the walk runs, so
+// neither side ever holds the whole tree as one message. The chunks double as progress.
+func handleWalkChunked(w *requestWriter, req WalkRequest) {
+	excluded := make(map[string]struct{}, len(req.ExcludedNames))
+	for _, name := range req.ExcludedNames {
+		excluded[name] = struct{}{}
+	}
+	var mu sync.Mutex
+	batch := make([]WalkEntry, 0, req.ChunkSize)
+	sent := 0
+	var totalSize int64
+	// The full batch is swapped out under the lock and sent outside it, so the walk
+	// workers keep reading while a chunk is on the wire.
+	send := func(entries []WalkEntry) {
+		writeResponse(w, MsgWalkChunk, WalkChunk{Entries: entries})
+	}
+	emit := func(entries []rsfs.DirEntry) {
+		var full []WalkEntry
+		mu.Lock()
+		for _, e := range entries {
+			batch = append(batch, WalkEntry{Path: e.RelativePath, Size: e.Size, ModTime: e.ModTime, IsDir: e.IsDir})
+			if !e.IsDir {
+				totalSize += e.Size
+			}
+		}
+		if len(batch) >= req.ChunkSize {
+			full, batch = batch, make([]WalkEntry, 0, req.ChunkSize)
+			sent += len(full)
+		}
+		mu.Unlock()
+		if full != nil {
+			send(full)
+		}
+	}
+
+	err := rsfs.NewLocalFS().WalkEach(req.DirPath, excluded, nil, emit)
+	if err != nil {
+		writeError(w, fmt.Sprintf("walk failed: %v", err))
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(batch) > 0 {
+		sent += len(batch)
+		send(batch)
+	}
+	writeResponse(w, MsgWalkResponse, WalkResponse{TotalSize: totalSize, Entries: sent, Chunked: true})
 }
 
 func handleDigest(w *requestWriter, payload []byte) {

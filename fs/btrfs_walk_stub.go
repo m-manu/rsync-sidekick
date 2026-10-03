@@ -13,3 +13,7 @@ func IsBtrfs(path string) bool {
 func BtrfsWalk(dirPath string, excludedNames map[string]struct{}, counter *int32) ([]DirEntry, error) {
 	return nil, ErrNotBtrfs
 }
+
+func btrfsWalk(string, map[string]struct{}, *int32, func([]DirEntry)) ([]DirEntry, error) {
+	return nil, ErrNotBtrfs
+}

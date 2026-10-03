@@ -315,6 +315,13 @@ func readInodeItems(fd int, treeID uint64, minInode, maxInode uint64) (map[uint6
 var ErrNotBtrfs = fmt.Errorf("not a btrfs filesystem")
 
 func BtrfsWalk(dirPath string, excludedNames map[string]struct{}, counter *int32) ([]DirEntry, error) {
+	return btrfsWalk(dirPath, excludedNames, counter, nil)
+}
+
+// btrfsWalk is BtrfsWalk, handing the entries to emit as they are read when it is set.
+// It only fails before the first entry is read.
+func btrfsWalk(dirPath string, excludedNames map[string]struct{}, counter *int32, emit func([]DirEntry),
+) ([]DirEntry, error) {
 	if !IsBtrfs(dirPath) {
 		return nil, ErrNotBtrfs
 	}
@@ -331,7 +338,7 @@ func BtrfsWalk(dirPath string, excludedNames map[string]struct{}, counter *int32
 	root := btrfsWalkItem{inodeID: rootInode, relativePath: "", absPath: dirPath, treeID: treeID}
 	return walkParallel(root, DefaultWalkThreads, func(item btrfsWalkItem) ([]DirEntry, []btrfsWalkItem) {
 		return btrfsWalkDir(fd, item, excludedNames, counter)
-	}), nil
+	}, emit), nil
 }
 
 type btrfsWalkItem struct {
