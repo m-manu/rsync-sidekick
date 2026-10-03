@@ -144,7 +144,7 @@ flags: (all optional)
   -i, --ssh-key string                    path to SSH private key for remote connections
   -d, --sync-dir-timestamps               also propagate directory timestamps from source to destination
   -v, --verbose                           logs every single action performed, plus extra information (caution: makes it slow!)
-      --version                           show application version (v2.13.2) and exit
+      --version                           show application version and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```
