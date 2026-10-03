@@ -32,10 +32,13 @@ func (a CopyFileAction) UnixCommand() string {
 	touchCmd := fmt.Sprintf(`touch -m -a -t "%s" "%s"`, timestamp, escape(a.AbsDestPath))
 
 	if a.UseReflink {
-		return fmt.Sprintf(`if [ "$(uname)" = "Darwin" ]; then cp -pv -c "%s" "%s"; else cp -pv --reflink=auto "%s" "%s"; fi && %s`,
-			escape(a.AbsSourcePath), escape(a.AbsDestPath),
-			escape(a.AbsSourcePath), escape(a.AbsDestPath),
-			touchCmd)
+		// Only GNU cp knows --reflink=auto; macOS clones with -c and has no fallback of its own.
+		src, dst := escape(a.AbsSourcePath), escape(a.AbsDestPath)
+		return fmt.Sprintf(`case "$(uname)" in `+
+			`Linux) cp -pv --reflink=auto "%s" "%s" ;; `+
+			`Darwin) cp -pv -c "%s" "%s" 2>/dev/null || cp -pv "%s" "%s" ;; `+
+			`*) cp -pv "%s" "%s" ;; esac && %s`,
+			src, dst, src, dst, src, dst, src, dst, touchCmd)
 	}
 	return fmt.Sprintf(`cp -pv "%s" "%s" && %s`,
 		escape(a.AbsSourcePath), escape(a.AbsDestPath),
@@ -50,16 +53,8 @@ func (a CopyFileAction) Perform() error {
 	}
 
 	if a.UseReflink {
-		if runtime.GOOS == "linux" {
-			if err := reflinkCopy(a.AbsSourcePath, a.AbsDestPath, srcInfo.Mode()); err != nil {
-				return err
-			}
-		} else {
-			// macOS: use cp -c
-			cmd := exec.Command("cp", "-c", "-p", a.AbsSourcePath, a.AbsDestPath)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("reflink copy failed: %w: %s", err, string(out))
-			}
+		if err := reflinkOrCopy(a.AbsSourcePath, a.AbsDestPath, srcInfo.Mode()); err != nil {
+			return err
 		}
 	} else {
 		if err := regularCopy(a.AbsSourcePath, a.AbsDestPath); err != nil {
@@ -87,6 +82,33 @@ func (a CopyFileAction) String() string {
 		verb = "reflink"
 	}
 	return fmt.Sprintf(`%s file "%s" to "%s"`, verb, sanitizePath(a.AbsSourcePath), sanitizePath(a.AbsDestPath))
+}
+
+// platform and cloneFile are variables so tests can take the other platforms' paths.
+var (
+	platform  = runtime.GOOS
+	cloneFile = func(src, dst string) error {
+		if out, err := exec.Command("cp", "-c", "-p", src, dst).CombinedOutput(); err != nil {
+			return fmt.Errorf("%w: %s", err, out)
+		}
+		return nil
+	}
+)
+
+// reflinkOrCopy reflinks src to dst where the filesystem supports it and copies it
+// otherwise: FICLONE on Linux, clonefile (cp -c) on macOS, a plain copy everywhere else.
+// Every reflink that ends up as a full copy is counted in reflinkFallbacks.
+func reflinkOrCopy(src, dst string, mode os.FileMode) error {
+	switch platform {
+	case "linux":
+		return reflinkCopy(src, dst, mode)
+	case "darwin":
+		if err := cloneFile(src, dst); err == nil {
+			return nil
+		}
+	}
+	reflinkFallbacks.Add(1)
+	return regularCopyWithMode(src, dst, mode)
 }
 
 func regularCopyWithMode(src, dst string, mode os.FileMode) error {
