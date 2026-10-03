@@ -21,8 +21,8 @@ import (
 
 const (
 	applicationMajorVersion = 2
-	applicationMinorVersion = 15
-	applicationPatchVersion = 1
+	applicationMinorVersion = 16
+	applicationPatchVersion = 0
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -49,34 +49,33 @@ const (
 var defaultExclusionsStr string
 
 var flags struct {
-	isHelp                func() bool
-	getExcludedFiles      func() set.Set[string]
-	isShellScriptMode     func() bool
-	scriptOutputPath      func() string
-	getListFilesDir       func() bool
-	isVerbose             func() bool
-	showVersion           func() bool
-	isDryRun              func() bool
-	progressFrequency     func() time.Duration
-	sshKeyPath            func() string
-	sidekickPath          func() string
-	isSFTP                func() bool
-	isAgent               func() bool
-	syncDirTimestamps     func() bool
-	copyDuplicates        func() bool
-	useReflink            func() bool
-	archivePaths          func() []string
-	oneFileSystem         func() bool
-	archiveOneFileSystem  func() bool
-	minSize               func() int64
-	ignoreExtension       func() bool
-	digestCachePath       func() string
-	remoteDigestCachePath func() (string, bool)
-	copyPlan              func() copyPlanOutput
-	applyPlanPath         func() string
-	includeDirs           func() ([]string, error)
-	hashMinSize           func() int64
-	walkThreads           func() int
+	isHelp               func() bool
+	getExcludedFiles     func() set.Set[string]
+	isShellScriptMode    func() bool
+	scriptOutputPath     func() string
+	getListFilesDir      func() bool
+	isVerbose            func() bool
+	showVersion          func() bool
+	isDryRun             func() bool
+	progressFrequency    func() time.Duration
+	sshKeyPath           func() string
+	sidekickPath         func() string
+	isSFTP               func() bool
+	isAgent              func() bool
+	syncDirTimestamps    func() bool
+	copyDuplicates       func() bool
+	useReflink           func() bool
+	archivePaths         func() []string
+	oneFileSystem        func() bool
+	archiveOneFileSystem func() bool
+	minSize              func() int64
+	ignoreExtension      func() bool
+	digestCache          func() digestCacheOptions
+	copyPlan             func() copyPlanOutput
+	applyPlanPath        func() string
+	includeDirs          func() ([]string, error)
+	hashMinSize          func() int64
+	walkThreads          func() int
 }
 
 func setupExclusionsOpt() {
@@ -303,40 +302,81 @@ func setupWalkThreadsOpt() {
 }
 
 func setupDigestCacheOpt() {
-	enabledPtr := flag.Bool("digest-cache", false,
-		"reuse digests from earlier runs; a file is hashed again only when its size, mtime,\n"+
-			"ctime or inode changed (one cache per host, default ~/.cache/rsync-sidekick/digests.tsv;\n"+
-			"a read-only cache file is used without saving new digests)")
+	const digestCacheFlag = "digest-cache"
+	modePtr := flag.String(digestCacheFlag, "off",
+		"reuse digests from earlier runs: --digest-cache (both sides), --digest-cache=src,\n"+
+			"--digest-cache=dst (destination and archive paths) or --digest-cache=off; a file is hashed\n"+
+			"again only when its size, mtime, ctime or inode changed (one cache per host, default\n"+
+			"~/.cache/rsync-sidekick/digests.tsv; a read-only cache file is used without saving new digests)")
+	flag.Lookup(digestCacheFlag).NoOptDefVal = "on"
 	pathPtr := flag.String("digest-cache-path", "",
-		"digest cache file on this host (implies --digest-cache)")
+		"digest cache file on this host - never used on the remote host (without --digest-cache it\n"+
+			"turns the cache on for the sides on this host)")
 	remotePathPtr := flag.String("remote-digest-cache-path", "",
-		"digest cache file on the remote host (implies --digest-cache, remote-exec only)")
-	flags.digestCachePath = func() string {
-		if *pathPtr != "" {
-			return *pathPtr
+		"digest cache file on the remote host, remote-exec only (without --digest-cache it turns the\n"+
+			"cache on for the remote side)")
+	flags.digestCache = func() digestCacheOptions {
+		switch *modePtr {
+		case "on", "src", "dst", "off":
+		default:
+			fmte.PrintfErr("error: argument to flag --%s must be one of on, src, dst, off\n", digestCacheFlag)
+			flag.Usage()
+			os.Exit(exitCodeInvalidNumArgs)
 		}
-		if !*enabledPtr && *remotePathPtr == "" {
-			return ""
-		}
-		defaultPath, err := service.DefaultDigestCachePath()
-		if err != nil {
-			fmte.PrintfErr("warning: no default location for the digest cache (%+v) - digests are not cached\n", err)
-			return ""
-		}
-		return defaultPath
-	}
-	flags.remoteDigestCachePath = func() (string, bool) {
-		return *remotePathPtr, *enabledPtr || *pathPtr != "" || *remotePathPtr != ""
+		return digestCacheOptions{mode: *modePtr, modeSet: flag.CommandLine.Changed(digestCacheFlag),
+			localPath: *pathPtr, remotePath: *remotePathPtr}
 	}
 }
 
-func openDigestCache(roots []string) {
-	path := flags.digestCachePath()
-	if path == "" {
+// digestCacheOptions are the digest cache flags as given.
+type digestCacheOptions struct {
+	mode                  string
+	modeSet               bool
+	localPath, remotePath string
+}
+
+// sides decides which sides keep their digests across runs. --digest-cache names them by
+// role; without it, a path flag turns the cache on for the sides on its host. A path for
+// a host whose sides are all off is reported as ignored.
+func (o digestCacheOptions) sides(sourceIsLocal, destIsLocal bool) (source, dest bool, warnings []string) {
+	if o.modeSet {
+		source = o.mode == "on" || o.mode == "src"
+		dest = o.mode == "on" || o.mode == "dst"
+	} else {
+		onHost := func(isLocal bool) bool {
+			return (isLocal && o.localPath != "") || (!isLocal && o.remotePath != "")
+		}
+		source, dest = onHost(sourceIsLocal), onHost(destIsLocal)
+	}
+	localOn := (source && sourceIsLocal) || (dest && destIsLocal)
+	remoteOn := (source && !sourceIsLocal) || (dest && !destIsLocal)
+	if o.localPath != "" && !localOn {
+		warnings = append(warnings, "--digest-cache-path is ignored: the cache is off for the sides on this host")
+	}
+	if o.remotePath != "" && !remoteOn {
+		warnings = append(warnings, "--remote-digest-cache-path is ignored: the cache is off for the remote side")
+	}
+	return source, dest, warnings
+}
+
+// openDigestCache opens the digest cache of this host, keeping digests across runs only
+// below persistentRoots; without any it caches within this run only.
+func openDigestCache(persistentRoots []string) {
+	if len(persistentRoots) == 0 {
 		service.SetDigestCache(service.NewMemoryDigestCache())
 		return
 	}
-	c, err := service.OpenDigestCache(path, roots)
+	path := flags.digestCache().localPath
+	if path == "" {
+		defaultPath, err := service.DefaultDigestCachePath()
+		if err != nil {
+			fmte.PrintfErr("warning: no default location for the digest cache (%+v) - digests are not cached\n", err)
+			service.SetDigestCache(service.NewMemoryDigestCache())
+			return
+		}
+		path = defaultPath
+	}
+	c, err := service.OpenDigestCache(path, persistentRoots)
 	if err != nil {
 		fmte.PrintfErr("warning: %+v - digests are not cached\n", err)
 		service.SetDigestCache(service.NewMemoryDigestCache())
@@ -669,7 +709,18 @@ func main() {
 		}
 
 		copyDup := flags.copyDuplicates() || len(archivePaths) > 0
-		openDigestCache(append([]string{sourcePath, destinationPath}, archivePaths...))
+		cacheSource, cacheDest, cacheWarnings := flags.digestCache().sides(true, true)
+		for _, w := range cacheWarnings {
+			fmte.PrintfErr("warning: %s\n", w)
+		}
+		var cacheRoots []string
+		if cacheSource {
+			cacheRoots = append(cacheRoots, sourcePath)
+		}
+		if cacheDest {
+			cacheRoots = append(append(cacheRoots, destinationPath), archivePaths...)
+		}
+		openDigestCache(cacheRoots)
 		syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath, scriptOutputPath,
 			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
 			copyDup, flags.useReflink(), archivePaths)
@@ -750,10 +801,21 @@ func main() {
 	} else {
 		remoteRoots = append(remoteRoots, archivePaths...)
 	}
+	cacheSource, cacheDest, cacheWarnings := flags.digestCache().sides(!sourceLoc.IsRemote, !destLoc.IsRemote)
+	for _, w := range cacheWarnings {
+		fmte.PrintfErr("warning: %s\n", w)
+	}
+	cacheLocal, cacheRemote := cacheDest, cacheSource
+	if !sourceLoc.IsRemote {
+		cacheLocal, cacheRemote = cacheSource, cacheDest
+	}
+	if !cacheLocal {
+		localRoots = nil
+	}
 	openDigestCache(localRoots)
-	if remotePath, enabled := flags.remoteDigestCachePath(); enabled {
+	if cacheRemote {
 		if agentClient != nil {
-			agentClient.DigestCache = &remote.DigestCacheSpec{Path: remotePath, Roots: remoteRoots}
+			agentClient.DigestCache = &remote.DigestCacheSpec{Path: flags.digestCache().remotePath, Roots: remoteRoots}
 		} else {
 			fmte.PrintfErr("warning: the digest cache only covers the local side in SFTP mode\n")
 		}

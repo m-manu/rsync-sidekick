@@ -108,10 +108,12 @@ flags: (all optional)
                                           (avoids re-transfer of duplicate-content files via rsync)
       --copy-list string                  write the files rsync still has to transfer to this file, one per distinct content
                                           (for rsync --files-from; duplicates at source go to --plan-out instead; remote-exec with remote source only)
-      --digest-cache                      reuse digests from earlier runs; a file is hashed again only when its size, mtime,
-                                          ctime or inode changed (one cache per host, default ~/.cache/rsync-sidekick/digests.tsv;
-                                          a read-only cache file is used without saving new digests)
-      --digest-cache-path string          digest cache file on this host (implies --digest-cache)
+      --digest-cache string[="on"]        reuse digests from earlier runs: --digest-cache (both sides), --digest-cache=src,
+                                          --digest-cache=dst (destination and archive paths) or --digest-cache=off; a file is hashed
+                                          again only when its size, mtime, ctime or inode changed (one cache per host, default
+                                          ~/.cache/rsync-sidekick/digests.tsv; a read-only cache file is used without saving new digests) (default "off")
+      --digest-cache-path string          digest cache file on this host - never used on the remote host (without --digest-cache it
+                                          turns the cache on for the sides on this host)
   -n, --dry-run                           show what would be done, but don't actually perform any actions
   -x, --exclusions string                 path to file containing newline separated list of file/directory names to be excluded
                                           (names are matched anywhere in the tree; always ignored, even without this flag: $RECYCLE.BIN, desktop.ini, Thumbs.db etc.)
@@ -134,7 +136,8 @@ flags: (all optional)
   -f, --progress-frequency duration       frequency of progress reporting e.g. '5s', '1m' (default 5s)
       --reflink                           use cp --reflink=auto for copy actions (instant on CoW filesystems like btrfs/XFS)
                                           (only effective when copies are performed via --copy-duplicates or --archive-path)
-      --remote-digest-cache-path string   digest cache file on the remote host (implies --digest-cache, remote-exec only)
+      --remote-digest-cache-path string   digest cache file on the remote host, remote-exec only (without --digest-cache it turns the
+                                          cache on for the remote side)
       --sftp                              force SFTP mode (don't try remote-execution)
   -s, --shellscript                       instead of applying changes directly, generate a shell script
                                           (this flag is useful if you want to run the shell script as a different user)
@@ -346,11 +349,19 @@ tools like `rsync -a` rewrite a file and restore its old mtime; the content chan
 changed in the last two seconds are not cached, since a write in the same timestamp tick would otherwise go
 unnoticed.
 
+* Off by default. `--digest-cache` caches both sides; `--digest-cache=src` or `--digest-cache=dst` only one
+  (`dst` includes the archive paths), e.g. when the other side changes all the time. Write the value with
+  `=` — `--digest-cache src` would take `src` as the source directory.
 * One cache per host: in remote-exec mode the agent keeps its own cache on the remote host
   (in SFTP mode only the local side is cached).
 * Default location: `~/.cache/rsync-sidekick/digests.tsv` (of the user the process runs as — with
   `--sidekick-path "sudo rsync-sidekick"` that is root's).
-* `--digest-cache-path` / `--remote-digest-cache-path` choose another file; either implies `--digest-cache`.
+* `--digest-cache-path` chooses the file on this host and is never used on the remote host;
+  `--remote-digest-cache-path` chooses the one on the remote host. Without `--digest-cache`, a path turns the
+  cache on for the sides on its host only; with it, the path just sets the location (and a path for a host
+  whose sides are off is ignored with a warning).
+* When both sides are on one host but only one is cached, digests of the other side still serve the run
+  but are not saved.
 * A dry run (`-n`) fills the cache too — digests are facts, not actions.
 * A cache file that is not writable, or held by another running `rsync-sidekick`, is used read-only:
   cached digests are reused, new ones are not saved, and a warning says so.

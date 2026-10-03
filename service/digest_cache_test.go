@@ -59,6 +59,35 @@ func TestDigestCache_reusedAcrossRuns(t *testing.T) {
 	require.NoError(t, c.Close())
 }
 
+func TestDigestCache_keepsOnlyDigestsBelowRootsAcrossRuns(t *testing.T) {
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "digests.tsv")
+	src, dst := filepath.Join(dir, "src"), filepath.Join(dir, "dst")
+	require.NoError(t, os.MkdirAll(src, 0o755))
+	require.NoError(t, os.MkdirAll(dst, 0o755))
+	mtime := time.Unix(1_700_000_000, 0)
+	inSrc := filepath.Join(src, "a.bin")
+	inDst := filepath.Join(dst, "b.bin")
+	srcInfo := writeTestFile(t, inSrc, bytes.Repeat([]byte("a"), 1000), mtime)
+	dstInfo := writeTestFile(t, inDst, bytes.Repeat([]byte("b"), 1000), mtime)
+
+	c, err := OpenDigestCache(cachePath, []string{src})
+	require.NoError(t, err)
+	c.racyWindow = 0
+	c.Store(inSrc, srcInfo, "f0000000a")
+	c.Store(inDst, dstInfo, "f0000000b")
+	_, found := c.Lookup(inDst, dstInfo)
+	assert.True(t, found, "outside the roots a digest still serves the same run")
+	require.NoError(t, c.Close())
+
+	c = openTestCache(t, cachePath)
+	defer c.Close()
+	_, found = c.Lookup(inSrc, srcInfo)
+	assert.True(t, found, "a digest below the roots is kept; cache file:\n%v", cacheLines(t, cachePath))
+	_, found = c.Lookup(inDst, dstInfo)
+	assert.False(t, found, "a digest outside the roots is not kept; cache file:\n%v", cacheLines(t, cachePath))
+}
+
 func TestDigestCache_rewriteWithSameSizeAndMtimeIsNotReused(t *testing.T) {
 	dir := t.TempDir()
 	cachePath := filepath.Join(dir, "digests.tsv")

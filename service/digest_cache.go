@@ -84,8 +84,8 @@ func NewMemoryDigestCache() *DigestCache {
 }
 
 // OpenDigestCache opens or creates the cache file at path. Only entries below roots are
-// loaded into memory (all of them when roots is empty); the rest of the file is kept
-// as it is.
+// loaded into memory and saved (all of them when roots is empty); the rest of the file
+// is kept as it is.
 func OpenDigestCache(path string, roots []string) (*DigestCache, error) {
 	c := &DigestCache{path: path, entries: make(map[string]digestCacheEntry), lastFlush: time.Now(),
 		racyWindow: digestCacheRacyWindow, roots: cleanRoots(roots)}
@@ -373,7 +373,8 @@ func (c *DigestCache) Store(absPath string, info os.FileInfo, hash string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries[absPath] = e
-	if c.file == nil || c.readOnly || c.writeErr != nil {
+	// Outside the roots a digest still serves the rest of this run, but isn't kept.
+	if c.file == nil || c.readOnly || c.writeErr != nil || !c.relevant(absPath) {
 		return
 	}
 	c.buf = append(c.buf, formatDigestCacheLine(absPath, e)...)
