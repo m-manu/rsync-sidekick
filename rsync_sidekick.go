@@ -312,12 +312,15 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 	sourceIsRemote bool, sshKeyPath string, agentClient *remote.AgentClient,
 	exclusions set.Set[string], outputScriptPath string,
 	verbose bool, dryRun bool, syncDirTimestamps bool, progressFrequency time.Duration,
-	copyDuplicates bool, useReflink bool, archivePaths []string,
+	copyDuplicates bool, useReflink bool, archivePaths []string, plan copyPlanOutput,
 ) error {
 	remotePath := remoteLoc.Path
 
 	if agentClient != nil {
-		return rsyncSidekickRemoteExec(remoteLoc, remotePath, localPath, sourceIsRemote, agentClient, exclusions, outputScriptPath, verbose, dryRun, syncDirTimestamps, progressFrequency, copyDuplicates, useReflink, archivePaths)
+		return rsyncSidekickRemoteExec(remoteLoc, remotePath, localPath, sourceIsRemote, agentClient, exclusions, outputScriptPath, verbose, dryRun, syncDirTimestamps, progressFrequency, copyDuplicates, useReflink, archivePaths, plan)
+	}
+	if plan.enabled() {
+		return fmt.Errorf("--copy-list and --plan-out need remote-execution mode (not SFTP)")
 	}
 
 	// SFTP mode: launch ssh with -s sftp subsystem and pipe through sftp client
@@ -402,10 +405,15 @@ func rsyncSidekickRemote(runID string, remoteLoc remote.Location, localPath stri
 
 // rsyncSidekickRemoteExec handles the remote-execution mode where the agent
 // runs on the remote side.
-func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath string, sourceIsRemote bool, agentClient *remote.AgentClient, exclusions set.Set[string], outputScriptPath string, verbose, dryRun, syncDirTimestamps bool, progressFrequency time.Duration, copyDuplicates, useReflink bool, archivePaths []string) error {
+func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath string, sourceIsRemote bool, agentClient *remote.AgentClient, exclusions set.Set[string], outputScriptPath string, verbose, dryRun, syncDirTimestamps bool, progressFrequency time.Duration, copyDuplicates, useReflink bool, archivePaths []string, plan copyPlanOutput) error {
 	if verbose {
 		fmte.VerboseOn()
 	}
+	if plan.enabled() && !sourceIsRemote {
+		return fmt.Errorf("--copy-list and --plan-out need the source to be the remote side")
+	}
+	// Orphans that archive matches applied while scanning; those never come back as actions.
+	archiveResolved := set.NewSet[string]()
 
 	// Convert exclusions to slice
 	excludedNames := make([]string, 0, exclusions.Cardinality())
@@ -746,7 +754,8 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 				var appliedArchiveActions int
 				var onArchiveAction service.ArchiveActionFunc
 				if outputScriptPath == "" && !dryRun {
-					onArchiveAction = newLocalArchiveActionStreamer(&appliedArchiveActions)
+					onArchiveAction = recordResolvedOrphans(newLocalArchiveActionStreamer(&appliedArchiveActions),
+						destDirPath, archiveResolved)
 				}
 				var archiveProgress service.ArchiveScanProgress
 				atomic.StoreInt32(&archiveProgress.FilesFound, atomic.LoadInt32(&scanArchiveCounter))
@@ -806,6 +815,19 @@ func rsyncSidekickRemoteExec(remoteLoc remote.Location, remotePath, localPath st
 					actions = append(actions, archiveActions...)
 				}
 			}
+		}
+	}
+
+	if plan.enabled() {
+		digestFn := func(orphans []string) (map[string]entity.FileDigest, error) {
+			return withDigestProgress(len(orphans), progressFrequency,
+				func(counter *int32) (map[string]entity.FileDigest, error) {
+					return agentClient.BatchDigest(sourceDirPath, orphans, counter, progressFrequency.Milliseconds())
+				})
+		}
+		if err := writeCopyPlan(plan, orphansAtSource, actions, archiveResolved, destDirPath,
+			sourceFiles, knownOrphanDigests, digestFn); err != nil {
+			return err
 		}
 	}
 

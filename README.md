@@ -96,6 +96,7 @@ where,
 	[destination]   Destination directory (local path or user@host:/path)
 
 flags: (all optional)
+      --apply-plan string                 reflink the duplicates of a plan written by --plan-out; takes the destination directory as only argument
       --archive-one-file-system           don't cross filesystem boundaries when scanning archive paths
                                           (by default archives DO cross boundaries, e.g. into btrfs snapshot subvols)
                                           (works locally and with remote-exec, not with SFTP)
@@ -104,6 +105,8 @@ flags: (all optional)
                                           implies --copy-duplicates)
   -c, --copy-duplicates                   copy files locally at destination when content already exists there
                                           (avoids re-transfer of duplicate-content files via rsync)
+      --copy-list string                  write the files rsync still has to transfer to this file, one per distinct content
+                                          (for rsync --files-from; duplicates at source go to --plan-out instead; remote-exec with remote source only)
       --digest-cache                      reuse digests from earlier runs; a file is hashed again only when its size, mtime,
                                           ctime or inode changed (one cache per host, default ~/.cache/rsync-sidekick/digests.tsv;
                                           a read-only cache file is used without saving new digests)
@@ -120,6 +123,8 @@ flags: (all optional)
                                           rsync transfers them normally - useful when small files dominate the count)
       --one-file-system                   don't cross filesystem boundaries when scanning source and destination (like rsync -x)
                                           (works locally and with remote-exec, not with SFTP)
+      --plan-out string                   write the duplicate groups of the --copy-list files to this file (JSON lines),
+                                          to be reflinked with --apply-plan once rsync transferred the originals
   -f, --progress-frequency duration       frequency of progress reporting e.g. '5s', '1m' (default 5s)
       --reflink                           use cp --reflink=auto for copy actions (instant on CoW filesystems like btrfs/XFS)
                                           (only effective when copies are performed via --copy-duplicates or --archive-path)
@@ -133,7 +138,7 @@ flags: (all optional)
   -i, --ssh-key string                    path to SSH private key for remote connections
   -d, --sync-dir-timestamps               also propagate directory timestamps from source to destination
   -v, --verbose                           logs every single action performed, plus extra information (caution: makes it slow!)
-      --version                           show application version (v2.6.0) and exit
+      --version                           show application version (v2.7.0) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```
@@ -207,6 +212,32 @@ it falls back to a regular copy automatically. This flag only has an effect when
 # Instant zero-cost copies on btrfs:
 rsync-sidekick -c --reflink /Users/manu/Photos/ /mnt/btrfs-backup/Photos/
 ```
+
+### Transferring each content only once (`--copy-list`, `--plan-out`, `--apply-plan`)
+
+When the source holds the same content at several paths that are all missing at the destination, plain
+`rsync` transfers every copy. These three flags split the job so each content crosses the network once:
+
+```bash
+# 1. as usual, plus: write what rsync still has to transfer, and the duplicate groups
+rsync-sidekick -c --reflink --copy-list=copy.txt --plan-out=plan.jsonl user@server:/data/ /backup/data/
+# 2. transfer one file per distinct content
+rsync -aHAX --files-from=copy.txt user@server:/data/ /backup/data/
+# 3. reflink the duplicates from the transferred originals — no scan, no hashing
+rsync-sidekick --apply-plan=plan.jsonl /backup/data/
+```
+
+- `copy.txt` lists paths relative to the source root: every file at source that nothing at the destination (or in an
+  `--archive-path`) can serve, one per distinct content.
+- `plan.jsonl` holds one duplicate group per line, with short keys to keep it small:
+  `{"dg":"<digest>","sz":<size>,"o":{"p":"<original>","mt":<mtime>},"t":[{"p":"<target>","mt":<mtime>}]}`.
+- `--apply-plan` skips a whole group when its original is missing or its size or mtime differs from the plan (the
+  source changed after step 1). Existing targets are never overwritten, so the step can be repeated. Targets get their
+  own mtime from the plan; mode, owner and group come from the original. `-n` shows what would happen.
+- Only orphans sharing their size (and extension, unless `--ignore-extension`) with another orphan are hashed.
+- Files below `--min-size` are never scanned, so they are missing from `copy.txt`: transfer them separately, e.g.
+  `rsync -a --ignore-existing --max-size=1M …`.
+- Needs remote-execution mode with the source on the remote side.
 
 ### Skipping small files (`--min-size`)
 

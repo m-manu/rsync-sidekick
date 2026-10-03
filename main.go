@@ -21,7 +21,7 @@ import (
 
 const (
 	applicationMajorVersion = 2
-	applicationMinorVersion = 6
+	applicationMinorVersion = 7
 	applicationPatchVersion = 0
 )
 
@@ -72,6 +72,8 @@ var flags struct {
 	ignoreExtension       func() bool
 	digestCachePath       func() string
 	remoteDigestCachePath func() (string, bool)
+	copyPlan              func() copyPlanOutput
+	applyPlanPath         func() string
 }
 
 func setupExclusionsOpt() {
@@ -402,6 +404,23 @@ func setupOneFileSystemOpt() {
 	}
 }
 
+func setupCopyPlanOpt() {
+	copyListPtr := flag.String("copy-list", "",
+		"write the files rsync still has to transfer to this file, one per distinct content\n"+
+			"(for rsync --files-from; duplicates at source go to --plan-out instead; remote-exec with remote source only)")
+	planOutPtr := flag.String("plan-out", "",
+		"write the duplicate groups of the --copy-list files to this file (JSON lines),\n"+
+			"to be reflinked with --apply-plan once rsync transferred the originals")
+	applyPlanPtr := flag.String("apply-plan", "",
+		"reflink the duplicates of a plan written by --plan-out; takes the destination directory as only argument")
+	flags.copyPlan = func() copyPlanOutput {
+		return copyPlanOutput{CopyListPath: *copyListPtr, PlanPath: *planOutPtr}
+	}
+	flags.applyPlanPath = func() string {
+		return *applyPlanPtr
+	}
+}
+
 func setupFlags() {
 	setupHelpOpt()
 	setupExclusionsOpt()
@@ -424,6 +443,7 @@ func setupFlags() {
 	setupOneFileSystemOpt()
 	setupDigestCacheOpt()
 	setupIgnoreExtensionOpt()
+	setupCopyPlanOpt()
 	setupUsage()
 }
 
@@ -451,6 +471,17 @@ func main() {
 	}
 	if flags.showVersion() {
 		fmt.Println(applicationVersion)
+		os.Exit(exitCodeSuccess)
+	}
+	if planPath := flags.applyPlanPath(); planPath != "" {
+		if flag.NArg() != 1 || !lib.IsReadableDirectory(flag.Arg(0)) {
+			fmte.PrintfErr("error: --apply-plan expects the destination directory as only argument\n")
+			os.Exit(exitCodeInvalidNumArgs)
+		}
+		if err := runApplyPlan(planPath, flag.Arg(0), flags.isDryRun(), flags.progressFrequency()); err != nil {
+			fmte.PrintfErr("error while applying plan: %+v\n", err)
+			os.Exit(exitCodeSyncError)
+		}
 		os.Exit(exitCodeSuccess)
 	}
 	if flag.NArg() != 2 {
@@ -508,6 +539,10 @@ func main() {
 
 	// If both are local, use the original flow
 	if !sourceLoc.IsRemote && !destLoc.IsRemote {
+		if flags.copyPlan().enabled() {
+			fmte.PrintfErr("error: --copy-list and --plan-out need a remote source (remote-exec mode)\n")
+			os.Exit(exitCodeInvalidNumArgs)
+		}
 		sourcePath, destinationPath := readSourceAndDestination()
 
 		// List
@@ -621,12 +656,12 @@ func main() {
 		syncErr = rsyncSidekickRemote(runID, remoteLoc, absLocalPath, true,
 			flags.sshKeyPath(), agentClient, flags.getExcludedFiles(), scriptOutputPath,
 			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
-			copyDup, flags.useReflink(), flags.archivePaths())
+			copyDup, flags.useReflink(), flags.archivePaths(), flags.copyPlan())
 	} else {
 		syncErr = rsyncSidekickRemote(runID, remoteLoc, absLocalPath, false,
 			flags.sshKeyPath(), agentClient, flags.getExcludedFiles(), scriptOutputPath,
 			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
-			copyDup, flags.useReflink(), flags.archivePaths())
+			copyDup, flags.useReflink(), flags.archivePaths(), flags.copyPlan())
 	}
 	closeDigestCache()
 	if syncErr != nil {
