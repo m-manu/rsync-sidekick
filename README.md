@@ -270,10 +270,18 @@ rsync-sidekick --apply-plan=plan.jsonl /backup/data/
   `--hash-min-size 512k`: smaller files are never hashed but still go into `copy.txt`, so one rsync pass covers
   everything. (Files below `--min-size` are not scanned at all and would need a second rsync pass.)
 - Needs remote-execution mode with the source on the remote side.
-- **Split a long `copy.txt` before handing it to rsync.** rsync compares every new entry of a `--files-from` list with
-  the ones before it while it builds its file list, so the time grows with the square of the list length: with
-  rsync 3.2.7, 1.85 million entries kept it at 100% CPU for over five hours before the first file was sent. Pieces of
-  100,000 entries start transferring right away:
+- **A long `copy.txt` needs `--trust-sender`, or splitting.** Since rsync 3.2.5 the client turns every `--files-from`
+  path and each of its parent directories into an include rule, to check later that the sender sends nothing it
+  wasn't asked for (`add_implied_include` in rsync's `exclude.c`). Before adding a parent directory it searches all
+  rules so far, so the time grows with the square of the list length, most with many distinct directories: with
+  rsync 3.2.7, 1.85 million entries kept it at 100% CPU for over five hours before the first file was sent.
+  That check only guards against a malicious sender; with your own server, skip it:
+
+  ```bash
+  rsync -aHAX --trust-sender --files-from=copy.txt user@server:/data/ /backup/data/
+  ```
+
+  Otherwise, pieces of 100,000 entries start transferring right away:
 
   ```bash
   split -l 100000 -d -a 3 copy.txt copy-part-
