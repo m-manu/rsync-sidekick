@@ -22,7 +22,7 @@ import (
 const (
 	applicationMajorVersion = 2
 	applicationMinorVersion = 14
-	applicationPatchVersion = 0
+	applicationPatchVersion = 1
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -290,7 +290,7 @@ func setupHashMinSizeOpt() {
 func setupWalkThreadsOpt() {
 	const walkThreadsFlag = "walk-threads"
 	walkThreadsPtr := flag.Int(walkThreadsFlag, rsfs.DefaultWalkThreads,
-		"directories read at once per scan on BTRFS (local and remote) - several outstanding\n"+
+		"directories read at once per scan (local and remote) - several outstanding\n"+
 			"requests keep all disks of an array busy; 1 reads one directory after the other")
 	flags.walkThreads = func() int {
 		if *walkThreadsPtr < 1 {

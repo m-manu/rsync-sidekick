@@ -328,56 +328,10 @@ func BtrfsWalk(dirPath string, excludedNames map[string]struct{}, counter *int32
 	}
 	defer syscall.Close(fd)
 
-	// Directories are handed out to DefaultWalkThreads workers. Each worker collects its
-	// entries on its own; a worker that finds the queue empty waits as long as another
-	// one may still add subdirectories.
-	threads := max(DefaultWalkThreads, 1)
-	var mu sync.Mutex
-	queueChanged := sync.NewCond(&mu)
-	queue := []btrfsWalkItem{{inodeID: rootInode, relativePath: "", absPath: dirPath, treeID: treeID}}
-	busy := 0
-	perWorker := make([][]DirEntry, threads)
-	var wg sync.WaitGroup
-	wg.Add(threads)
-	for w := 0; w < threads; w++ {
-		go func(w int) {
-			defer wg.Done()
-			for {
-				mu.Lock()
-				for len(queue) == 0 && busy > 0 {
-					queueChanged.Wait()
-				}
-				if len(queue) == 0 {
-					mu.Unlock()
-					return
-				}
-				item := queue[len(queue)-1]
-				queue = queue[:len(queue)-1]
-				busy++
-				mu.Unlock()
-
-				entries, subdirs := btrfsWalkDir(fd, item, excludedNames, counter)
-				perWorker[w] = append(perWorker[w], entries...)
-
-				mu.Lock()
-				queue = append(queue, subdirs...)
-				busy--
-				mu.Unlock()
-				queueChanged.Broadcast()
-			}
-		}(w)
-	}
-	wg.Wait()
-
-	total := 0
-	for _, entries := range perWorker {
-		total += len(entries)
-	}
-	result := make([]DirEntry, 0, total)
-	for _, entries := range perWorker {
-		result = append(result, entries...)
-	}
-	return result, nil
+	root := btrfsWalkItem{inodeID: rootInode, relativePath: "", absPath: dirPath, treeID: treeID}
+	return walkParallel(root, DefaultWalkThreads, func(item btrfsWalkItem) ([]DirEntry, []btrfsWalkItem) {
+		return btrfsWalkDir(fd, item, excludedNames, counter)
+	}), nil
 }
 
 type btrfsWalkItem struct {

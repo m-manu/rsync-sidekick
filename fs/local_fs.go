@@ -1,8 +1,6 @@
 package fs
 
 import (
-	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,9 +37,7 @@ var DefaultArchiveOneFileSystem bool
 // they report what will actually be worked on.
 var DefaultMinSize int64
 
-// DefaultWalkThreads is how many directories a BTRFS walk reads at once (--walk-threads).
-// Several outstanding requests keep the disks of an array busy together and let the I/O
-// scheduler sort the seeks.
+// DefaultWalkThreads is how many directories a local walk reads at once (--walk-threads).
 var DefaultWalkThreads = 4
 
 // SkipBySize reports whether a regular file of this size is below DefaultMinSize.
@@ -64,7 +60,6 @@ func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}, counte
 		// Fall back to standard walk on error
 	}
 
-	entries := make([]DirEntry, 0, 10_000)
 	// Get root device ID for --one-file-system check
 	var rootDevice uint64
 	if l.OneFileSystem {
@@ -72,61 +67,56 @@ func (l *LocalFS) Walk(dirPath string, excludedNames map[string]struct{}, counte
 			rootDevice = device
 		}
 	}
-	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			fmte.PrintfErr("skipping \"%s\": %+v\n", path, err)
-			return nil
-		}
-		if _, excluded := excludedNames[d.Name()]; excluded {
-			if d.IsDir() {
-				return filepath.SkipDir
+	type localDir struct{ absPath, relativePath string }
+	return walkParallel(localDir{absPath: dirPath}, DefaultWalkThreads,
+		func(dir localDir) (entries []DirEntry, subdirs []localDir) {
+			children, err := os.ReadDir(dir.absPath)
+			if err != nil {
+				// Entries read before the error are still walked, as filepath.WalkDir does.
+				fmte.PrintfErr("skipping \"%s\": %+v\n", dir.absPath, err)
 			}
-			return nil
-		}
-		// Ignore dot files (Mac)
-		if strings.HasPrefix(d.Name(), "._") {
-			return nil
-		}
-		if d.Type().IsRegular() || d.IsDir() {
-			info, infoErr := d.Info()
-			if infoErr != nil {
-				fmte.PrintfErr("couldn't get metadata of \"%s\": %+v\n", path, infoErr)
-				return nil
-			}
-			// --one-file-system: skip directories on different filesystems
-			if l.OneFileSystem && d.IsDir() {
-				if device, ok := l.getDevice(path); ok && device != rootDevice {
-					return filepath.SkipDir
+			for _, d := range children {
+				if _, excluded := excludedNames[d.Name()]; excluded {
+					continue
+				}
+				// Ignore dot files (Mac)
+				if strings.HasPrefix(d.Name(), "._") {
+					continue
+				}
+				if !d.Type().IsRegular() && !d.IsDir() {
+					continue
+				}
+				path := filepath.Join(dir.absPath, d.Name())
+				info, infoErr := d.Info()
+				if infoErr != nil {
+					fmte.PrintfErr("couldn't get metadata of \"%s\": %+v\n", path, infoErr)
+					continue
+				}
+				// --one-file-system: skip directories on different filesystems
+				if l.OneFileSystem && d.IsDir() {
+					if device, ok := l.getDevice(path); ok && device != rootDevice {
+						continue
+					}
+				}
+				relativePath := filepath.Join(dir.relativePath, d.Name())
+				if d.IsDir() {
+					subdirs = append(subdirs, localDir{absPath: path, relativePath: relativePath})
+				}
+				if SkipBySize(d.IsDir(), info.Size()) {
+					continue
+				}
+				entries = append(entries, DirEntry{
+					RelativePath: relativePath,
+					Size:         info.Size(),
+					ModTime:      info.ModTime().Unix(),
+					IsDir:        d.IsDir(),
+				})
+				if counter != nil && d.Type().IsRegular() {
+					atomic.AddInt32(counter, 1)
 				}
 			}
-			relativePath, relErr := filepath.Rel(dirPath, path)
-			if relErr != nil {
-				fmte.PrintfErr("couldn't comprehend path \"%s\": %+v\n", path, relErr)
-				return nil
-			}
-			// Skip the root directory itself
-			if relativePath == "." {
-				return nil
-			}
-			if SkipBySize(d.IsDir(), info.Size()) {
-				return nil
-			}
-			entries = append(entries, DirEntry{
-				RelativePath: relativePath,
-				Size:         info.Size(),
-				ModTime:      info.ModTime().Unix(),
-				IsDir:        d.IsDir(),
-			})
-			if counter != nil && d.Type().IsRegular() {
-				atomic.AddInt32(counter, 1)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("couldn't scan directory %s: %v", dirPath, err)
-	}
-	return entries, nil
+			return entries, subdirs
+		}), nil
 }
 
 func (l *LocalFS) Lstat(path string) (FileInfo, error) {
