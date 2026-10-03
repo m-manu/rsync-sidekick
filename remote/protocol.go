@@ -15,6 +15,8 @@ const (
 	MsgPerformResponse = "perform_response"
 	MsgVersionRequest  = "version_request"
 	MsgVersionResponse = "version_response"
+	MsgGlobRequest     = "glob_request"
+	MsgGlobResponse    = "glob_response"
 	MsgQuit            = "quit"
 	MsgError           = "error"
 )
@@ -38,6 +40,17 @@ type Envelope struct {
 	ID uint64 `json:"id,omitempty"`
 	// Payload is one of the *Request/*Response structs, encoded as raw JSON.
 	Payload []byte `json:"payload,omitempty"`
+}
+
+// GlobRequest asks the agent which directories match shell wildcard patterns. Agents
+// that predate it answer with MsgError ("unknown message type").
+type GlobRequest struct {
+	Patterns []string `json:"patterns"`
+}
+
+// GlobResponse holds the matching directories per pattern, in the order of the request.
+type GlobResponse struct {
+	Matches [][]string `json:"matches"`
 }
 
 // WalkRequest asks the agent to scan a directory.

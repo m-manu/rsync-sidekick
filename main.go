@@ -21,7 +21,7 @@ import (
 
 const (
 	applicationMajorVersion = 2
-	applicationMinorVersion = 8
+	applicationMinorVersion = 9
 	applicationPatchVersion = 0
 )
 
@@ -383,7 +383,8 @@ func setupArchivePathOpt() {
 	archivePathsPtr := flag.StringArrayP("archive-path", "a", nil,
 		"additional directory on the destination side to scan for copy sources\n"+
 			"(can be specified multiple times; files are copied from archive, never moved;\n"+
-			"implies --copy-duplicates)")
+			"implies --copy-duplicates; shell wildcards like '/snapshots/*' are resolved on the\n"+
+			"destination host, matches in lexical order - quote them so the local shell leaves them alone)")
 	flags.archivePaths = func() []string {
 		return *archivePathsPtr
 	}
@@ -439,6 +440,26 @@ func setupIncludeDirOpt() {
 		}
 		return normalizeIncludeDirs(dirs)
 	}
+}
+
+// expandArchivePaths resolves wildcards in archive paths with glob and exits on failure.
+// A pattern matching nothing is an error like an unreadable archive path: either way a
+// typo would silently turn local copies into network transfers.
+func expandArchivePaths(paths []string, glob func([]string) ([][]string, error)) []string {
+	expanded, unmatched, err := lib.ExpandPaths(paths, glob)
+	if err != nil {
+		fmte.PrintfErr("error: cannot resolve --archive-path wildcards: %+v\n", err)
+		os.Exit(exitCodeArchivePathError)
+	}
+	if len(unmatched) > 0 {
+		fmte.PrintfErr("error: --archive-path \"%s\" matches no directory\n", unmatched[0])
+		os.Exit(exitCodeArchivePathError)
+	}
+	if len(expanded) != len(paths) {
+		fmte.Printf("Archive paths: %d after resolving wildcards\n", len(expanded))
+		fmte.PrintfV("Archive paths: %s\n", strings.Join(expanded, ", "))
+	}
+	return expanded
 }
 
 func setupFlags() {
@@ -531,8 +552,10 @@ func main() {
 	// when that side is local. Checking here — before any scanning starts — is what makes
 	// a typo visible at all: silently skipping one turns instant local reflink copies into
 	// a full transfer over the network, which is not something to bury in a warning.
+	archivePaths := flags.archivePaths()
 	if !destLoc.IsRemote {
-		for _, archivePath := range flags.archivePaths() {
+		archivePaths = expandArchivePaths(archivePaths, lib.GlobDirsAll)
+		for _, archivePath := range archivePaths {
 			if !lib.IsReadableDirectory(archivePath) {
 				fmte.PrintfErr("error: --archive-path \"%s\" is not a readable directory\n", archivePath)
 				os.Exit(exitCodeArchivePathError)
@@ -602,11 +625,11 @@ func main() {
 			scriptOutputPath = flags.scriptOutputPath()
 		}
 
-		copyDup := flags.copyDuplicates() || len(flags.archivePaths()) > 0
-		openDigestCache(append([]string{sourcePath, destinationPath}, flags.archivePaths()...))
+		copyDup := flags.copyDuplicates() || len(archivePaths) > 0
+		openDigestCache(append([]string{sourcePath, destinationPath}, archivePaths...))
 		syncErr := rsyncSidekick(runID, sourcePath, flags.getExcludedFiles(), destinationPath, scriptOutputPath,
 			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
-			copyDup, flags.useReflink(), flags.archivePaths())
+			copyDup, flags.useReflink(), archivePaths)
 		closeDigestCache()
 		if syncErr != nil {
 			fmte.PrintfErr("error while syncing: %+v\n", syncErr)
@@ -631,6 +654,16 @@ func main() {
 	}
 	if agentClient != nil {
 		defer agentClient.Close()
+	}
+
+	// Wildcards in archive paths of a remote destination are resolved on that host.
+	if destLoc.IsRemote {
+		archivePaths = expandArchivePaths(archivePaths, func(patterns []string) ([][]string, error) {
+			if agentClient == nil {
+				return nil, fmt.Errorf("wildcards in --archive-path need remote-execution mode (not SFTP)")
+			}
+			return agentClient.Glob(patterns)
+		})
 	}
 
 	// Warn if --one-file-system is used with SFTP (forced or fallback)
@@ -666,13 +699,13 @@ func main() {
 		scriptOutputPath = flags.scriptOutputPath()
 	}
 
-	copyDup := flags.copyDuplicates() || len(flags.archivePaths()) > 0
+	copyDup := flags.copyDuplicates() || len(archivePaths) > 0
 	localRoots := []string{absLocalPath}
 	remoteRoots := []string{remoteLoc.Path}
 	if sourceLoc.IsRemote {
-		localRoots = append(localRoots, flags.archivePaths()...)
+		localRoots = append(localRoots, archivePaths...)
 	} else {
-		remoteRoots = append(remoteRoots, flags.archivePaths()...)
+		remoteRoots = append(remoteRoots, archivePaths...)
 	}
 	openDigestCache(localRoots)
 	if remotePath, enabled := flags.remoteDigestCachePath(); enabled {
@@ -687,12 +720,12 @@ func main() {
 		syncErr = rsyncSidekickRemote(runID, remoteLoc, absLocalPath, true,
 			flags.sshKeyPath(), agentClient, flags.getExcludedFiles(), scriptOutputPath,
 			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
-			copyDup, flags.useReflink(), flags.archivePaths(), flags.copyPlan())
+			copyDup, flags.useReflink(), archivePaths, flags.copyPlan())
 	} else {
 		syncErr = rsyncSidekickRemote(runID, remoteLoc, absLocalPath, false,
 			flags.sshKeyPath(), agentClient, flags.getExcludedFiles(), scriptOutputPath,
 			flags.isVerbose(), flags.isDryRun(), flags.syncDirTimestamps(), flags.progressFrequency(),
-			copyDup, flags.useReflink(), flags.archivePaths(), flags.copyPlan())
+			copyDup, flags.useReflink(), archivePaths, flags.copyPlan())
 	}
 	closeDigestCache()
 	if syncErr != nil {

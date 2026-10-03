@@ -102,7 +102,8 @@ flags: (all optional)
                                           (works locally and with remote-exec, not with SFTP)
   -a, --archive-path stringArray          additional directory on the destination side to scan for copy sources
                                           (can be specified multiple times; files are copied from archive, never moved;
-                                          implies --copy-duplicates)
+                                          implies --copy-duplicates; shell wildcards like '/snapshots/*' are resolved on the
+                                          destination host, matches in lexical order - quote them so the local shell leaves them alone)
   -c, --copy-duplicates                   copy files locally at destination when content already exists there
                                           (avoids re-transfer of duplicate-content files via rsync)
       --copy-list string                  write the files rsync still has to transfer to this file, one per distinct content
@@ -141,7 +142,7 @@ flags: (all optional)
   -i, --ssh-key string                    path to SSH private key for remote connections
   -d, --sync-dir-timestamps               also propagate directory timestamps from source to destination
   -v, --verbose                           logs every single action performed, plus extra information (caution: makes it slow!)
-      --version                           show application version (v2.8.0) and exit
+      --version                           show application version (v2.9.0) and exit
 
 More details here: https://github.com/m-manu/rsync-sidekick
 ```
@@ -202,7 +203,14 @@ rsync-sidekick -a /archive1/ -a /archive2/ /source/ /destination/
 
 # Works with remote destinations too (archives must be on the remote host):
 rsync-sidekick -a /remote/archive/ /local/source/ user@server:/remote/dest/
+
+# Wildcards: every snapshot below .snapshots, oldest first (quoted, so the local shell leaves them alone):
+rsync-sidekick -a '/mnt/raid/.snapshots/*/*' /local/source/ /mnt/raid/data/
 ```
+
+Wildcards (`*`, `?`, `[...]`) are resolved on the destination host — through the remote agent when the destination is
+remote, which needs an agent of v2.9.0 or later (an older one makes the run stop with an error). Matches keep lexical
+order, only directories count, and a pattern matching nothing stops the run like an unreadable archive path does.
 
 ### Reflink copies (`--reflink`)
 

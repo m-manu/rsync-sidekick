@@ -15,6 +15,7 @@ import (
 
 	set "github.com/deckarep/golang-set/v2"
 	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
+	"github.com/m-manu/rsync-sidekick/v2/lib"
 	"github.com/m-manu/rsync-sidekick/v2/service"
 )
 
@@ -117,6 +118,9 @@ func runAgentOn(in io.Reader, out io.Writer, agentVersion string) error {
 		case MsgVersionRequest:
 			writeResponse(writer.forRequest(env.ID), MsgVersionResponse,
 				VersionResponse{Version: agentVersion})
+
+		case MsgGlobRequest:
+			handleGlob(writer.forRequest(env.ID), env.Payload)
 
 		default:
 			writeError(writer.forRequest(env.ID), fmt.Sprintf("unknown message type: %s", env.Type))
@@ -241,6 +245,20 @@ func handleDigest(w *requestWriter, payload []byte) {
 	}
 
 	writeResponse(w, MsgDigestResponse, resp)
+}
+
+func handleGlob(w *requestWriter, payload []byte) {
+	var req GlobRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		writeError(w, fmt.Sprintf("bad glob request: %v", err))
+		return
+	}
+	matches, err := lib.GlobDirsAll(req.Patterns)
+	if err != nil {
+		writeError(w, fmt.Sprintf("glob failed: %v", err))
+		return
+	}
+	writeResponse(w, MsgGlobResponse, GlobResponse{Matches: matches})
 }
 
 func handlePerform(w *requestWriter, payload []byte) {

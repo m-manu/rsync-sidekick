@@ -302,6 +302,29 @@ func (c *AgentClient) Perform(actions []ActionSpec, dryRun bool) ([]ActionResult
 	return performResp.Results, nil
 }
 
+// Glob asks the remote agent which directories match the given wildcard patterns, one
+// result per pattern. An agent too old to know the request makes this fail with an
+// error that says so, instead of silently scanning nothing.
+func (c *AgentClient) Glob(patterns []string) ([][]string, error) {
+	env, err := c.roundTrip(MsgGlobRequest, GlobRequest{Patterns: patterns}, nil)
+	if err != nil {
+		var agentErr *AgentError
+		if errors.As(err, &agentErr) && strings.Contains(agentErr.Message, "unknown message type") {
+			return nil, fmt.Errorf("the remote rsync-sidekick is too old for wildcards in remote paths - "+
+				"update it on the remote host (%w)", err)
+		}
+		return nil, err
+	}
+	var resp GlobResponse
+	if err := json.Unmarshal(env.Payload, &resp); err != nil {
+		return nil, fmt.Errorf("bad glob response: %w", err)
+	}
+	if len(resp.Matches) != len(patterns) {
+		return nil, fmt.Errorf("bad glob response: %d results for %d patterns", len(resp.Matches), len(patterns))
+	}
+	return resp.Matches, nil
+}
+
 // Close sends a quit message and waits for the ssh process to exit.
 func (c *AgentClient) Close() error {
 	// Best-effort quit
