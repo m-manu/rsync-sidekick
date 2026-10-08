@@ -24,14 +24,25 @@ type SyncAction interface {
 
 // SortByDestinationDir sorts actions by destination directory path,
 // grouping files in the same directory together for better cache locality.
+// A directory's path sorts before the paths inside it, so a MakeDirectoryAction
+// (keyed by its parent) runs before the moves and copies into that directory.
 func SortByDestinationDir(actions []SyncAction) {
 	keys := make([]string, len(actions))
+	order := make([]int, len(actions))
 	for i, a := range actions {
 		keys[i] = filepath.Dir(a.destinationPath())
+		order[i] = i
 	}
-	sort.SliceStable(actions, func(i, j int) bool {
-		return keys[i] < keys[j]
+	// Sort a permutation, not actions itself: the less function reads keys by
+	// index, and keys would not follow the actions as they are swapped.
+	sort.SliceStable(order, func(i, j int) bool {
+		return keys[order[i]] < keys[order[j]]
 	})
+	sorted := make([]SyncAction, len(actions))
+	for i, k := range order {
+		sorted[i] = actions[k]
+	}
+	copy(actions, sorted)
 }
 
 const cmdSeparator = "\u0001"
