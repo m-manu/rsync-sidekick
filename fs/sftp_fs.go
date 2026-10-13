@@ -55,6 +55,9 @@ func (s *SFTPFS) Walk(dirPath string, excludedNames map[string]struct{}, counter
 			if rel == "." {
 				continue
 			}
+			if SkipBySize(info.IsDir(), info.Size()) {
+				continue
+			}
 			entries = append(entries, DirEntry{
 				RelativePath: rel,
 				Size:         info.Size(),
