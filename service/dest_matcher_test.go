@@ -9,6 +9,7 @@ import (
 
 	"github.com/m-manu/rsync-sidekick/v2/action"
 	"github.com/m-manu/rsync-sidekick/v2/entity"
+	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -87,6 +88,21 @@ func TestDestMatcher_SecondOrphanOfAMovedCandidateIsCopiedOnlyWithCopyDuplicates
 	movesOnly, _ := newTestMatcher(t, source, destination, false)
 	movesOnly.AddCandidates(candidates)
 	assert.Equal(t, []string{"mv"}, actionKinds(movesOnly.AddOrphans(orphans)))
+}
+
+func TestDestMatcher_CopyKeepsTheDestinationFilesystem(t *testing.T) {
+	remote := markerFS{}
+	m := NewDestMatcher("/src",
+		map[string]entity.FileMeta{"new.bin": {Size: 10}, "keep.bin": {Size: 10}},
+		"/dst",
+		map[string]entity.FileMeta{"keep.bin": {Size: 10}},
+		remote, true, false)
+
+	m.AddCandidates(map[string]entity.FileDigest{"keep.bin": digestFor("a")})
+	actions := m.AddOrphans(map[string]entity.FileDigest{"new.bin": digestFor("a")})
+
+	require.Equal(t, []string{"cp"}, actionKinds(actions))
+	assert.Equal(t, remote, actions[0].(action.CopyFileAction).FS)
 }
 
 func TestDestMatcher_CandidateNeededAtSourceIsCopiedNeverMoved(t *testing.T) {
@@ -170,3 +186,24 @@ func TestStreamSyncActions_HashingErrorStopsWithoutHanging(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "agent gone")
 }
+
+// markerFS is a destination filesystem that is not the local disk. Only the directory
+// check is reached while a copy action is built.
+type markerFS struct{}
+
+func (markerFS) Walk(string, map[string]struct{}, *int32) ([]rsfs.DirEntry, error) {
+	return nil, errors.New("not used")
+}
+func (markerFS) Lstat(string) (rsfs.FileInfo, error) { return rsfs.FileInfo{}, errors.New("not used") }
+func (markerFS) Stat(string) (rsfs.FileInfo, error)  { return rsfs.FileInfo{}, errors.New("not used") }
+func (markerFS) ReadFile(string) ([]byte, error)     { return nil, errors.New("not used") }
+func (markerFS) ReadAt(string, []byte, int64) (int, error) {
+	return 0, errors.New("not used")
+}
+func (markerFS) Rename(string, string) error { return errors.New("not used") }
+func (markerFS) Chtimes(string, time.Time, time.Time) error {
+	return errors.New("not used")
+}
+func (markerFS) MkdirAll(string) error           { return errors.New("not used") }
+func (markerFS) IsReadableDirectory(string) bool { return true }
+func (markerFS) Close() error                    { return nil }

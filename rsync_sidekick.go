@@ -1272,6 +1272,13 @@ func performActions(actions []action.SyncAction, destinationDirPath string, dryR
 	return performActionsTracked(actions, destinationDirPath, dryRun, verbose, progressFrequency, movedFiles{})
 }
 
+// copyTargetsRemoteFS reports a copy whose destination is not the local disk. Perform
+// refuses it without creating a file, which is safe to call during a dry run.
+func copyTargetsRemoteFS(a action.SyncAction) bool {
+	copy, ok := a.(action.CopyFileAction)
+	return ok && copy.FS != nil
+}
+
 // performActionsTracked is performActions sharing movedPaths with other phases of the run,
 // so copies from a file moved by an earlier batch find it at its new path.
 func performActionsTracked(actions []action.SyncAction, destinationDirPath string, dryRun, verbose bool,
@@ -1325,7 +1332,9 @@ func performActionsTracked(actions []action.SyncAction, destinationDirPath strin
 		syncAction = movedPaths.redirect(syncAction)
 
 		var aErr error
-		if !dryRun {
+		// A copy aimed at an SFTP destination fails before it touches a file. Report that
+		// during a dry run too, so the summary does not count a copy that will not be done.
+		if !dryRun || copyTargetsRemoteFS(syncAction) {
 			aErr = syncAction.Perform()
 		}
 

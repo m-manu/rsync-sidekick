@@ -184,6 +184,7 @@ func (m *DestMatcher) actionsFor(orphan string, candidates []string) []action.Sy
 		AbsDestPath:   filepath.Join(m.destDirPath, orphan),
 		SourceModTime: time.Unix(orphanMeta.ModifiedTimestamp, 0),
 		UseReflink:    m.useReflink,
+		FS:            m.destFS,
 	}) {
 		m.resolve(orphan, orphanMeta, true)
 	}

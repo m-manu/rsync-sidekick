@@ -21,8 +21,8 @@ import (
 
 const (
 	applicationMajorVersion = 2
-	applicationMinorVersion = 17
-	applicationPatchVersion = 5
+	applicationMinorVersion = 2
+	applicationPatchVersion = 0
 )
 
 var applicationVersion = fmt.Sprintf("v%d.%d.%d",
@@ -480,7 +480,8 @@ func setupDryRunOpt() {
 func setupCopyDuplicatesOpt() {
 	copyDupPtr := flag.BoolP("copy-duplicates", "c", false,
 		"copy files locally at destination when content already exists there\n"+
-			"(avoids re-transfer of duplicate-content files via rsync)")
+			"(avoids re-transfer of duplicate-content files via rsync;\n"+
+			"works locally and with remote-exec, not with SFTP)")
 	flags.copyDuplicates = func() bool {
 		return *copyDupPtr
 	}
@@ -500,7 +501,8 @@ func setupArchivePathOpt() {
 		"additional directory on the destination side to scan for copy sources\n"+
 			"(can be specified multiple times; files are copied from archive, never moved;\n"+
 			"implies --copy-duplicates; shell wildcards like '/snapshots/*' are resolved on the\n"+
-			"destination host, matches in lexical order - quote them so the local shell leaves them alone)")
+			"destination host, matches in lexical order - quote them so the local shell leaves them alone;\n"+
+			"copies are not performed over SFTP)")
 	flags.archivePaths = func() []string {
 		return *archivePathsPtr
 	}

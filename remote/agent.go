@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	set "github.com/deckarep/golang-set/v2"
+	"github.com/m-manu/rsync-sidekick/v2/action"
 	rsfs "github.com/m-manu/rsync-sidekick/v2/fs"
 	"github.com/m-manu/rsync-sidekick/v2/lib"
 	"github.com/m-manu/rsync-sidekick/v2/service"
@@ -360,42 +360,18 @@ func executeAction(spec ActionSpec) error {
 		return os.MkdirAll(spec.DirPath, os.ModeDir|os.ModePerm)
 
 	case "copy":
-		// Create parent directory
+		// Create parent directory. The copy itself is the local ladder: a temp file,
+		// reflink where this host can, then a rename onto the final path.
 		parentDir := filepath.Dir(spec.ToAbsPath)
 		if err := os.MkdirAll(parentDir, os.ModeDir|os.ModePerm); err != nil {
 			return fmt.Errorf("mkdir for copy failed: %w", err)
 		}
-		srcInfo, err := os.Stat(spec.FromAbsPath)
-		if err != nil {
-			return fmt.Errorf("cannot stat source %q: %w", spec.FromAbsPath, err)
-		}
-		if spec.UseReflink {
-			cmd := exec.Command("cp", "--reflink=auto", "-p", spec.FromAbsPath, spec.ToAbsPath)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("reflink copy failed: %w: %s", err, string(out))
-			}
-		} else {
-			in, err := os.Open(spec.FromAbsPath)
-			if err != nil {
-				return fmt.Errorf("cannot open source %q: %w", spec.FromAbsPath, err)
-			}
-			out, err := os.Create(spec.ToAbsPath)
-			if err != nil {
-				in.Close()
-				return fmt.Errorf("cannot create destination %q: %w", spec.ToAbsPath, err)
-			}
-			_, copyErr := io.Copy(out, in)
-			in.Close()
-			out.Close()
-			if copyErr != nil {
-				return fmt.Errorf("copy failed: %w", copyErr)
-			}
-			if err := os.Chmod(spec.ToAbsPath, srcInfo.Mode()); err != nil {
-				return fmt.Errorf("chmod failed: %w", err)
-			}
-		}
-		modTime := time.Unix(spec.ModTimestamp, 0)
-		return os.Chtimes(spec.ToAbsPath, modTime, modTime)
+		return action.CopyFileAction{
+			AbsSourcePath: spec.FromAbsPath,
+			AbsDestPath:   spec.ToAbsPath,
+			SourceModTime: time.Unix(spec.ModTimestamp, 0),
+			UseReflink:    spec.UseReflink,
+		}.Perform()
 
 	default:
 		return fmt.Errorf("unknown action type: %s", spec.Type)

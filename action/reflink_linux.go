@@ -86,10 +86,17 @@ const ficlone = 0x40049409
 // reflinkCopy creates a reflink copy using FICLONE ioctl directly, avoiding fork+exec of cp,
 // and falls back to a full copy; cloned tells which one it was.
 // Caches reflink support per mountpoint: first call tries ioctl, subsequent calls skip if unsupported.
+//
+// The clone is written to a temporary file in dst's directory and renamed into place only
+// after FICLONE succeeds. dst itself is never truncated or removed. A failed clone removes
+// only that temporary file, then falls back to a full copy.
 func reflinkCopy(src, dst string, mode os.FileMode) (cloned bool, err error) {
 	mp := mountpointForPath(dst)
 	if supported, ok := reflinkSupport.Load(mp); ok && !supported.(bool) {
 		return false, regularCopyWithMode(src, dst, mode)
+	}
+	if err := errIfDestExists(dst); err != nil {
+		return false, err
 	}
 
 	srcFile, err := os.Open(src)
@@ -98,19 +105,33 @@ func reflinkCopy(src, dst string, mode os.FileMode) (cloned bool, err error) {
 	}
 	defer srcFile.Close()
 
-	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	dstFile, err := createCopyTemp(dst)
 	if err != nil {
-		return false, fmt.Errorf("cannot create destination %q: %w", dst, err)
+		return false, err
 	}
+	tmpName := dstFile.Name()
 
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, dstFile.Fd(), ficlone, srcFile.Fd())
 	if errno != 0 {
 		dstFile.Close()
-		os.Remove(dst)
+		os.Remove(tmpName)
 		reflinkSupport.Store(mp, false)
 		return false, regularCopyWithMode(src, dst, mode)
 	}
-
 	reflinkSupport.Store(mp, true)
-	return true, dstFile.Close()
+	// Mode has to be set before the rename. Perform does not chmod a clone that succeeded,
+	// and the path must not become visible with the temporary file's mode.
+	if err := dstFile.Chmod(mode); err != nil {
+		dstFile.Close()
+		os.Remove(tmpName)
+		return false, fmt.Errorf("chmod failed on %q: %w", tmpName, err)
+	}
+	if err := dstFile.Close(); err != nil {
+		os.Remove(tmpName)
+		return false, fmt.Errorf("failed to close temporary file %q: %w", tmpName, err)
+	}
+	if err := publishNewFile(tmpName, dst); err != nil {
+		return false, err
+	}
+	return true, nil
 }

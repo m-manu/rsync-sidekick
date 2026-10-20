@@ -43,10 +43,15 @@ inside **Docker containers**. 🙂
 
 ## How to install?
 
-1. Install Go **1.26** or later:
-    * On a Mac: `brew install go`
-    * On Ubuntu: `snap install go`
-    * For anything else: [Go downloads page](https://go.dev/dl/)
+### On MacOS
+
+```bash
+brew install m-manu/tap/rsync-sidekick
+```
+
+### On other OSes (or if you don't have Homebrew on your Mac)
+
+1. [Install Go](https://go.dev/doc/install) **1.26** or later
 2. Run this command:
    ```bash
    go install github.com/m-manu/rsync-sidekick/v2@latest
@@ -102,9 +107,11 @@ flags: (all optional)
   -a, --archive-path stringArray          additional directory on the destination side to scan for copy sources
                                           (can be specified multiple times; files are copied from archive, never moved;
                                           implies --copy-duplicates; shell wildcards like '/snapshots/*' are resolved on the
-                                          destination host, matches in lexical order - quote them so the local shell leaves them alone)
+                                          destination host, matches in lexical order - quote them so the local shell leaves them alone;
+                                          copies are not performed over SFTP)
   -c, --copy-duplicates                   copy files locally at destination when content already exists there
-                                          (avoids re-transfer of duplicate-content files via rsync)
+                                          (avoids re-transfer of duplicate-content files via rsync;
+                                          works locally and with remote-exec, not with SFTP)
       --copy-list string                  write the files rsync still has to transfer to this file, one per distinct content
                                           (for rsync --files-from; duplicates at source go to --plan-out instead; remote-exec with remote source only)
       --digest-cache string[="on"]        reuse digests from earlier runs: --digest-cache (both sides), --digest-cache=src,
@@ -167,7 +174,9 @@ a remote path in the form `user@host:/path`.
 for fast remote scanning and action execution. This is the recommended setup.
 
 **SFTP fallback**: If `rsync-sidekick` is not available on the remote host, it falls back to SFTP mode automatically.
-You can also force SFTP mode with `--sftp`.
+You can also force SFTP mode with `--sftp`. Copies from `--copy-duplicates` and `--archive-path` are not performed in
+SFTP mode. Moves and timestamp updates still run, and `rsync` transfers the files that were not copied. Remote-exec
+does those copies on the destination host. `--shellscript` still writes the copy commands for you to run there.
 
 ```bash
 # Use a specific SSH key:
@@ -186,7 +195,7 @@ By default, `rsync-sidekick` only **moves** files at the destination. If the sam
 source but only one of those paths exists at the destination, the extra copies are left for `rsync` to transfer.
 
 With `--copy-duplicates` (or `-c`), `rsync-sidekick` will **copy** the file locally at the destination instead, saving
-network transfer time:
+network transfer time. The copy runs locally and in remote-exec mode. It is not performed over SFTP.
 
 ```bash
 # Source has photo.jpg at paths A, B, C (same content). Destination only has it at A.
@@ -198,8 +207,8 @@ rsync-sidekick -c /Users/manu/Photos/ /Volumes/Portable/Photos/
 ### Using archive directories (`--archive-path`)
 
 The `--archive-path` (or `-a`) flag lets you specify additional directories **on the destination side** that are scanned
-for content matches. Files are only **copied** from archives, never moved. This is useful when you have an old
-backup or archive that might contain files matching orphans at the source.
+for content matches. Files are only **copied** from archives, never moved. Over SFTP those copies are not performed.
+This is useful when you have an old backup or archive that might contain files matching orphans at the source.
 
 Archive paths imply `--copy-duplicates` behavior automatically.
 

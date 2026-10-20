@@ -621,6 +621,7 @@ func matchChunk(chunk []string, pendingForChunk map[string][]string,
 				AbsDestPath:   absDest,
 				SourceModTime: time.Unix(sourceFiles[orphan].ModifiedTimestamp, 0),
 				UseReflink:    useReflink,
+				FS:            destFS,
 			}
 			if !uniqueness.Contains(copyAction.Uniqueness()) {
 				if err := emit(copyAction, onAction, actions); err != nil {
