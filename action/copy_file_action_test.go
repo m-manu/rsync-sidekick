@@ -25,7 +25,7 @@ func TestCopyFileAction_StringNamesReflink(t *testing.T) {
 }
 
 // onPlatform makes Perform take the path of another platform, with clone standing in for
-// cp -c.
+// clonefile.
 func onPlatform(t *testing.T, goos string, clone func(src, dst string) error) {
 	previousPlatform, previousClone := platform, cloneFile
 	platform, cloneFile = goos, clone
@@ -63,14 +63,38 @@ func TestCopyFileAction_ReflinkFallsBackToCopyWhenMacOSCannotClone(t *testing.T)
 		return errors.New("clonefile: Operation not supported")
 	})
 	performReflink(t)
-	assert.Equal(t, 1, cloned, "cp -c is tried first")
+	assert.Equal(t, 1, cloned, "clonefile is tried first")
+}
+
+func TestCopyFileAction_DarwinClonefileReflink(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("clonefile is only used on macOS")
+	}
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "src.bin"), filepath.Join(dir, "dst.bin")
+	require.NoError(t, os.WriteFile(src, []byte("content"), 0o640))
+	mtime := time.Unix(1_700_000_000, 0)
+	fallbacksBefore := ReflinkFallbacks()
+
+	err := CopyFileAction{AbsSourcePath: src, AbsDestPath: dst, SourceModTime: mtime, UseReflink: true}.Perform()
+
+	require.NoError(t, err)
+	data, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	assert.Equal(t, "content", string(data))
+	info, err := os.Stat(dst)
+	require.NoError(t, err)
+	assert.Equal(t, mtime.Unix(), info.ModTime().Unix())
+	assert.Equal(t, os.FileMode(0o640), info.Mode().Perm())
+	assert.Equal(t, fallbacksBefore, ReflinkFallbacks(), "clonefile succeeded, so this is not a full-copy fallback")
+	assertNoSidekickTemps(t, dir)
 }
 
 func TestCopyFileAction_ReflinkIsAPlainCopyWithoutCloneSupport(t *testing.T) {
 	for _, goos := range []string{"windows", "freebsd"} {
 		t.Run(goos, func(t *testing.T) {
 			onPlatform(t, goos, func(src, dst string) error {
-				t.Errorf("cp -c must not be called on %s", goos)
+				t.Errorf("clonefile must not be called on %s", goos)
 				return nil
 			})
 			performReflink(t)
@@ -139,6 +163,8 @@ func TestCopyFileAction_ReflinkPublishesATempAndRefusesExistingDest(t *testing.T
 
 	onPlatform(t, "darwin", func(_, got string) error {
 		assert.NotEqual(t, dst, got, "the clone must not open the final path")
+		_, statErr := os.Lstat(got)
+		assert.ErrorIs(t, statErr, os.ErrNotExist, "clonefile needs the temporary name to be absent")
 		return os.WriteFile(got, []byte("cloned"), 0o640)
 	})
 	err := CopyFileAction{AbsSourcePath: src, AbsDestPath: dst, SourceModTime: time.Unix(1_700_000_000, 0), UseReflink: true}.Perform()

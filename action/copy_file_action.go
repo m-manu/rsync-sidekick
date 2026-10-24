@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"time"
@@ -102,16 +101,11 @@ func (a CopyFileAction) String() string {
 // platform and cloneFile are variables so tests can take the other platforms' paths.
 var (
 	platform  = runtime.GOOS
-	cloneFile = func(src, dst string) error {
-		if out, err := exec.Command("cp", "-c", "-p", src, dst).CombinedOutput(); err != nil {
-			return fmt.Errorf("%w: %s", err, out)
-		}
-		return nil
-	}
+	cloneFile = defaultCloneFile
 )
 
 // reflinkOrCopy reflinks src to dst where the filesystem supports it and copies it
-// otherwise: FICLONE on Linux, clonefile (cp -c) on macOS, a plain copy everywhere else.
+// otherwise: FICLONE on Linux, clonefile on macOS, a plain copy everywhere else.
 // cloned tells whether it became a reflink. The destination path is never opened until
 // the bytes are complete, and an existing destination is left alone.
 func reflinkOrCopy(src, dst string, mode os.FileMode) (cloned bool, err error) {
@@ -128,8 +122,10 @@ func reflinkOrCopy(src, dst string, mode os.FileMode) (cloned bool, err error) {
 	return false, regularCopyWithMode(src, dst, mode)
 }
 
-// cloneIntoTemp points cp -c at a temporary file and renames that onto dst. cp -c on the
-// final path would truncate dst before the clone finished.
+// cloneIntoTemp clones src to a temporary name beside dst and renames that onto dst.
+// clonefile refuses an existing destination, so the empty placeholder from CreateTemp
+// is removed before the clone. The final path is never opened, which keeps an existing
+// dst intact.
 func cloneIntoTemp(src, dst string) error {
 	if err := errIfDestExists(dst); err != nil {
 		return err
@@ -142,6 +138,10 @@ func cloneIntoTemp(src, dst string) error {
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
 		return fmt.Errorf("failed to close temporary file %q: %w", tmpName, err)
+	}
+	// The placeholder exists only to reserve a unique name. clonefile cannot replace it.
+	if err := os.Remove(tmpName); err != nil {
+		return fmt.Errorf("failed to remove temporary file %q: %w", tmpName, err)
 	}
 	if err := cloneFile(src, tmpName); err != nil {
 		os.Remove(tmpName)
