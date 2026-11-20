@@ -1,7 +1,6 @@
 package fs
 
 import (
-	"fmt"
 	"io/fs"
 	"path"
 	"strings"
@@ -22,54 +21,59 @@ func NewSFTPFS(client *sftp.Client) *SFTPFS {
 	return &SFTPFS{client: client}
 }
 
+// Walk reads DefaultWalkThreads directories at once (--walk-threads). Over SFTP every
+// directory costs several round trips (open, read until EOF, close), so reading one
+// directory after the other makes a walk over a high-latency link take as many round
+// trips as there are directories; the client multiplexes concurrent requests over the
+// one connection.
 func (s *SFTPFS) Walk(dirPath string, excludedNames map[string]struct{}, counter *int32) ([]DirEntry, error) {
-	entries := make([]DirEntry, 0, 10_000)
-	walker := s.client.Walk(dirPath)
-	for walker.Step() {
-		if walker.Err() != nil {
-			fmte.PrintfErr("skipping \"%s\": %+v\n", walker.Path(), walker.Err())
+	return walkParallel(sftpDir{absPath: path.Clean(dirPath)}, DefaultWalkThreads,
+		func(dir sftpDir) ([]DirEntry, []sftpDir) {
+			return s.readDir(dir, excludedNames, counter)
+		}, nil), nil
+}
+
+// sftpDir is a directory for SFTPFS.readDir.
+type sftpDir struct{ absPath, relativePath string }
+
+// readDir reads one remote directory: its entries, and the subdirectories still to walk.
+// READDIR returns lstat attributes, so no request per entry is needed.
+func (s *SFTPFS) readDir(dir sftpDir, excludedNames map[string]struct{}, counter *int32,
+) (entries []DirEntry, subdirs []sftpDir) {
+	children, err := s.client.ReadDir(dir.absPath)
+	if err != nil {
+		fmte.PrintfErr("skipping \"%s\": %+v\n", dir.absPath, err)
+	}
+	for _, info := range children {
+		name := info.Name()
+		if _, excluded := excludedNames[name]; excluded {
 			continue
 		}
-		info := walker.Stat()
-		baseName := path.Base(walker.Path())
-
-		if _, excluded := excludedNames[baseName]; excluded {
-			if info.IsDir() {
-				walker.SkipDir()
-			}
-			continue
-		}
-
 		// Ignore dot files (Mac)
-		if strings.HasPrefix(baseName, "._") {
+		if strings.HasPrefix(name, "._") {
 			continue
 		}
-
-		if info.Mode().IsRegular() || info.IsDir() {
-			rel, err := relPath(dirPath, walker.Path())
-			if err != nil {
-				fmte.PrintfErr("couldn't comprehend path \"%s\": %+v\n", walker.Path(), err)
-				continue
-			}
-			// Skip the root directory itself
-			if rel == "." {
-				continue
-			}
-			if SkipBySize(info.IsDir(), info.Size()) {
-				continue
-			}
-			entries = append(entries, DirEntry{
-				RelativePath: rel,
-				Size:         info.Size(),
-				ModTime:      info.ModTime().Unix(),
-				IsDir:        info.IsDir(),
-			})
-			if counter != nil && info.Mode().IsRegular() {
-				atomic.AddInt32(counter, 1)
-			}
+		if !info.Mode().IsRegular() && !info.IsDir() {
+			continue
+		}
+		relativePath := path.Join(dir.relativePath, name)
+		if info.IsDir() {
+			subdirs = append(subdirs, sftpDir{absPath: path.Join(dir.absPath, name), relativePath: relativePath})
+		}
+		if SkipBySize(info.IsDir(), info.Size()) {
+			continue
+		}
+		entries = append(entries, DirEntry{
+			RelativePath: relativePath,
+			Size:         info.Size(),
+			ModTime:      info.ModTime().Unix(),
+			IsDir:        info.IsDir(),
+		})
+		if counter != nil && info.Mode().IsRegular() {
+			atomic.AddInt32(counter, 1)
 		}
 	}
-	return entries, nil
+	return entries, subdirs
 }
 
 func (s *SFTPFS) Lstat(p string) (FileInfo, error) {
@@ -174,20 +178,4 @@ func sftpFileInfo(info fs.FileInfo) FileInfo {
 		ModTime: info.ModTime(),
 		IsDir:   info.IsDir(),
 	}
-}
-
-// relPath computes a relative path from base to target using POSIX paths.
-func relPath(base, target string) (string, error) {
-	// Clean both
-	base = path.Clean(base)
-	target = path.Clean(target)
-	if !strings.HasPrefix(target, base) {
-		return "", fmt.Errorf("%q is not under %q", target, base)
-	}
-	rel := strings.TrimPrefix(target, base)
-	rel = strings.TrimPrefix(rel, "/")
-	if rel == "" {
-		return ".", nil
-	}
-	return rel, nil
 }
