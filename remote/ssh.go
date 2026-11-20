@@ -5,10 +5,24 @@ import (
 	"os/exec"
 )
 
+// ExtraOptions are passed to every ssh invocation as "-o option" (--ssh-option), e.g.
+// "UserKnownHostsFile=/path/known_hosts" when the defaults in ~/.ssh don't fit.
+var ExtraOptions []string
+
+// optionArgs returns ExtraOptions as ssh command-line arguments.
+func optionArgs() []string {
+	args := make([]string, 0, 2*len(ExtraOptions))
+	for _, option := range ExtraOptions {
+		args = append(args, "-o", option)
+	}
+	return args
+}
+
 // SSHArgs builds the command-line arguments for the system ssh binary
 // based on the given Location and optional explicit key path.
 func SSHArgs(loc Location, explicitKeyPath string) []string {
 	args := make([]string, 0, 8)
+	args = append(args, optionArgs()...)
 	if loc.User != "" {
 		args = append(args, "-l", loc.User)
 	}
@@ -34,6 +48,7 @@ func SSHCommand(loc Location, explicitKeyPath string, remoteCmd string) *exec.Cm
 // SSHSubsystemCommand creates an exec.Cmd that invokes an SSH subsystem (e.g. sftp).
 func SSHSubsystemCommand(loc Location, explicitKeyPath string, subsystem string) *exec.Cmd {
 	args := make([]string, 0, 8)
+	args = append(args, optionArgs()...)
 	if loc.User != "" {
 		args = append(args, "-l", loc.User)
 	}
