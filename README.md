@@ -179,6 +179,8 @@ means this copy is the one to upgrade. A different patch version is fine.
 You can also force SFTP mode with `--sftp`. Copies from `--copy-duplicates` and `--archive-path` are not performed in
 SFTP mode. Moves and timestamp updates still run, and `rsync` transfers the files that were not copied. Remote-exec
 does those copies on the destination host. `--shellscript` still writes the copy commands for you to run there.
+Over SFTP every directory costs a few round trips, so the remote scan reads `--walk-threads` directories at once; on a
+high-latency link a higher value (e.g. `--walk-threads 16`) shortens it further.
 
 ```bash
 # Use a specific SSH key:

@@ -37,7 +37,8 @@ var DefaultArchiveOneFileSystem bool
 // they report what will actually be worked on.
 var DefaultMinSize int64
 
-// DefaultWalkThreads is how many directories a local walk reads at once (--walk-threads).
+// DefaultWalkThreads is how many directories a walk reads at once, locally and over SFTP
+// (--walk-threads).
 var DefaultWalkThreads = 4
 
 // SkipBySize reports whether a regular file of this size is below DefaultMinSize.
