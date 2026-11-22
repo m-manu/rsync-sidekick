@@ -251,7 +251,7 @@ func TestAgentVersionRequest_AnsweredByHandler(t *testing.T) {
 	request := envelopeLine(t, MsgVersionRequest, VersionRequest{})
 	quit := envelopeLine(t, MsgQuit, struct{}{})
 
-	stdout := runAgentLoop(t, "v9.9.9", request+"\n"+quit+"\n")
+	stdout := runAgentLoop(t, request+"\n"+quit+"\n")
 
 	var env Envelope
 	require.NoError(t, json.Unmarshal([]byte(firstLine(stdout)), &env))
@@ -259,8 +259,8 @@ func TestAgentVersionRequest_AnsweredByHandler(t *testing.T) {
 
 	var resp VersionResponse
 	require.NoError(t, json.Unmarshal(env.Payload, &resp))
-	assert.Equal(t, "v9.9.9", resp.Version,
-		"agent must report the version it was started with")
+	assert.Equal(t, Version(), resp.Version,
+		"agent must report the release version")
 }
 
 func TestAgentLoop_EchoesRequestIDs(t *testing.T) {
@@ -270,7 +270,7 @@ func TestAgentLoop_EchoesRequestIDs(t *testing.T) {
 	second := envelopeLineWithID(t, 9, MsgVersionRequest, VersionRequest{})
 	quit := envelopeLine(t, MsgQuit, struct{}{})
 
-	stdout := runAgentLoop(t, "v2.3.0", first+"\n"+second+"\n"+quit+"\n")
+	stdout := runAgentLoop(t, first+"\n"+second+"\n"+quit+"\n")
 
 	ids := map[uint64]bool{}
 	decoder := json.NewDecoder(strings.NewReader(stdout))
@@ -293,7 +293,7 @@ func TestAgentLoop_HandlesWalkAndDigestConcurrently(t *testing.T) {
 	})
 	quit := envelopeLine(t, MsgQuit, struct{}{})
 
-	stdout := runAgentLoop(t, "v2.3.0", walkReq+"\n"+digestReq+"\n"+quit+"\n")
+	stdout := runAgentLoop(t, walkReq+"\n"+digestReq+"\n"+quit+"\n")
 
 	var sawWalk, sawDigest bool
 	decoder := json.NewDecoder(strings.NewReader(stdout))
@@ -337,10 +337,10 @@ func envelopeLine(t *testing.T, msgType string, payload any) string {
 }
 
 // runAgentLoop feeds input to the agent dispatch loop and returns everything it wrote.
-func runAgentLoop(t *testing.T, agentVersion string, input string) string {
+func runAgentLoop(t *testing.T, input string) string {
 	t.Helper()
 	var out bytes.Buffer
-	require.NoError(t, runAgentOn(strings.NewReader(input), &out, agentVersion))
+	require.NoError(t, runAgentOn(strings.NewReader(input), &out))
 	return out.String()
 }
 

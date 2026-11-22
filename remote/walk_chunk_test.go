@@ -24,7 +24,7 @@ func newRealAgentClient(t *testing.T) *AgentClient {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = runAgentOn(requestsR, repliesW, "test")
+		_ = runAgentOn(requestsR, repliesW)
 		_ = repliesW.Close()
 	}()
 	client := newAgentClient(requestsW, repliesR)

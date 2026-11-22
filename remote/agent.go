@@ -26,8 +26,8 @@ const defaultDigestProgressInterval = 2 * time.Second
 // RunAgent reads JSON-line requests from stdin, executes them locally,
 // and writes JSON-line responses to stdout. This is invoked on the remote
 // side via "rsync-sidekick --agent".
-func RunAgent(agentVersion string) error {
-	return runAgentOn(os.Stdin, os.Stdout, agentVersion)
+func RunAgent() error {
+	return runAgentOn(os.Stdin, os.Stdout)
 }
 
 // runAgentOn is RunAgent against explicit streams, which is what makes the dispatch
@@ -43,7 +43,7 @@ func RunAgent(agentVersion string) error {
 //   - perform requests run in a single queue, strictly in arrival order, because a copy
 //     can depend on a directory an earlier action created;
 //   - version requests answer immediately.
-func runAgentOn(in io.Reader, out io.Writer, agentVersion string) error {
+func runAgentOn(in io.Reader, out io.Writer) error {
 	reader := bufio.NewReader(in)
 	writer := newSyncWriter(out)
 
@@ -117,7 +117,7 @@ func runAgentOn(in io.Reader, out io.Writer, agentVersion string) error {
 
 		case MsgVersionRequest:
 			writeResponse(writer.forRequest(env.ID), MsgVersionResponse,
-				VersionResponse{Version: agentVersion})
+				VersionResponse{Version: Version()})
 
 		case MsgGlobRequest:
 			handleGlob(writer.forRequest(env.ID), env.Payload)

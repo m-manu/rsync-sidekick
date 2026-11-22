@@ -21,7 +21,7 @@ func TestAgentGlobRequest_AnswersMatchingDirectoriesPerPattern(t *testing.T) {
 	}})
 	quit := envelopeLine(t, MsgQuit, struct{}{})
 
-	stdout := runAgentLoop(t, "v2.9.0", request+"\n"+quit+"\n")
+	stdout := runAgentLoop(t, request+"\n"+quit+"\n")
 
 	var env Envelope
 	require.NoError(t, json.Unmarshal([]byte(firstLine(stdout)), &env))

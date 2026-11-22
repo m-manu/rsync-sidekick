@@ -26,7 +26,7 @@ const (
 // answer with MsgError, which callers treat as "alive, but ask over a separate ssh call".
 type VersionRequest struct{}
 
-// VersionResponse carries the agent's application version, e.g. "v2.1.5".
+// VersionResponse carries the agent's application version, e.g. "v2.10.0".
 type VersionResponse struct {
 	Version string `json:"version"`
 }

@@ -19,16 +19,6 @@ import (
 	flag "github.com/spf13/pflag"
 )
 
-const (
-	applicationMajorVersion = 2
-	applicationMinorVersion = 2
-	applicationPatchVersion = 0
-)
-
-var applicationVersion = fmt.Sprintf("v%d.%d.%d",
-	applicationMajorVersion, applicationMinorVersion, applicationPatchVersion,
-)
-
 // Constants indicating return codes of this tool, when run from command line
 const (
 	exitCodeSuccess = iota
@@ -191,7 +181,7 @@ func setupHelpOpt() {
 }
 
 func setupShowVersion() {
-	showVersionPtr := flag.Bool("version", false, "show application version ("+applicationVersion+") and exit")
+	showVersionPtr := flag.Bool("version", false, "show version and exit")
 	flags.showVersion = func() bool {
 		return *showVersionPtr
 	}
@@ -616,7 +606,7 @@ func main() {
 
 	// Agent mode: run as remote agent (reads from stdin, writes to stdout)
 	if flags.isAgent() {
-		if err := remote.RunAgent(applicationVersion); err != nil {
+		if err := remote.RunAgent(); err != nil {
 			fmte.PrintfErr("agent error: %+v\n", err)
 			os.Exit(exitCodeSyncError)
 		}
@@ -632,7 +622,7 @@ func main() {
 		showHelpAndExit()
 	}
 	if flags.showVersion() {
-		fmt.Println(applicationVersion)
+		fmt.Println(remote.Version())
 		os.Exit(exitCodeSuccess)
 	}
 	if planPath := flags.applyPlanPath(); planPath != "" {

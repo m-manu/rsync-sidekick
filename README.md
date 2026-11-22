@@ -156,7 +156,7 @@ flags: (all optional)
   -i, --ssh-key string                    path to SSH private key for remote connections
   -d, --sync-dir-timestamps               also propagate directory timestamps from source to destination
   -v, --verbose                           logs every single action performed, plus extra information (caution: makes it slow!)
-      --version                           show application version and exit
+      --version                           show version and exit
       --walk-threads int                  directories read at once per scan (local and remote) - several outstanding
                                           requests keep all disks of an array busy; 1 reads one directory after the other (default 4)
 
@@ -170,8 +170,10 @@ More details here: https://github.com/m-manu/rsync-sidekick
 `rsync-sidekick` supports syncing to/from remote hosts via SSH. Either the source or the destination (not both!) can be
 a remote path in the form `user@host:/path`.
 
-**Remote-execution mode** (default): If `rsync-sidekick` is installed on the remote host, it will be used as an agent
-for fast remote scanning and action execution. This is the recommended setup.
+**Remote-execution mode** (default): If `rsync-sidekick` is installed on the remote host at the same major and minor
+version, it is used as an agent for fast remote scanning and action execution. This is the recommended setup. A
+different major or minor version stops the run: an older agent has to be upgraded on the server, and a newer agent
+means this copy is the one to upgrade. A different patch version is fine.
 
 **SFTP fallback**: If `rsync-sidekick` is not available on the remote host, it falls back to SFTP mode automatically.
 You can also force SFTP mode with `--sftp`. Copies from `--copy-duplicates` and `--archive-path` are not performed in
@@ -227,8 +229,9 @@ rsync-sidekick -a '/mnt/raid/.snapshots/*/*' /local/source/ /mnt/raid/data/
 ```
 
 Wildcards (`*`, `?`, `[...]`) are resolved on the destination host — through the remote agent when the destination is
-remote, which needs an agent of v2.9.0 or later (an older one makes the run stop with an error). Matches keep lexical
-order, only directories count, and a pattern matching nothing stops the run like an unreadable archive path does.
+remote. The agent must be the same major and minor version as this `rsync-sidekick`; a different one stops the run
+with an error before any work starts. Matches keep lexical order, only directories count, and a pattern matching
+nothing stops the run like an unreadable archive path does.
 
 ### Reflink copies (`--reflink`)
 

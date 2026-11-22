@@ -4,49 +4,11 @@ import (
 	"context"
 	"errors"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/m-manu/rsync-sidekick/v2/fmte"
 )
-
-// minAgentVersion is the minimum remote rsync-sidekick version required for agent mode.
-var minAgentVersion = [3]int{1, 10, 6}
-
-// minConcurrentAgentVersion is the first version whose agent echoes request IDs and reads
-// while it works. Only against such an agent may the client keep several requests in
-// flight; older ones get one request at a time, exactly as before.
-var minConcurrentAgentVersion = [3]int{2, 3, 0}
-
-// ProbeRemoteAgent checks whether rsync-sidekick is available on the remote host
-// and whether its version is at least minAgentVersion.
-// Returns true if the agent can be used (remote-execution mode).
-func ProbeRemoteAgent(loc Location, explicitKeyPath string, sidekickPath string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Build SSH args and run with timeout context
-	args := SSHArgs(loc, explicitKeyPath)
-	args = append(args, sidekickPath+" --version")
-	cmd := exec.CommandContext(ctx, "ssh", args...)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fmte.PrintfV("Remote agent probe failed: %v\n", err)
-		return false
-	}
-	version := strings.TrimSpace(string(output))
-	fmte.Printf("Remote rsync-sidekick detected: %s\n", version)
-
-	if !isVersionAtLeast(version, minAgentVersion) {
-		fmte.Printf("Remote version %s is too old for agent mode (need >= v%d.%d.%d), falling back to SFTP\n",
-			version, minAgentVersion[0], minAgentVersion[1], minAgentVersion[2])
-		return false
-	}
-
-	return true
-}
 
 // SetupRemote determines the mode (agent or SFTP) and optionally starts an agent.
 // Returns either an AgentClient (remote-execution) or nil (use SFTP).
@@ -55,6 +17,9 @@ func ProbeRemoteAgent(loc Location, explicitKeyPath string, sidekickPath string)
 // so a run needs one ssh connection instead of two — and with password authentication,
 // one prompt instead of two. Agents too old for the version request keep the previous
 // behaviour: their version is fetched over a second connection.
+//
+// The same major and minor version is required. A mismatch stops the run. A missing
+// binary, a failed ssh call, or --sftp still falls back to SFTP.
 func SetupRemote(loc Location, explicitKeyPath string, sidekickPath string, forceSFTP bool) (*AgentClient, error) {
 	if forceSFTP {
 		fmte.Printf("SFTP mode forced via --sftp flag\n")
@@ -68,29 +33,17 @@ func SetupRemote(loc Location, explicitKeyPath string, sidekickPath string, forc
 	}
 
 	version, versionErr := client.Version()
+	var probed string
+	var probeErr error
 	switch {
 	case versionErr == nil:
 		fmte.Printf("Remote rsync-sidekick detected: %s\n", version)
-		if !isVersionAtLeast(version, minAgentVersion) {
-			fmte.Printf("Remote version %s is too old for agent mode (need >= v%d.%d.%d), falling back to SFTP\n",
-				version, minAgentVersion[0], minAgentVersion[1], minAgentVersion[2])
-			_ = client.Close()
-			return nil, nil
-		}
-		if isVersionAtLeast(version, minConcurrentAgentVersion) {
-			client.SetConcurrent(true)
-			fmte.PrintfV("Remote agent supports concurrent requests\n")
-		} else {
-			fmte.PrintfV("Remote agent handles one request at a time (needs >= v%d.%d.%d)\n",
-				minConcurrentAgentVersion[0], minConcurrentAgentVersion[1], minConcurrentAgentVersion[2])
-		}
 	case errors.Is(versionErr, ErrVersionRequestUnsupported):
-		// The agent is running and speaks the protocol, it just predates this message.
-		// Keep the connection and spend a second one on "--version", as before.
-		if !ProbeRemoteAgent(loc, explicitKeyPath, sidekickPath) {
-			_ = client.Close()
-			fmte.Printf("rsync-sidekick on remote is too old, falling back to SFTP mode\n")
-			return nil, nil
+		probed, probeErr = probeRemoteVersion(loc, explicitKeyPath, sidekickPath)
+		if probeErr != nil {
+			fmte.PrintfV("Remote agent probe failed: %v\n", probeErr)
+		} else {
+			fmte.Printf("Remote rsync-sidekick detected: %s\n", probed)
 		}
 	default:
 		// No usable agent: the command is missing, or ssh failed.
@@ -100,28 +53,37 @@ func SetupRemote(loc Location, explicitKeyPath string, sidekickPath string, forc
 		return nil, nil
 	}
 
-	fmte.Printf("Using remote-execution mode\n")
-	return client, nil
+	class, classErr := classifyAgentHandshake(version, versionErr, probed, probeErr)
+	switch class {
+	case handshakeStop:
+		_ = client.Close()
+		return nil, classErr
+	case handshakeSFTP:
+		_ = client.Close()
+		fmte.Printf("rsync-sidekick on remote did not report a usable version, falling back to SFTP mode\n")
+		return nil, nil
+	default:
+		// This release's agent echoes request IDs, so overlapping requests are safe.
+		client.SetConcurrent(true)
+		fmte.PrintfV("Remote agent supports concurrent requests\n")
+		fmte.Printf("Using remote-execution mode\n")
+		return client, nil
+	}
 }
 
-// isVersionAtLeast parses a version string like "v1.10.0" and checks if it's >= min.
-func isVersionAtLeast(version string, min [3]int) bool {
-	version = strings.TrimPrefix(version, "v")
-	parts := strings.SplitN(version, ".", 3)
-	if len(parts) != 3 {
-		return false
+// probeRemoteVersion runs "rsync-sidekick --version" on the remote host. Agents that
+// predate the version request are identified this way.
+func probeRemoteVersion(loc Location, explicitKeyPath string, sidekickPath string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	args := SSHArgs(loc, explicitKeyPath)
+	args = append(args, sidekickPath+" --version")
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", err
 	}
-	for i := 0; i < 3; i++ {
-		n, err := strconv.Atoi(parts[i])
-		if err != nil {
-			return false
-		}
-		if n > min[i] {
-			return true
-		}
-		if n < min[i] {
-			return false
-		}
-	}
-	return true // equal
+	return strings.TrimSpace(string(output)), nil
 }
