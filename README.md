@@ -154,6 +154,7 @@ flags: (all optional)
                                           (this flag cannot be specified if --shellscript option is specified)
       --sidekick-path string              remote rsync-sidekick command (e.g. "sudo rsync-sidekick") (default "rsync-sidekick")
   -i, --ssh-key string                    path to SSH private key for remote connections
+      --ssh-option stringArray            option passed to ssh as -o, e.g. 'UserKnownHostsFile=/path/known_hosts' (can be specified multiple times)
   -d, --sync-dir-timestamps               also propagate directory timestamps from source to destination
   -v, --verbose                           logs every single action performed, plus extra information (caution: makes it slow!)
       --version                           show version and exit
@@ -183,6 +184,10 @@ does those copies on the destination host. `--shellscript` still writes the copy
 ```bash
 # Use a specific SSH key:
 rsync-sidekick -i ~/.ssh/my_key /Users/manu/Photos/ user@server:/backup/Photos/
+
+# Pass options to ssh, e.g. a known_hosts file outside ~/.ssh (for scheduled jobs):
+rsync-sidekick --ssh-option UserKnownHostsFile=/etc/backup/known_hosts --ssh-option StrictHostKeyChecking=yes \
+  /local/path/ user@server:/remote/path/
 
 # Specify the remote rsync-sidekick path:
 rsync-sidekick --sidekick-path /usr/local/bin/rsync-sidekick /local/path/ user@server:/remote/path/

@@ -49,6 +49,7 @@ var flags struct {
 	isDryRun             func() bool
 	progressFrequency    func() time.Duration
 	sshKeyPath           func() string
+	sshOptions           func() []string
 	sidekickPath         func() string
 	isSFTP               func() bool
 	isAgent              func() bool
@@ -240,6 +241,14 @@ func setupSSHKeyOpt() {
 	sshKeyPtr := flag.StringP("ssh-key", "i", "", "path to SSH private key for remote connections")
 	flags.sshKeyPath = func() string {
 		return *sshKeyPtr
+	}
+}
+
+func setupSSHOptionOpt() {
+	sshOptionsPtr := flag.StringArray("ssh-option", nil,
+		"option passed to ssh as -o, e.g. 'UserKnownHostsFile=/path/known_hosts' (can be specified multiple times)")
+	flags.sshOptions = func() []string {
+		return *sshOptionsPtr
 	}
 }
 
@@ -582,6 +591,7 @@ func setupFlags() {
 	setupShowVersion()
 	setupDryRunOpt()
 	setupSSHKeyOpt()
+	setupSSHOptionOpt()
 	setupSidekickPathOpt()
 	setupSFTPOpt()
 	setupAgentOpt()
@@ -693,6 +703,7 @@ func main() {
 		fmte.Printf("Ignoring files smaller than %s\n", bytesutil.BinaryFormat(minSize))
 	}
 	rsfs.DefaultWalkThreads = flags.walkThreads()
+	remote.ExtraOptions = flags.sshOptions()
 	if size := flags.hashMinSize(); size > 0 {
 		hashMinSize = size
 		fmte.Printf("Not hashing files smaller than %s\n", bytesutil.BinaryFormat(size))
